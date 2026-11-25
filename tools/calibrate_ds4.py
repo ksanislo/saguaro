@@ -19,7 +19,7 @@ sustained speed):
 The engine reads a copy of this PC's expert profile and writes back to the copy only: the calibration's answers do not
 lead the next start's placement.
 
-    python tools/calibrate_ds4.py maya-ds4.json      # measure and print; ./saguaro.sh --speed-calibration applies it
+    python tools/calibrate_ds4.py saguaro-ds4.json      # measure and print; ./saguaro.sh --speed-calibration applies it
 """
 from __future__ import annotations
 
@@ -125,7 +125,7 @@ def run(cfg: dict, say=print, start_engine=None) -> dict:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit("usage: calibrate_ds4.py <maya-ds4.json>")
+        sys.exit("usage: calibrate_ds4.py <saguaro-ds4.json> (the older maya-ds4.json works too)")
     cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
     if not has_drafter(cfg):
         sys.exit("this config's pack has no DSpark drafter")

@@ -248,7 +248,7 @@ class Config(unittest.TestCase):
 
     def test_fresh(self):
         p, c = self.write(args())
-        self.assertEqual(p.name, "maya-ds4.json")
+        self.assertEqual(p.name, "saguaro-ds4.json")
         self.assertEqual(c["args"], ["--pack", str(Path("/m/DS/maya-ds4")), "--max-context", "131072", "--tp", "2",
                                      "--reserve-mib", "3072"])   # (every vendor now: no display facts here, so the
                                                                  #  desktop's room: v1.2.1-A)
@@ -258,7 +258,7 @@ class Config(unittest.TestCase):
         self.assertEqual(c["gpu"], [0, 1, 2])
         self.assertEqual(c["installer"]["family"], "deepseek")
         self.assertEqual(maya.config_family(c), "deepseek")
-        self.assertIn("saguaro.py", (self.root / ("run-maya-ds4" + (".bat" if maya.WIN else ".sh"))).read_text())
+        self.assertIn("saguaro.py", (self.root / ("run-saguaro-ds4" + (".bat" if maya.WIN else ".sh"))).read_text())
 
     def test_exl3_pictures_on_v100(self):
         """The EXL3 quant's vision tower is the GGUF's (the same BF16 cuBLAS GEMMs): pictures on V100s too, and a setup
@@ -299,7 +299,7 @@ class Config(unittest.TestCase):
         _, c = self.write(args())
         self.assertEqual(c["args"][-6:], ["--tp", "8", "--reserve-mib", "3072", "--cpu-threads", "33"])
         self.tuned(threads=None)                       # (the engine's own threads: no flag)
-        (self.root / "maya-ds4.json").unlink()         # (a fresh setup: no config before)
+        (self.root / "saguaro-ds4.json").unlink()      # (a fresh setup: no config before)
         _, c = self.write(args())
         self.assertNotIn("--cpu-threads", c["args"])
 
@@ -349,7 +349,8 @@ class Config(unittest.TestCase):
         may run (a connected or unknown display), 512 on a card no display runs on, 1024 on a Linux AMD APU - and the
         user's --vram-reserve-mib, or the config before's own --reserve-mib, come first."""
         def reserve(gpu, old=None, backend="hip", **kw):
-            for name in ("maya-ds4-hip.json", "maya-ds4.json"):      # (a fresh setup, or the one before: `old`)
+            for name in ("maya-ds4-hip.json", "maya-ds4.json",       # (a fresh setup, or the one before: `old`
+                              "saguaro-ds4-hip.json", "saguaro-ds4.json"):   #  - either family may be there)
                 (self.root / name).unlink(missing_ok=True)
             if old is not None:
                 (self.root / ("maya-ds4-hip.json" if backend == "hip" else "maya-ds4.json")).write_text(
@@ -382,7 +383,8 @@ class Config(unittest.TestCase):
 
     def test_hip_reserve_marked_as_the_setups(self):   # (#1156: the engine keeps the default rule beside the setup's own)
         def env(old=None, **kw):
-            (self.root / "maya-ds4-hip.json").unlink(missing_ok=True)
+            for n in ("maya-ds4-hip.json", "saguaro-ds4-hip.json"):   # (either family: the one before, or fresh)
+                (self.root / n).unlink(missing_ok=True)
             if old is not None:
                 (self.root / "maya-ds4-hip.json").write_text(json.dumps(old))
             pc = {"backend": "hip", "gpus": [{"arch": "gfx1100", "name": "Radeon RX 7900 XTX", "vram_gb": 24, "index": 0}]}

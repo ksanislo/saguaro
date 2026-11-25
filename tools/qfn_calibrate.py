@@ -15,7 +15,7 @@ the same harness (calibrate_draft.py: the same warm-up and questions, the sustai
   - the engine reads a copy of this PC's expert profile and writes back to the copy only: the calibration's
     answers do not lead the next start's placement.
 
-    python tools/qfn_calibrate.py maya-qwen3.8-flash-next-ud-q4_k_xl.json    # measure and print; ./saguaro.sh
+    python tools/qfn_calibrate.py saguaro-qwen3.8-flash-next-ud-q4_k_xl.json    # measure and print; ./saguaro.sh
                                                                              # --speed-calibration applies it
 """
 from __future__ import annotations
@@ -143,7 +143,7 @@ def run(cfg: dict, say=print, start_engine=None) -> dict:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit("usage: qfn_calibrate.py <maya-qwen3.8-flash-next-*.json>")
+        sys.exit("usage: qfn_calibrate.py <saguaro-qwen3.8-flash-next-*.json> (older maya- names work too)")
     cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
     if mtp_dir(cfg) is None:
         sys.exit("this config has no --mtp folder: it starts without the Lamina drafter")

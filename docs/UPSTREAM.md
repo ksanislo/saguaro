@@ -26,7 +26,10 @@ branding). Every upstream release is taken in full. Intakes must stay routine: a
   qfn's sources, its `namespace strata`, its `include/strata` and its CMake project's own STRATA_ options and
   program names deliberately stay. The explicit exceptions stay: credits and upstream URLs, LICENSE texts, vendored
   dirs, history files, the CMake targets' own names (maya, maya-ds4, maya-vision, maya_kernels, maya_mmq,
-  -DMAYA_* options), the maya-*.json config names, `maya.` browser keys, ds4/hy4 internal names and the
+  -DMAYA_* options), the maya-*.json config file names (a setup writes `saguaro-<model>.json` since 1.2.2, and the generic
+  `maya-<model>.json` / `run-maya-<model>.sh` placeholders rename with the family; the concrete maya-*.json names a
+  running install points at stay and are found under both names, tools/config_names.py), `maya.` browser keys,
+  ds4/hy4 internal names and the
   Maya quant names (Maya-S/M/L/XS/S24). The three earlier scripts (rename_env.py, rename_internal_maya.py,
   rename_log_prefixes.py) keep working; they read the same table, the same skip list and the same exception list.
 - An intake uses it on a throwaway branch: check the release tag out -> `rename_upstream.py --paths` for the

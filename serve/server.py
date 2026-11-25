@@ -194,6 +194,7 @@ from serve.response_config import ENV_KEYS as RESPONSE_ENV_KEYS, limits_from_env
 from serve.response_jobs import BackgroundJobs, JobError  # noqa: E402
 from serve.response_store import StoreBusy  # noqa: E402
 from serve.update import RESTART_EXIT, Updater  # noqa: E402
+import config_names  # noqa: E402  (tools/) the config name family: saguaro-<model>.json, the old maya- one found too
 import maya_quants  # noqa: E402  (tools/) the quants' names users see (the model first: "GLM-5.3 · Maya-S")
 
 try:                        # Saguaro's release (the dashboard's About; the engine's INFO carries none)
@@ -3618,7 +3619,7 @@ class Service:
 
     def _save_port(self, n: int):
         """"port" in the run config, and --port in Saguaro's start scripts beside it that start this config (setup writes
-        run-maya-<model>.bat / .sh with the port then chosen; a script would otherwise move it back)."""
+        run-saguaro-<model>.sh / .bat with the port then chosen; a script would otherwise move it back)."""
         p = Path(self.config_path)
         cfg = json.loads(p.read_text(encoding="utf-8-sig"))
         cfg["port"] = int(n)
@@ -3658,8 +3659,7 @@ class Service:
     def _model_path(self, name) -> Path:
         name = str(name or "")
         p = self.models_root() / name
-        if (not re.fullmatch(r"maya-[^/\\]+\.json", name) or name.endswith(".shared-settings.json")
-                or not p.is_file()):
+        if (not config_names.is_config_name(name) or not p.is_file()):
             raise ValueError(f"no model config named {name!r} here")
         return p
 
@@ -3802,14 +3802,19 @@ class Service:
 
     def finish_delete(self):
         """The model that ran before this start, deleted now that another one runs (the Models page deleted the
-        running one: its note, models.DELETE_FILE, read once).  self.deleted says how it went, for the page."""
-        note_path = self.models_root() / models.DELETE_FILE
+        running one: its note, models.DELETE_FILE, read once - a .maya-delete.json note of before the C122 rename
+        is read too).  self.deleted says how it went, for the page."""
+        notes = config_names.note_paths(self.models_root(), models.DELETE_FILE)
         try:
-            note = json.loads(note_path.read_text(encoding="utf-8"))
-            note_path.unlink()
-        except (OSError, ValueError):
+            note = json.loads(notes[0].read_text(encoding="utf-8"))
+        except (IndexError, OSError, ValueError):
             return
-        p = Path(str(note.get("config") or ""))
+        for f in notes:
+            try:
+                f.unlink()                               # (read once, under either name)
+            except OSError:
+                pass
+        p = config_names.resolve(Path(str(note.get("config") or "")))
         if time.time() - float(note.get("time") or 0) > 900 or not p.is_file() or p.parent != self.models_root():
             return                                       # (stale, gone already, or not one of these configs)
         if self._is_running(p):                          # (the switch did not happen: it runs again)
@@ -9173,6 +9178,8 @@ def main() -> int:
                          "page that says what went wrong (under a supervisor the process ends on a failed load "
                          "either way)")
     a = ap.parse_args()
+    if a.config:                                         # (--config given as the old name after the 1.2.2 rename:
+        a.config = str(config_names.resolve(Path(a.config)))   #  a path llama-swap or systemd was given keeps working)
     clean_stale_picture_dirs()
     stop = threading.Event()
     stop_signals(stop)                                  # before any engine starts (#1181); ends it if one comes then

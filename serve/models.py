@@ -1,4 +1,5 @@
-"""serve/models.py - the web app's Models page: the run configs the setup wrote (maya-<model>.json beside saguaro.py), what
+"""serve/models.py - the web app's Models page: the run configs the setup wrote (saguaro-<model>.json beside
+saguaro.py; the older maya-<model>.json name is still found - tools/config_names.py), what
 each one runs with, the engine settings the page changes in them, and a model deleted (delete_plan, delete).
 
 A config's settings, as the page shows them (None: the engine's own default, or "auto"):
@@ -35,11 +36,15 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import config_names  # noqa: E402  (tools/) the config name family: saguaro-<model>.json, the old maya- one found too
 import maya_quants  # noqa: E402  (tools/) the quants' names users see, and each config's family
 
-SWITCH_FILE = ".maya-switch.json"           # the server's note to saguaro.py: start this config next (a switch)
-DELETE_FILE = ".maya-delete.json"           # ... and to the next server: delete this config (it was the one running)
-LAST_GOOD = ".maya-last-good.json"          # what loaded successfully last: a failed load's page offers to start it
+# the server's notes: SWITCH_FILE says saguaro.py which config to start next (a switch), DELETE_FILE says the next
+# server to delete a config (it was the one running).  Written under these 1.2.2 names since C122; a note left by
+# a server of before the rename (.maya-switch.json / .maya-delete.json) is still read (config_names.note_paths).
+SWITCH_FILE = ".saguaro-switch.json"
+DELETE_FILE = ".saguaro-delete.json"
+LAST_GOOD = ".saguaro-last-good.json"       # what loaded successfully last: a failed load's page offers to start it
 CONTEXTS = [8192, 32768, 65536, 131072]       # the setup's choices (a config's own size is offered too)
 DS4_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # ... for DeepSeek (saguaro.py's DS4_CONTEXTS)
 MM3_CONTEXTS = DS4_CONTEXTS                                       # ... and MiniMax (saguaro.py's MM3_CONTEXTS)
@@ -820,13 +825,12 @@ def command(cfg: dict) -> dict:
 
 # ------------------------------------------------------------------ the list
 def config_paths(root: Path) -> list:
-    """The installed models' configs, the most recently used first (saguaro.py's configs()).  Beside them the page
-    keeps its own files - <config>.shared-settings.json and a model's live Turbo sidecar <config>.turbo.json:
-    neither is a model."""
+    """The installed models' configs, the most recently used first (saguaro.py's configs()).  Both name families
+    (tools/config_names.py: saguaro-<model>.json, the older maya-<model>.json still found, a model under both names
+    is the new one); beside them the page keeps its own files - <config>.shared-settings.json and a model's live
+    Turbo sidecar <config>.turbo.json - and neither is a model."""
     try:
-        found = [p for p in Path(root).glob("maya-*.json")
-                 if not p.name.endswith((".shared-settings.json", ".turbo.json"))]
-        return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+        return sorted(config_names.list_configs(root), key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return []
 
@@ -890,7 +894,7 @@ def quant_label(cfg: dict, path: Path) -> str:
     names, maya_quants); else its installer key, or the config's own name for one the setup did not write."""
     fam, key = family(cfg), maya_quants.config_key(cfg)
     what = maya_quants.tier(fam, key) or maya_quants.OTHERS.get((fam, key)) or OTHER_QUANTS.get((fam, str(key).lower()))
-    return str(what or key or path.stem.removeprefix("maya-").removesuffix("-hip"))
+    return str(what or key or config_names.bare(path.stem).removesuffix("-hip"))
 
 
 def missing(cfg: dict) -> str | None:
@@ -1428,8 +1432,10 @@ def delete_plan(root: Path, path: Path) -> dict:
 
 def delete(root: Path, path: Path, files: bool = False) -> dict:
     """The config at `path` off the list: it, its start scripts, the settings kept beside it (.prev,
-    .shared-settings.json); with `files`, delete_plan's files first (a file that cannot be deleted keeps the config,
-    and says which).  {"deleted", "freed" (bytes), "drafter_users" (now drafting with MTP)}."""
+    .shared-settings.json), and its old-name shadow if one sits there (a hand-made pair: left, the next start's
+    rename would move it back and resurrect the deleted model); with `files`, delete_plan's files first (a file
+    that cannot be deleted keeps the config, and says which).  {"deleted", "freed" (bytes), "drafter_users"
+    (now drafting with MTP)}."""
     path = Path(path)
     freed, users, errors = 0, [], []
     if files:
@@ -1466,8 +1472,13 @@ def delete(root: Path, path: Path, files: bool = False) -> dict:
                     users.append(name)
         if errors:
             raise OSError("could not delete " + "; ".join(errors) + " - the model stays on the list")
-    for p in (path, path.with_name(f"run-{path.stem}.sh"), path.with_name(f"run-{path.stem}.bat"),
-              path.with_name(path.name + ".prev"), path.with_name(path.stem + ".shared-settings.json")):
+    stale = [path, path.with_name(f"run-{path.stem}.sh"), path.with_name(f"run-{path.stem}.bat"),
+             path.with_name(path.name + ".prev"), path.with_name(path.stem + ".shared-settings.json")]
+    if path.name.startswith(config_names.NEW):         # (its maya- shadow, the other half of a hand-made pair)
+        shadow = path.with_name(config_names.OLD + path.stem[len(config_names.NEW):] + ".json")
+        stale += [shadow, shadow.with_name(f"run-{shadow.stem}.sh"), shadow.with_name(f"run-{shadow.stem}.bat"),
+                  shadow.with_name(shadow.name + ".prev"), shadow.with_name(shadow.stem + ".shared-settings.json")]
+    for p in stale:
         try:
             p.unlink()
         except FileNotFoundError:

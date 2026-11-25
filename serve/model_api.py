@@ -8,7 +8,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from serve import models
+from serve import models   # (its import puts tools/ on the path, where config_names lives)
+
+import config_names  # noqa: E402  (tools/) the config name family: saguaro-<model>.json, the old maya- one found too
 
 FOREVER = -1.0
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "ms": 0.001}
@@ -36,20 +38,20 @@ def parse_keep_alive(v):
 
 
 def public_name(path: Path) -> str:
-    """A config's name as the API shows it: its file name without .json (maya-glm-maya-s)."""
+    """A config's name as the API shows it: its file name without .json (saguaro-glm-maya-s)."""
     return Path(path).name.removesuffix(".json")
 
 
 def find_config(root: Path, name) -> Path | None:
     """The installed model's config a request names: its API name, with or without ":latest", .json, or the leading
-    "maya-"; None when nothing matches."""
+    family name ("maya-" of an older install as well as "saguaro-", tools/config_names.py); None when nothing
+    matches."""
     n = str(name or "").strip()
     n = n.removesuffix(":latest").removesuffix(".json")
     if not n or "/" in n or "\\" in n or n.startswith("."):
         return None
     for p in models.config_paths(root):
-        stem = p.name.removesuffix(".json")
-        if n in (stem, stem.removeprefix("maya-")):
+        if config_names.matches(p.name.removesuffix(".json"), n):
             return p
     return None
 
@@ -62,15 +64,15 @@ def name_key(v) -> str:
 def match_name(name, entries) -> dict | None:
     """The installed model a request names, out of a models listing's entries (models.describe() shapes: "file",
     "model"): the config's own name (its file without .json, with or without ":latest", ".json" or the leading
-    "maya-", case-insensitive, the way find_config takes them) or the model's own name (its config's "model_name",
-    case-insensitive); a config name beats a model name when both match.  None for an empty name or no match.
-    Pure: the entries come in, nothing is read."""
+    family name of either family, case-insensitive, the way find_config takes them) or the model's own name (its
+    config's "model_name", case-insensitive); a config name beats a model name when both match.  None for an empty
+    name or no match.  Pure: the entries come in, nothing is read."""
     want = name_key(name)
-    if not want or want == "maya-":
+    if not want or want in ("maya-", "saguaro-"):
         return None
     for e in entries or ():
         stem = name_key((e or {}).get("file"))
-        if stem and want in (stem, stem.removeprefix("maya-")):
+        if stem and config_names.matches(stem, want):
             return e
     for e in entries or ():
         got = name_key((e or {}).get("model"))

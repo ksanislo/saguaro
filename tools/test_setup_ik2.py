@@ -464,7 +464,7 @@ class Steps(unittest.TestCase):
         d, gguf = self.files()
         tok = self.tok(d)
         path, cfg = self.write({"gpus": [t4(2)], "backend": "cuda"}, gguf, tok, 32768, d, a=args(drafting="off"))
-        self.assertEqual(path.name, "maya-inkling-2-mini.json")
+        self.assertEqual(path.name, "saguaro-inkling-2-mini.json")
         self.assertEqual(cfg["exe"], str(maya.IK2_EXE))
         self.assertEqual(cfg["args"], ["--model", str(gguf), "--max-context", "32768", "--gpus", "1", "--chunk", "2048",
                                        "--threads", "8", "--drafting", "off"])
@@ -542,7 +542,7 @@ class Steps(unittest.TestCase):
         val = lambda cfg, f: cfg["args"][cfg["args"].index(f) + 1] if f in cfg["args"] else None   # noqa: E731
         p_ud, c_ud = self.write_amd(ud, tok, d, 14.7)
         p_q, c_q = self.write_amd(t4q, tok, d, 11.45)
-        self.assertEqual((p_ud.name, p_q.name), ("maya-inkling-2-mini.json", "maya-inkling-2-mini-t4-nvfp4-iq3_xxs.json"))
+        self.assertEqual((p_ud.name, p_q.name), ("saguaro-inkling-2-mini.json", "saguaro-inkling-2-mini-t4-nvfp4-iq3_xxs.json"))
         self.assertEqual((val(c_ud, "--chunk"), val(c_q, "--chunk")), ("2048", "1024"))
         self.assertEqual(json.loads(p_ud.read_text(encoding="utf-8"))["args"], c_ud["args"])   # (untouched)
         self.assertNotEqual(Q.config_label(c_ud), Q.config_label(c_q))
@@ -876,7 +876,7 @@ class StrataPacks(unittest.TestCase):
             self.assertEqual(Q.resolve(name), ("ik2", key), name)
         self.assertEqual(Q.config_stem("ik2", "strata-sq-15"), "maya-inkling-2-mini-sq-15")
         self.assertEqual(maya.ik2_config_path(Path("Inkling-2-Mini-SQ-15.strata")).name,
-                         "maya-inkling-2-mini-sq-15.json")   # (a pack: its own config, as the Models page names it)
+                         "saguaro-inkling-2-mini-sq-15.json")   # (a pack: its own config, as the Models page names it)
         self.assertEqual(Q.shown("ik2", "strata-sq-15"), "Inkling 2 Mini · Strata SQ-15")
 
     def test_table(self):

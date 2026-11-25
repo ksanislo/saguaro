@@ -134,6 +134,26 @@ class Names(unittest.TestCase):
         self.assertIn('"saguaro-hy4-pictures-"', out)
         self.assertIn('"saguaro-mm3-pictures-"', out)
 
+    def test_c122_config_name_placeholders(self):
+        """C122: the generic config-name placeholder follows the saguaro- family; the concrete maya-*.json file
+        names a running install points at stay (config_names finds both families)."""
+        md = ("start it with `saguaro.py --config maya-<model>.json`; its run-maya-<model>.sh (run-maya-<model>.bat\n"
+              "on Windows) does the same; the configs maya-ds4.json and maya-mm3.json of older installs stay\n")
+        out = one(md, "docs/d.md")
+        self.assertIn("--config saguaro-<model>.json", out)
+        self.assertIn("run-saguaro-<model>.sh", out)
+        self.assertIn("run-saguaro-<model>.bat", out)
+        self.assertIn("maya-ds4.json", out)
+        self.assertIn("maya-mm3.json", out)
+
+    def test_review_and_fix_notes_are_skipped(self):
+        """the review's and the fix report's own notes quote both name families to describe them: skipped like
+        the PLAN / REPORT notes they are written from"""
+        for rel in ("REVIEW-RESULT.md", "REVIEW-RESULT-c122-config-names.md", "FIX-REPORT.md",
+                    "PLAN-c122-config-names.md", "REPORT-c122-config-names.md", "LICENSE", "LICENSE.md"):
+            self.assertTrue(T.skipped(rel), rel)
+        self.assertFalse(T.skipped("docs/SETUP.md"))
+
     def test_server_log_tag_and_launcher_switch(self):
         out = run(F("serve/s.py", 'print(f"[maya] the GPUs freed")\n'))[0]["serve/s.py"]
         self.assertIn("[saguaro]", out)

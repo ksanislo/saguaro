@@ -105,7 +105,7 @@ class MetalSetupTests(unittest.TestCase):
     def test_config_has_no_pack_and_no_cuda_arguments(self):
         p, gguf = self.write()
         cfg = maya.read_json(p)
-        self.assertEqual(p.name, "maya-s-v2-iq2_xxs-metal.json")
+        self.assertEqual(p.name, "saguaro-s-v2-iq2_xxs-metal.json")
         self.assertEqual(cfg["backend"], "metal")
         self.assertEqual(cfg["gpu"], [0])
         self.assertEqual(Path(cfg["exe"]).name, "maya-metal")

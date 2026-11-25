@@ -1782,7 +1782,7 @@ v1.1.31.
 
 ## MiniMax-M3.1-Flash
 
-`./saguaro.sh --setup --model MiniMax-M3.1-Flash` writes `maya-mm3.json` (Project Maya's GGUF quants: their own, below) with what fits this PC: the context (below), the
+`./saguaro.sh --setup --model MiniMax-M3.1-Flash` writes `saguaro-mm3.json` (Project Maya's GGUF quants: their own, below) with what fits this PC: the context (below), the
 model's pictures on, the tensor-parallel groups from the GPU count, and the DSpark drafter only where this PC's speed
 calibration (or your answer at the setup) says drafting is faster. A setup again keeps every engine option listed
 here that the config already has.
@@ -1840,7 +1840,7 @@ EXL3 one: MiniMax M3.1 · Maya-XS (the experts in about 1.6 bits, ~93 GB: the wh
 MiniMax M3.1 · Maya-S (about 2.1 bits, ~122 GB), from
 [peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF](https://huggingface.co/peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF)
 (`Maya-XS/MiniMax-M3.1-Flash-Maya-XS-IQ1_S-0000N-of-00002.gguf`, `Maya-S/MiniMax-M3.1-Flash-Maya-S-IQ2_XXS-...`); each
-gets a config of its own, `maya-minimax-maya-xs.json` / `maya-minimax-maya-s.json`. They run on NVIDIA
+gets a config of its own, `saguaro-minimax-maya-xs.json` / `saguaro-minimax-maya-s.json`. They run on NVIDIA
 from V100 on and on AMD, Linux and Windows. The files follow llama.cpp's MiniMax-M3 layout; the sparse-attention
 indexers of the first three layers sit in a small file of their own beside them (`...-maya-indexers.bin`, a GGUF; `.gguf` up to v1.1.30, renamed by the setup), which
 Saguaro loads so the model runs as MiniMax defines it - keep it with the other files. Pictures and the DSpark drafter
@@ -2166,7 +2166,7 @@ their `-q5_k_m` spellings all resolve here) sets up Blackfrost-AI's CYBER-FROST-
 (the Qwen Community License 1.0, `LICENSE.qwen-community-1.0`) - as this family's `cyber-frost-q5_k_m` quant:
 peasantsmith's one 112.5 GB GGUF, downloaded from the commit `tools/qfn/download.json` pins and checked against its
 sha256, packed and run by `saguaro-qfn` like every other quant. Its config keeps the name it always had,
-`maya-cyber-frost.json` (`maya-cyber-frost-hip.json` on AMD); a config the old engine's Qwen path wrote is rewritten
+`saguaro-cyber-frost.json` (`saguaro-cyber-frost-hip.json` on AMD); a config the old engine's Qwen path wrote is rewritten
 for `saguaro-qfn` once, by the setup or the next start, keeping its context, port, sampling and model files.
 
 * **The drafter** is built from the NextN block inside its own file (`tools/mtp_from_gguf.py`) into

@@ -49,7 +49,7 @@ git clone https://github.com/ksanislo/saguaro.git && cd saguaro
    sha256;
 4. builds the pack - the engine's index of the model files, a few MB, no weights copied - the same as
    `python tools/hy4/pack_gguf.py --model <folder> --files <trunk> <table> --mmproj <mmproj> --mtp none --drafter none`;
-5. writes `maya-hy4-flash-maya-s.json` and starts the dashboard on `http://127.0.0.1:8080`.
+5. writes `saguaro-hy4-flash-maya-s.json` and starts the dashboard on `http://127.0.0.1:8080`.
 
 On four equal 16 GB cards the config is the measured one: `--tp 4 --chunk 2048 --reserve-gb 0.5`, a 131K context and
 `HY4_HOT=1`, which places the experts in VRAM by the scores shipped in `data/` for Maya-S, and `HY4_VISION_F16=1` (the
@@ -144,7 +144,7 @@ a smaller prompt chunk that leaves more VRAM to the experts (32.5).
 ## Running it by hand or under a proxy
 
 The setup's start script does this; by hand, from the Saguaro folder (`<config>` = the setup's
-`maya-hy4-flash-maya-s.json`, or `configs/Hy4-Flash-Maya-S-IQ2_S.json`, the measured 4x T4 config with its paths
+`saguaro-hy4-flash-maya-s.json`, or `configs/Hy4-Flash-Maya-S-IQ2_S.json`, the measured 4x T4 config with its paths
 relative to the Saguaro folder - the model in `models/Hy4-Flash-Maya-S-IQ2_S/`, its state in `var/`):
 
 ```sh

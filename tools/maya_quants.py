@@ -4,7 +4,7 @@ bits, the same meaning for every model - XS ~1.6-1.7, S ~2-2.5, M ~3-3.5, L ~4+ 
     on screen       "MiniMax M3.1 · Maya-XS"                        shown(family, key), config_label(cfg)
     setup ids       --model minimax-maya-xs                         resolve(name)
     files           <Model>-Maya-<Tier>-<maintype>-0000N-of-0000M.gguf, one repo per model (<Model>-Maya-GGUF)
-    configs         maya-minimax-maya-xs.json                       config_stem(family, key)
+    configs         saguaro-minimax-maya-xs.json                    config_stem(family, key)
 
 Every name a quant had before stays an alias, so nothing installed or typed before breaks: a GLM download's name
 (--model Maya-S24, Maya-S-v2-IQ2_XXS, EXL3-3.05bpw ...), --ds4-quant maya-xs, --mm3-quant gguf-xs, and the installer

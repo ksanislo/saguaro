@@ -82,7 +82,7 @@ list. The setup:
    `python tools/strata_tokenizer.py --gguf <the GGUF> --out <folder> --chat-template tools/ik2/chat_template.jinja --check`;
 5. fetches the drafter where drafting runs (`--drafting off` skips it), and builds the image encoder (`--no-vision`
    skips it and the 0.6 GB tower);
-6. writes `maya-inkling-2-mini.json` with the layout above and starts the dashboard on `http://127.0.0.1:8080`.
+6. writes `saguaro-inkling-2-mini.json` with the layout above and starts the dashboard on `http://127.0.0.1:8080`.
 
 From the web app: **Models › Download a model › Inkling 2 Mini**. The row says how it fits this PC's cards before you
 start; the download is the same setup, run for you.
@@ -139,7 +139,7 @@ resident, UD-Q4_K_XL: decode 40 / 37 / 33.5 tok/s at 0 / 8K / 30K tokens deep, r
 the prompt chunk Pascal picks, 4096 there; the PC keeps ~2 GB of the model files in RAM; build with CUDA 12.x and
 `-DCMAKE_CUDA_ARCHITECTURES=61`). A
 card of 24 GB or more keeps the whole model in VRAM and needs none of this; on 16 GB cards these settings matter. Each
-is a flag or an `env` entry in the config (`maya-inkling-2-mini.json`, Models page or by hand); restart the model after
+is a flag or an `env` entry in the config (`saguaro-inkling-2-mini.json`, Models page or by hand); restart the model after
 a change. Tuned on Tesla T4s, two loads of each setting, interleaved (decode about 60 / 8K tokens deep, an 8-16K read).
 The `--chunk` figures are the previous engine's (its one-card cache); on this engine one T4 runs the offload path and
 the one-card `--chunk` trade is not measured again yet:

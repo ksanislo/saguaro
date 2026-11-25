@@ -373,7 +373,7 @@ class GlmExl3Folder(Tmp):
         pc = {"gpus": [{"index": 0, "name": "GPU", "vram_gb": 24}]}
         path = maya.write_config(a, pc, {}, pack, glm.name, 32768, self.root / "models", None, ("exl3", glm))
         cfg = json.loads(path.read_text())
-        self.assertEqual(path.name, "maya-" + glm.name.lower() + ".json")
+        self.assertEqual(path.name, "saguaro-" + glm.name.lower() + ".json")
         self.assertEqual(cfg["sampling"], {"temperature": 0.9, "top_p": 0.85, "top_k": 30})
         self.assertEqual(cfg["reasoning_effort"], maya.EFFORT)               # (the folder names none: GLM's)
         self.assertEqual(cfg["installer"]["model_dir"], str(glm))
@@ -478,7 +478,7 @@ class MiniMaxExl3Folder(Tmp):
         with patch.object(maya, "ROOT", self.root):
             path = maya.write_config_mm3(self.a, pc, {"lib_dirs": []}, pack, 65536, self.root / "models", d, "exl3", True)
             cfg = json.loads(path.read_text())
-            self.assertEqual(path.name, "maya-minimax-m3.1-flash-exl3-3.06bpw.json")
+            self.assertEqual(path.name, "saguaro-minimax-m3.1-flash-exl3-3.06bpw.json")
             self.assertEqual(cfg["sampling"], {"temperature": 0.5, "top_p": 0.8})
             self.assertEqual(cfg["reasoning_effort"], maya.MM3_EFFORT)
             self.assertEqual(maya.flag_value(cfg["args"], "--pack"), str(pack))
@@ -509,7 +509,7 @@ class MiniMaxExl3Folder(Tmp):
             path = maya.write_config_mm3(self.a, {"gpus": [{"index": 0}]}, {"lib_dirs": []}, pack, 65536,
                                          self.root / "models", pack.parent)
         cfg = json.loads(path.read_text())
-        self.assertEqual(path.name, "maya-mm3.json")
+        self.assertEqual(path.name, "saguaro-mm3.json")
         self.assertEqual(cfg["sampling"], maya.MM3_SAMPLING)
         self.assertNotIn("own", cfg["installer"])
 

@@ -48,7 +48,7 @@ no tuning step - it balances its own split):
   6. builds the pack (the engine's index of the model files) inside the model folder
   7. images: compiles the vision encoder (`build-vision/bin/vision-glm`) and fetches the model's vision files
      (1.1 GB, shown and asked first like the model; --no-vision skips it)
-  8. writes maya-<model>.json and run-maya-<model>.sh (.bat on Windows) - with the settings tuned for this PC
+  8. writes saguaro-<model>.json and run-saguaro-<model>.sh (.bat on Windows) - with the settings tuned for this PC
      earlier, or it offers the tuning (./saguaro.sh --calibrate does it any time) - and starts the dashboard on
      http://127.0.0.1:8080
 
@@ -87,6 +87,7 @@ sys.path.insert(0, str(HERE / "tools"))
 import setup as S  # noqa: E402  Strata's installer: PC checks, pip, llama.cpp, downloads (nothing runs on import)
 from setup import ask, fail, ok, run, say, step, warn  # noqa: E402
 from saguaro_version import saguaro_version  # noqa: E402  the version text: the banner's and the dashboard's About, one function
+import config_names as CN  # noqa: E402  the run configs' name family (saguaro-<model>.json; maya-<model>.json found too)
 import maya_import as MI  # noqa: E402  --import-model: model files downloaded some other way, found by size + sha256
 import maya_quants as Q  # noqa: E402  the quants' names users see (MiniMax M3.1 · Maya-XS) and the older ones as aliases
 import calibrate_glm as CAL  # noqa: E402  the CPU lane's tuning for this PC (./saguaro.sh --calibrate)
@@ -105,7 +106,8 @@ WIN = S.WIN
 ME = "START-SAGUARO.bat" if WIN else "./saguaro.sh"      # how this is started, for the messages
 UPDATE_EXIT = 75                                   # the server's exit after the dashboard updated Saguaro (serve/update.py)
 RESTART_EXIT = 76                                  # ... after it saved a new port: start again on the saved one
-SWITCH_FILE = ".maya-switch.json"                  # ... or the Models page's note: the config to start (serve/models.py)
+SWITCH_FILE = ".saguaro-switch.json"               # ... or the Models page's note: the config to start (serve/models.py);
+#                                                  #  a .maya-switch.json note of before the C122 rename is read too
 ROOT = S.ROOT
 BUILD = ROOT / "build"
 EXE = BUILD / ("saguaro-glm.exe" if WIN else "saguaro-glm")
@@ -825,10 +827,108 @@ def read_json(path: Path) -> dict:
 
 
 def configs() -> list:
-    """The installed models' configs, the most recently used first - not the dashboard's settings the server keeps
-    beside each (<config>.shared-settings.json), which a restart took for a config of the CUDA backend."""
-    return sorted((p for p in ROOT.glob("maya-*.json") if not p.name.endswith(".shared-settings.json")),
-                  key=lambda p: p.stat().st_mtime, reverse=True)
+    """The installed models' configs, the most recently used first - both name families (config_names: the new
+    saguaro-<model>.json first, the older maya-<model>.json still found, a model under both names is the new one),
+    and not the files the server keeps beside each: its dashboard settings (<config>.shared-settings.json, which a
+    restart once took for a config of the CUDA backend) and the live Turbo sidecar (<config>.turbo.json)."""
+    return sorted(CN.list_configs(ROOT), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _finish_config_rename(old_stem: str, target: Path) -> None:
+    """C122's move, part two: the files that lived beside a renamed config follow it - its start scripts
+    (run-<stem>.sh / .bat, their --config line rewritten), the dashboard settings and the live Turbo sidecar the
+    server keeps beside it (<stem>.shared-settings.json, <stem>.turbo.json), the copy before its settings changed
+    (<name>.prev), its half-written temp (<name>.tmp), tools/saguaro/migrate_configs.py's backups (<name>.bak-*),
+    and its engine log (whose path the config's own "log" key then follows, the config's mtime kept).  Only these
+    exact names belong to it: a config beside it - a dot-named variant like maya-2.5.json next to maya-2.json, or
+    its own name - is never a sidecar.  A file that cannot move (a read-only folder, one open elsewhere) is said
+    and stays where it is; the next start finishes it, migrate_config_names looking for an old stem's leftovers
+    beside a moved config too."""
+    new_stem = target.stem
+    for f in sorted(ROOT.iterdir()):
+        rest = f.name[len(old_stem):] if f.name.startswith(old_stem + ".") else ""
+        if f.name in (f"run-{old_stem}.sh", f"run-{old_stem}.bat"):
+            new = f.with_name(f"run-{new_stem}{f.suffix}")
+        elif rest == ".log":                           # (its log: the config's "log" key follows it below)
+            new = f.with_name(new_stem + ".log")
+        elif not CN.is_config_name(f.name) and (rest in (".turbo.json", ".shared-settings.json", ".json.prev",
+                                                         ".json.tmp") or rest.startswith(".json.bak-")):
+            new = f.with_name(new_stem + rest)
+        else:
+            continue                                   # (the config itself has moved already, and everything
+        if new.exists():                               #  else in the folder is not part of this set)
+            continue
+        try:
+            os.replace(f, new)
+        except OSError as e:
+            warn(f"could not move {f.name} to {new.name} ({e.strerror or e}): it stays where it is")
+            continue
+        if new.name.startswith("run-"):                # (the start script names the config it starts)
+            try:
+                new.write_text(new.read_text(encoding="utf-8").replace(f"{old_stem}.json", f"{new_stem}.json"),
+                               encoding="utf-8")
+            except OSError as e:
+                warn(f"{new.name} keeps the old config path ({e.strerror or e}) - it still starts the model: "
+                     f"{CN.OLD} names resolve to the moved file")
+        elif new.suffix == ".log":                     # (the config's own "log" follows its log there)
+            try:
+                cfg = read_json(target)
+                if cfg.get("log") == str(f):
+                    st = target.stat()
+                    tmp = target.with_name(target.name + ".tmp")
+                    tmp.write_text(json.dumps({**cfg, "log": str(new)}, indent=1), encoding="utf-8")
+                    os.replace(tmp, target)
+                    os.utime(target, (st.st_atime, st.st_mtime))
+            except OSError as e:
+                warn(f"could not point {target.name} at {new.name} ({e.strerror or e}): its log keeps its old path")
+
+
+def migrate_config_names() -> list:
+    """1.2.2's name change (C122): the maya-<model>.json configs here become saguaro-<model>.json, once and only
+    where the new name is not taken (config_names: a model under both names is the new one - its old file is set
+    aside once as <old name>.shadowed, a name nothing loads, never left where a delete of the model would have it
+    renamed back and resurrect).  _finish_config_rename moves each config's set beside it.  Every move is atomic
+    (os.replace) and only onto a target that is not there; a file that cannot move (a read-only folder) stays
+    under the old name and is said - config_names still finds it, so a failed rename leaves everything working.
+    The move is resumable: a crash between the config move and its sidecars, or a single locked sidecar, leaves
+    the rest under the old name only until the next start, which finds those leftovers beside the moved config
+    and finishes them (idempotent - and a set-aside shadow keeps its own files to itself).  Returns the names
+    the configs now have."""
+    moved = []
+    for p in sorted(ROOT.glob(CN.OLD + "*.json")):
+        if not CN.is_config_name(p.name):
+            continue                                   # (its sidecars move with it, not on their own)
+        target = p.with_name(CN.NEW + p.name[len(CN.OLD):])
+        if target.is_file():                           # (both names at once: the new one is the model; the old
+            aside = p.with_name(p.name + ".shadowed")  #  copy must not wait to be renamed back over it once the
+            if not aside.exists():                     #  model is deleted: it goes aside once, under a name
+                try:                                   #  nothing loads (it stops being a maya-*.json)
+                    os.replace(p, aside)
+                    warn(f"{p.name} and {target.name} name the same model: the new one is used, and the old file "
+                         f"is kept beside it as {aside.name}")
+                except OSError as e:
+                    warn(f"could not set {p.name} aside ({e.strerror or e}): it stays, shadowed")
+            continue
+        if target.exists():
+            continue                                   # (not a config under the new name after all: leave it)
+        try:
+            os.replace(p, target)
+        except OSError as e:
+            warn(f"could not rename {p.name} to {target.name} ({e.strerror or e}): the config keeps its old name")
+            continue
+        moved.append(target.name)
+        _finish_config_rename(p.stem, target)
+    # (the resumable part: what a crash between the two halves, or a single locked file, left of a moved config's
+    #  set under the old name follows it now - a set-aside shadow's files stay with the shadow, and the old
+    #  config's absence is what says "this config already moved")
+    for target in sorted(ROOT.glob(CN.NEW + "*.json")):
+        if target.name in moved or not CN.is_config_name(target.name):
+            continue
+        old_stem = CN.OLD + target.stem[len(CN.NEW):]
+        if (ROOT / f"{old_stem}.json").exists() or (ROOT / f"{old_stem}.json.shadowed").exists():
+            continue
+        _finish_config_rename(old_stem, target)
+    return moved
 
 
 def zfs_arc_gb(path: str = "/proc/spl/kstat/zfs/arcstats") -> float:
@@ -3783,7 +3883,7 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str, models: Path | No
     if m is None:
         warn(f"no vision files are published for {quant}: the model reads text only")
         return None
-    before = read_json(ROOT / f"{glm_config_stem(quant)}{BACKEND_SUFFIX.get(pc.get('backend'), '')}.json").get("vision")
+    before = read_json(CN.locate(ROOT, f"{glm_config_stem(quant)}{BACKEND_SUFFIX.get(pc.get('backend'), '')}")).get("vision")
     was = before.get("mmproj") if isinstance(before, dict) else None
     vd = vision_files_dir(a, m, d, models, Path(was).parent if was else None)
     files = {k: vd / m[k] for k in ("mmproj", "vocab")}
@@ -3820,7 +3920,7 @@ def vision_step(a, pc, meta, llama: Path, d: Path, quant: str, models: Path | No
 
 
 # ------------------------------------------------------------------------------------------------ 8. config + start
-BACKEND_SUFFIX = {"hip": "-hip", "metal": "-metal"}   # (a GLM config's name: maya-<quant><suffix>.json)
+BACKEND_SUFFIX = {"hip": "-hip", "metal": "-metal"}   # (a GLM config's name: saguaro-<quant><suffix>.json)
 
 
 def glm_config_stem(quant: str) -> str:
@@ -3995,8 +4095,9 @@ def write_config(a, pc, meta, pack: Path, quant: str, ctx: int, models: Path, vi
     if vision:
         cfg["vision"] = vision
     suffix = BACKEND_SUFFIX.get(pc.get("backend"), "")
-    cfg_path = ROOT / f"{glm_config_stem(quant)}{suffix}.json"
-    legacy = ROOT / f"maya-{quant.lower()}{suffix}.json"   # (a "Maya-..." quant's name before: maya-maya-...)
+    cfg_path = CN.locate(ROOT, f"{glm_config_stem(quant)}{suffix}")   # (an install's file wherever it still sits:
+    legacy = CN.locate(ROOT, f"maya-{quant.lower()}{suffix}")         #  an older maya- name keeps being updated; a
+    # (a "Maya-..." quant's name before: maya-maya-...)               #  new setup writes the new saguaro- name)
     moved = legacy != cfg_path and legacy.exists() and not cfg_path.exists()
     if moved:
         legacy.replace(cfg_path)
@@ -5191,22 +5292,27 @@ def after_server(rc: int, a) -> int:
     """The server ended: its exit code - or About > Updates moved this folder to a new release, and the new version
     starts: its saguaro.py compiles what changed in the engine and loads the same model (the most recently used, so no
     question)."""
+    # the Models page: another model to start (a switch), or this one with its new engine settings - the server's
+    # note says which config, on the port it listened on (so the page finds it again).  Only a restart reads it,
+    # and no note survives the server: a stray one (a crash between the write and the restart) is cleared on
+    # every exit, of either name family, as 1.2.1 cleared it.
+    notes = CN.note_paths(ROOT, SWITCH_FILE)      # (the 1.2.2 note name first; a .maya-switch.json note of
+    note = read_json(notes[0]) if notes and rc == RESTART_EXIT else {}   #  before the rename is read too)
+    for f in notes:
+        try:
+            f.unlink()
+        except OSError:
+            pass
     if rc not in (UPDATE_EXIT, RESTART_EXIT):
         return rc
     again = [sys.executable, str(HERE / "saguaro.py"), "--yes"]
     # (a new port from the dashboard: not this start's --port - the config's, which it saved, applies)
     port = None if rc == RESTART_EXIT else a.port
     backend, config = a.backend, getattr(a, "config", None)
-    # the Models page: another model to start (a switch), or this one with its new engine settings - the server's
-    # note says which config, on the port it listened on (so the page finds it again)
-    note = read_json(ROOT / SWITCH_FILE) if rc == RESTART_EXIT else {}
-    try:
-        (ROOT / SWITCH_FILE).unlink()
-    except OSError:
-        pass
     why = None
-    if note.get("config") and Path(note["config"]).is_file() and time.time() - float(note.get("time") or 0) < 600:
-        config, why = Path(note["config"]), note.get("why")
+    note_cfg = CN.resolve(Path(note["config"])) if note.get("config") else None   # (its path may be the old name
+    if note_cfg is not None and note_cfg.is_file() and time.time() - float(note.get("time") or 0) < 600:          #  of
+        config, why = note_cfg, note.get("why")                                     #  a config just renamed)
         backend = read_json(config).get("backend", "cuda")
         port = note.get("port") or port
     for flag, v in (("--backend", backend), ("--port", port), ("--host", a.host), ("--api-key", a.api_key),
@@ -5372,7 +5478,8 @@ def report(version: str, backend: str | None = None, cfg_path: Path | None = Non
     add("Engine build", json.dumps({k: stamp.get(k) for k in keys})
         if stamp else "not compiled yet")
     if not have:
-        add("Setup", f"no maya-*.json yet: {ME} has not finished a setup here")
+        add("Setup", f"no config json yet (saguaro-<model>.json, or maya-<model>.json before 1.2.2):"
+             f" {ME} has not finished a setup here")
     for c in have:
         cfg = read_json(c)
         args = cfg.get("args") or []
@@ -6719,13 +6826,14 @@ def ds4_pack_step(a, d: Path, gguf: bool = False, announce: bool = True, engram:
 
 def write_config_ds4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path, d: Path,
                      quant: str = "exl3", vision: bool | None = None) -> Path:
-    """maya-ds4.json and run-maya-ds4.sh.  A setup again keeps what the config before says that this one does not
+    """saguaro-ds4.json and run-saguaro-ds4.sh (an install from before 1.2.2: maya-ds4.json, found either way).  A
+    setup again keeps what the config before says that this one does not
     ask: the engine settings below, the thinking level and sampling, where the server listens and its key.  vision:
     whether the engine runs the vision tower (default: the EXL3 quant's own; a GGUF's when its pack has one)."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
     hip = pc.get("backend") == "hip"
-    cfg_path = ROOT / ("maya-ds4-hip.json" if hip else "maya-ds4.json")
+    cfg_path = CN.locate(ROOT, "maya-ds4-hip" if hip else "maya-ds4")
     old = read_json(cfg_path)
     # --tp is the tensor-parallel group: two equal GPUs per group (a GPU without an equal neighbour runs
     # its layers alone).  On one GPU that group must be the GPU itself: with --tp 2 the prompt path falls
@@ -7294,7 +7402,8 @@ def mm3_pack_step(a, d: Path, files: list, gguf: bool = False, companions: Path 
 
 def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path, d: Path,
                      quant: str = "exl3", own: bool = False) -> Path:
-    """maya-mm3.json and run-maya-mm3.sh (a Saguaro GGUF quant: maya-minimax-maya-xs.json - maya_quants.config_stem).  A
+    """saguaro-mm3.json and run-saguaro-mm3.sh (a Saguaro GGUF quant: saguaro-minimax-maya-xs.json -
+    maya_quants.config_stem; an install from before 1.2.2: the maya- names, found either way).  A
     setup again keeps what the config before says that this one does not ask: the engine settings below, the thinking
     level and sampling, where the server listens and its key - a GGUF quant's first config takes them from the EXL3
     one (they shared maya-mm3.json before the naming scheme; such a config of this quant is moved to its new name)."""
@@ -7302,10 +7411,10 @@ def write_config_mm3(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     port = a.port or 8080
     hip = pc.get("backend") == "hip"   # (AMD: a GGUF quant - a config of its own, as DeepSeek's)
     suffix = "-hip" if hip else ""
-    legacy = ROOT / f"maya-mm3{suffix}.json"
-    cfg_path = ROOT / f"{Q.config_stem('minimax', quant) or 'maya-mm3'}{suffix}.json"
+    legacy = CN.locate(ROOT, f"maya-mm3{suffix}")
+    cfg_path = CN.locate(ROOT, f"{Q.config_stem('minimax', quant) or 'maya-mm3'}{suffix}")
     if own:   # (a folder of your own: a config of its own, named after the folder - the pinned quant's stays as it is)
-        cfg_path = ROOT / f"maya-{re.sub(r'[^a-z0-9._-]+', '-', d.name.lower()).strip('-') or 'mm3-own'}{suffix}.json"
+        cfg_path = CN.locate(ROOT, f"maya-{re.sub(r'[^a-z0-9._-]+', '-', d.name.lower()).strip('-') or 'mm3-own'}{suffix}")
     old = read_json(cfg_path) if cfg_path.exists() else {} if own else read_json(legacy)
     moved = not own and cfg_path != legacy and (old.get("installer") or {}).get("mm3_quant") == quant and \
         not cfg_path.exists()
@@ -7869,7 +7978,7 @@ def qfn_vision_reuse(m: dict, d: Path) -> list | None:
     for q in Q.QFN_QUANTS:
         for sfx in ("", "-hip"):
             stem = Q.config_stem("qfn", q)
-            vis = read_json(ROOT / f"{stem}{sfx}.json").get("vision") if stem else None
+            vis = read_json(CN.locate(ROOT, f"{stem}{sfx}")).get("vision") if stem else None
             mm = vis.get("mmproj") if isinstance(vis, dict) else None
             if mm:
                 dirs.append(Path(mm).parent)
@@ -8086,8 +8195,9 @@ def qfn_cpu_info() -> dict:
 
 def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Path, mtp: Path | None, ctx: int,
                      models: Path, d: Path, prev: dict, vision: dict | None = None) -> Path:
-    """maya-qwen3.8-flash-next-<quant>[-hip].json (maya-cyber-frost[-hip].json for CYBER-FROST, whose config keeps
-    the file name it always had) and its start script: the engine's settings as measured - on AMD on an RX 9070 XT
+    """saguaro-qwen3.8-flash-next-<quant>[-hip].json (saguaro-cyber-frost[-hip].json for CYBER-FROST, whose config
+    keeps the model part of the name it always had) and its start script: the engine's settings as measured - on
+    AMD on an RX 9070 XT
     (one GPU, the RAM tier, MTP drafting, INT8 K/V with 32K of it in VRAM, the K-quant prompt kernels; plain RoPE up
     to 256K, YaRN past it), on NVIDIA the live 4x Tesla T4 configs' tuning by class - qfn_fit's plan: the generic
     engine and conversation-cache keys everywhere, the T4 env only where every chosen card is compute capability
@@ -8099,7 +8209,7 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     step(9, "the configuration and the start script")
     port = a.port or 8080
     hip = pc.get("backend") == "hip"
-    cfg_path = ROOT / f"{Q.config_stem('qfn', quant)}{'-hip' if hip else ''}.json"
+    cfg_path = CN.locate(ROOT, f"{Q.config_stem('qfn', quant)}{'-hip' if hip else ''}")
     old = read_json(cfg_path) or (prev if is_qfn_config(prev or {}) else {})
     name = qfn_entry(quant)["name"]
     var = models / name / "var"
@@ -8721,7 +8831,7 @@ def write_config_hy4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path
     where the server listens and its key.  saguaro-hy4 stops at a flag it does not know: only its own are written."""
     step(8, "the configuration and the start script")
     port = a.port or 8080
-    cfg_path = ROOT / f"{Q.config_stem('hy4', quant)}.json"
+    cfg_path = CN.locate(ROOT, Q.config_stem('hy4', quant))
     old = read_json(cfg_path) if cfg_path.exists() else {}
     args = ["--pack", str(pack), "--max-context", str(ctx)] + list(lay["args"])
     same = [int(i) for i in old.get("gpu") or []] == [int(g["index"]) for g in pc["gpus"]]
@@ -9170,13 +9280,14 @@ IK2_USER_FLAGS = ("--chunk", "--threads", "--drafting", "--parallel")   # (what 
 
 def ik2_config_path(gguf: Path) -> Path:
     """Each Inkling 2 Mini file its own config, so the Models page switches between them each with its own layout:
-    maya-inkling-2-mini.json for unsloth's UD-Q4_K_XL, maya-inkling-2-mini-<the rest of its name>.json for another
-    (our one-T4 quant: maya-inkling-2-mini-t4-nvfp4-iq3_xxs.json)."""
+    saguaro-inkling-2-mini.json for unsloth's UD-Q4_K_XL, saguaro-inkling-2-mini-<the rest of its name>.json for
+    another (our one-T4 quant: saguaro-inkling-2-mini-t4-nvfp4-iq3_xxs.json); an install from before 1.2.2 keeps
+    its maya- name until a start renames it, and it is found under either name."""
     stem = Q.config_stem("ik2", Q.IK2_QUANT)
     if gguf.name == ik2_entry()["gguf"]:
-        return ROOT / f"{stem}.json"
+        return CN.locate(ROOT, stem)
     rest = re.sub(r"[^a-z0-9_.]+", "-", re.sub(r"^inkling-2-mini-?", "", gguf.stem.lower())).strip("-.") or "own"
-    return ROOT / f"{stem}-{rest}.json"
+    return CN.locate(ROOT, f"{stem}-{rest}")
 
 
 def ik2_user_flags(old: dict) -> tuple:
@@ -9694,7 +9805,7 @@ def main() -> int:
                          "otherwise), on = draft with it, off = without it - both skip the measuring")
     ap.add_argument("--no-speed-calibration", action="store_true",
                     help="the same as --drafting on: draft with the drafter without measuring it")
-    ap.add_argument("--config", type=Path, help="the installed JSON config to start (its run-maya-<model>.sh does), or "
+    ap.add_argument("--config", type=Path, help="the installed JSON config to start (its run-saguaro-<model>.sh does), or "
                                               "for --bench or --report (default: most recently used)")
     a = ap.parse_args()
     if a.full_build_output:
@@ -9705,6 +9816,7 @@ def main() -> int:
     if a.vram_reserve_mib is not None and a.vram_reserve_mib < 0:
         ap.error("--vram-reserve-mib takes a number of MiB, 0 or more, e.g. --vram-reserve-mib 2048")
     if a.config is not None:
+        a.config = CN.resolve(a.config)     # (--config given as the old name after the 1.2.2 rename: it moved)
         if not a.config.is_file():
             ap.error(f"config not found: {a.config}")
         if a.backend and read_json(a.config).get("backend", "cuda") != a.backend:
@@ -9734,6 +9846,14 @@ def main() -> int:
                                   ("text_ref", a.bench_text_ref), ("smoke", a.bench_smoke)) if v}
         return bench(have[0], version, a.compare, max(1, a.bench_rounds), max(0.0, a.bench_wait), **more)
 
+    if not a.check:                                      # (1.2.2 on an existing install: the maya-<model>.json
+        renamed = migrate_config_names()                 #  configs move to the saguaro- name once, sidecars with
+        if renamed:                                      #  them; --check reads and reports, and rewrites nothing)
+            say("  1.2.2's config names: " + ", ".join(renamed) +
+                (" have" if len(renamed) > 1 else " has") + " become the saguaro-<model>.json name, with the files "
+                "beside them; the path the config was started by keeps working.")
+        if a.config is not None:
+            a.config = CN.resolve(a.config)              # (a --config path this very move renamed)
     have = configs() if a.config is None else [a.config.resolve()]   # (--config: that one, no question)
     if a.backend:
         have = [p for p in have if read_json(p).get("backend", "cuda") == a.backend]

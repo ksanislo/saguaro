@@ -59,14 +59,14 @@ cards have no matrix cores (WMMA), so the engine uses its portable kernels there
 kernel), and a build for RDNA 2 cards alone needs no rocWMMA headers (ROCm 7 no longer ships them). The ROCm
 installation needs its library kernels (hipBLAS) for `gfx1030`.
 
-Configs are named `maya-<quant>-hip.json` and
+Configs are named `saguaro-<quant>-hip.json` and
 select the AMD device through `HIP_VISIBLE_DEVICES`.
 
 `--bench` and `--report` work on HIP: `./saguaro.sh --backend hip --bench` uses
 `build-hip/saguaro-glm` and the config's GPU order and environment; run it with Saguaro
 stopped. `./saguaro.sh --backend hip --report` includes AMD GPU details from
 `rocm-smi` or `amd-smi` when available (KFD topology otherwise), the ROCm path
-and version, and the engine's speed lines. Add `--config /path/to/maya-hip.json`
+and version, and the engine's speed lines. Add `--config /path/to/saguaro-hip.json`
 to either command to select a particular installed config.
 
 The discrete-GPU HIP config starts with an 8K context when requested above, 3 GiB of GPU
@@ -260,7 +260,7 @@ in [SETTINGS.md](SETTINGS.md#qwen38-flash-next-saguaro-qfn). The two setup comma
 
 It builds `build-hip/qfn/saguaro-qfn` for the card, downloads the files pinned and sha256-checked (or checks yours in
 place), indexes them (the pack, about a minute), downloads the Lamina MTP draft layer (0.8 GB) and writes
-`maya-qwen3.8-flash-next-ud-q4_k_xl-hip.json` with the settings measured on the RX 9070 XT: the experts the card does not
+`saguaro-qwen3.8-flash-next-ud-q4_k_xl-hip.json` with the settings measured on the RX 9070 XT: the experts the card does not
 hold, the hottest by the shipped expert profile, in a page-locked RAM tier of the RAM less 20 GB
 (`--resident-budget-gib`), the rest read from the SSD; MTP drafting; INT8 K/V, 32K of it in VRAM; the K-quant prompt
 kernels (`SAGUARO_MMQ_KQ=1`). The RDNA4 prompt defaults (GDN, control-vector fusion, chunks up to 16K, matrix-core prompt

@@ -1,7 +1,7 @@
 """tools/maya_golden.py - saved expected answers: --bench's fixed requests, greedy, kept per model / layout / release.
 
-    python tools/maya_golden.py --config maya-<model>.json --capture --text-ref v1.1.76   # save this build's answers
-    python tools/maya_golden.py --config maya-<model>.json --check                         # a build against them
+    python tools/maya_golden.py --config saguaro-<model>.json --capture --text-ref v1.1.76   # save this build's answers
+    python tools/maya_golden.py --config saguaro-<model>.json --check                         # a build against them
     python tools/maya_golden.py --list
 
 A capture runs ./saguaro.sh --bench once (its quiet-machine check, GPU lock and warm-up included) with --bench-tokens,

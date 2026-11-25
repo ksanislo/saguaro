@@ -335,7 +335,7 @@ class OldConfigs(unittest.TestCase):
         self.assertIn('"label": Q.config_label(cfg)', Path(maya.__file__).read_text(encoding="utf-8"))
 
     def test_minimax_gguf_config_named_by_the_scheme(self):
-        """A GGUF quant's config is maya-minimax-maya-xs.json; it takes the EXL3 config's settings the first time and
+        """A GGUF quant's config is saguaro-minimax-maya-xs.json; it takes the EXL3 config's settings the first time and
         leaves that config as it is; a GGUF config of this quant under the name before is moved to the new name."""
         pack = self.root / "M" / "maya-mm3"
         pack.mkdir(parents=True)
@@ -347,7 +347,7 @@ class OldConfigs(unittest.TestCase):
         try:
             before = (self.root / "maya-mm3.json").read_text()
             p = maya.write_config_mm3(args(), pc, {"lib_dirs": []}, pack, 65536, Path("/m"), pack.parent, "gguf-xs")
-            self.assertEqual(p.name, "maya-minimax-maya-xs.json")
+            self.assertEqual(p.name, "saguaro-minimax-maya-xs.json")
             c = json.loads(p.read_text())
             self.assertEqual((c["host"], c["installer"]["mm3_quant"]), ("0.0.0.0", "gguf-xs"))   # (settings kept)
             self.assertEqual((self.root / "maya-mm3.json").read_text(), before)                    # (EXL3's as it was)
@@ -360,9 +360,9 @@ class OldConfigs(unittest.TestCase):
             hip = {"gpus": [{"index": 0}], "backend": "hip"}
             with patch.object(maya, "gpu_reserve_mib", return_value=1024):
                 p = maya.write_config_mm3(args(), hip, {"lib_dirs": []}, pack, 65536, Path("/m"), pack.parent, "gguf-s")
-            self.assertEqual(p.name, "maya-minimax-maya-s-hip.json")
+            self.assertEqual(p.name, "saguaro-minimax-maya-s-hip.json")
             self.assertFalse((self.root / "maya-mm3-hip.json").exists())
-            self.assertTrue((self.root / "maya-minimax-maya-s-hip.shared-settings.json").exists())
+            self.assertTrue((self.root / "saguaro-minimax-maya-s-hip.shared-settings.json").exists())
             self.assertEqual(json.loads(p.read_text())["host"], "0.0.0.0")
             # the EXL3 quant keeps its name
             p = maya.write_config_mm3(args(), pc, {"lib_dirs": []}, pack, 65536, Path("/m"), pack.parent, "exl3")

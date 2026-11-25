@@ -22,7 +22,7 @@ The engine works on a copy of this PC's expert usage file (calibrate_glm.usage_c
 or routing trace (calibrate_glm.without_writes) and keeps no conversations aside (SAGUARO_GLM_SLOTS=0): the
 calibration's answers neither lead the next start's warm-up nor take the place of this PC's kept conversations.
 
-    python tools/calibrate_draft.py maya-<model>.json     # measure and print; ./saguaro.sh --speed-calibration applies it
+    python tools/calibrate_draft.py saguaro-<model>.json     # measure and print; ./saguaro.sh --speed-calibration applies it
 """
 from __future__ import annotations
 
@@ -177,7 +177,8 @@ def run(other: dict, dflash: dict, say=print, start_engine=None, other_label: st
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit("usage: calibrate_draft.py <maya-*.json>  (a config that drafts with DFlash2: --dflash in its args)")
+        sys.exit("usage: calibrate_draft.py <saguaro-*.json> (older maya-*.json names work too)"
+                 "  (a config that drafts with DFlash2: --dflash in its args)")
     cfg = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
     if "--dflash" not in (cfg.get("args") or [])[:-1]:
         sys.exit("this config does not draft with DFlash2 (no --dflash in its args)")

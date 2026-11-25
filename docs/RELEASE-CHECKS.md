@@ -55,8 +55,8 @@ cheap - so there is nothing there to narrow; the tool's own tests run inside the
 ## 2. Saved expected answers
 
 ```
-python tools/maya_golden.py --config maya-inkling-2-mini.json --capture --text-ref v1.1.76 --layout 1x-v100-resident
-python tools/maya_golden.py --config maya-inkling-2-mini.json --check --layout 1x-v100-resident
+python tools/maya_golden.py --config saguaro-inkling-2-mini.json --capture --text-ref v1.1.76 --layout 1x-v100-resident
+python tools/maya_golden.py --config saguaro-inkling-2-mini.json --check --layout 1x-v100-resident
 python tools/maya_golden.py --list
 ```
 
@@ -94,15 +94,15 @@ Capture once per release, per machine and layout, on the release commit (`--from
 ```json
 {"base": "auto", "rounds": 2, "wait_min": 2, "slow_pct": 5, "budget_min": 20,
  "models": [
-  {"name": "Inkling", "config": "maya-inkling-2-mini.json", "layout": "1x-v100-resident"},
-  {"name": "Hy4 XS",  "config": "maya-hy4-flash-maya-xs.json", "layout": "3x-v100"},
-  {"name": "GLM S",   "config": "maya-maya-s2.json", "layout": "3x-v100"}]}
+  {"name": "Inkling", "config": "saguaro-inkling-2-mini.json", "layout": "1x-v100-resident"},
+  {"name": "Hy4 XS",  "config": "saguaro-hy4-flash-maya-xs.json", "layout": "3x-v100"},
+  {"name": "GLM S",   "config": "saguaro-maya-s2.json", "layout": "3x-v100"}]}
 ```
 
 The Halo box (Sun) has one more line, for the model that is too large for its card to run the standard in a night:
 
 ```json
-  {"name": "GLM-5.3 full", "config": "maya-glm-5.3-maya-xs.json", "layout": "1x-v100-smoke", "smoke": true,
+  {"name": "GLM-5.3 full", "config": "saguaro-glm-5.3-maya-xs.json", "layout": "1x-v100-smoke", "smoke": true,
    "answers_vary": true, "locks": ["~/hy4/locks/v100"]}
 ```
 
@@ -110,7 +110,7 @@ The Halo box (Sun) has one more line, for the model that is too large for its ca
 tokens, greedy, checked against the saved ones - no previous release's build, no 2K / 8K prompts, no speed verdict
 (about 3.5 minutes there). A build that cannot answer, or answers nothing, is an `ERROR` line. Save its answers once
 per release with
-`python tools/maya_golden.py --config maya-glm-5.3-maya-xs.json --capture --smoke --layout 1x-v100-smoke`
+`python tools/maya_golden.py --config saguaro-glm-5.3-maya-xs.json --capture --smoke --layout 1x-v100-smoke`
 (`--check --smoke` by hand), on a second start: the first start on a PC measures it and answers differently.
 
 `"answers_vary": true`: on that box the full model reads most experts from the disk while it answers, and which

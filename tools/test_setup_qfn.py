@@ -722,7 +722,7 @@ class Config(unittest.TestCase):
                 p = maya.write_config_qfn(args(), pc, {"lib_dirs": ["/opt/rocm/lib"]}, "ud-q4_k_xl", files, d / "pack",
                                           models / "Qwen3.8-Flash-Next-MTP-Lamina", 65536, models, d, {})
             cfg = json.loads(p.read_text())
-            self.assertEqual(p.name, "maya-qwen3.8-flash-next-ud-q4_k_xl-hip.json")
+            self.assertEqual(p.name, "saguaro-qwen3.8-flash-next-ud-q4_k_xl-hip.json")
             self.assertTrue(cfg["exe"].endswith("qfn/saguaro-qfn"))
             import serve.server as SV
             self.assertEqual(SV.engine_kind(cfg), "batch")              # (the server drives it as QFN's engine)
@@ -768,7 +768,7 @@ class Config(unittest.TestCase):
                 p = maya.write_config_qfn(args(), pc, {}, Q.CYBER_FROST_QUANT, files, d / "pack",
                                           d / "pack" / "mtp", 65536, models, d, {}, vision)
             cfg = json.loads(p.read_text())
-            self.assertEqual(p.name, "maya-cyber-frost-hip.json")
+            self.assertEqual(p.name, "saguaro-cyber-frost-hip.json")
             a = cfg["args"]
             self.assertEqual(a[a.index("--native") + 1], str(files[0]))
             self.assertEqual(a[a.index("--mtp") + 1], str(d / "pack" / "mtp"))
@@ -1020,7 +1020,7 @@ class NvidiaConfig(unittest.TestCase):
                 p = maya.write_config_qfn(args(backend="cuda"), pc, {}, "ud-q4_k_xl", files, d / "pack",
                                           models / "Qwen3.8-Flash-Next-MTP-Lamina", 262144, models, d, {})
             cfg = json.loads(p.read_text())
-            self.assertEqual(p.name, "maya-qwen3.8-flash-next-ud-q4_k_xl.json")   # (NVIDIA: no -hip suffix)
+            self.assertEqual(p.name, "saguaro-qwen3.8-flash-next-ud-q4_k_xl.json")   # (NVIDIA: no -hip suffix)
             self.assertNotIn("backend", cfg)
             self.assertEqual(cfg["gpu"], [0, 1, 2, 3])
             self.assertEqual(cfg["layer_split"], "11,24,36")                      # (the live server's own split)

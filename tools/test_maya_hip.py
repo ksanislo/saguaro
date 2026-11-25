@@ -1037,7 +1037,7 @@ class WindowsHipSetupTests(unittest.TestCase):
         p = maya.write_config(self.a, pc, {"lib_dirs": [str(self.rocm / "bin")]}, self.root / "pack", "Maya-L", 32768,
                               self.root / "data", None)
         cfg = maya.read_json(p)
-        self.assertEqual(p.name, "maya-l-hip.json")
+        self.assertEqual(p.name, "saguaro-l-hip.json")
         self.assertEqual((cfg["backend"], cfg["gpu"], cfg["exe"]), ("hip", [0], str(self.root / "build-hip/saguaro-glm.exe")))
         self.assertEqual(cfg["lib_dirs"], [str(self.rocm / "bin")])
         env = cfg["env"]

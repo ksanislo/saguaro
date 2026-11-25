@@ -40,7 +40,7 @@ td.log
 /maya-*.json
 /maya-*.json.prev
 /.maya-switch.json
-/.maya-last-good.json
+/.saguaro-last-good.json
 /token-savings.json*
 /vision-memory.json
 /run-maya-*.sh

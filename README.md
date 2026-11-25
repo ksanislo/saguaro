@@ -294,7 +294,7 @@ the slowest while the caches fill with what you use.
   thinking level, edit and regenerate, HTML previews), a live **Monitor** of the model and your hardware (down to
   what fills each GPU's memory), a context size and port you can change in Settings, and **Models**: every model
   set up on this machine, switching to another (Saguaro starts again with it) and each one's engine settings
-  (context, GPUs, drafting, images, memory), saved into its `maya-<model>.json`.
+  (context, GPUs, drafting, images, memory), saved into its `saguaro-<model>.json`.
 - **Saved:** the sidebar's Saved line adds up what the model's own API (DeepSeek's, Z.ai's, MiniMax's or
   Tencent's) would have charged for the same tokens - the prompt Saguaro reuses from its cache at the API's
   cached price, DeepSeek's peak hours at its peak price - kept per model in `token-savings.json`; its prices can
@@ -364,7 +364,7 @@ Releases: [github.com/ksanislo/saguaro/releases](https://github.com/ksanislo/sag
 Run **`./saguaro.sh --report`** (Windows: `START-SAGUARO.bat --report`) right after a slow answer or an error,
 and attach the `saguaro-report.txt` it writes to a
 [GitHub issue](https://github.com/ksanislo/saguaro/issues). It holds your hardware, your setup and the engine's
-speed lines; nothing is sent anywhere by itself. The engine's own log is `maya-<model>.log` in the Saguaro folder.
+speed lines; nothing is sent anywhere by itself. The engine's own log is `saguaro-<model>.log` in the Saguaro folder.
 
 - **The build stops** ("nvcc ... cannot build for these GPUs", "unsupported GNU version", or
   `cuda_profiler_api.h` / `nvtx3/nvToolsExt.h` missing): [docs/SETUP.md](docs/SETUP.md#if-the-build-fails) has

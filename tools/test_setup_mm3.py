@@ -328,7 +328,7 @@ class Config(unittest.TestCase):
             self.assertNotIn(k, c["args"])
         self.assertEqual(c["args"][c["args"].index("--kv-cache") + 1], "int8")
         self.assertEqual((c["installer"]["mm3_quant"], c["installer"]["quant"]), ("gguf-xs", "MiniMax-M3.1-Flash-Maya-XS"))
-        self.assertEqual(p.name, "maya-minimax-maya-xs.json")                # (the naming scheme's config)
+        self.assertEqual(p.name, "saguaro-minimax-maya-xs.json")                # (the naming scheme's config)
         # a GGUF pack with the companions' vision tower and draft: pictures on, the draft off until measured
         (self.pack / "mm3.txt").write_text("format gguf\nvision.hidden_size 1280\ndspark.num_hidden_layers 5\n")
         (self.root / "maya-mm3.json").unlink()
@@ -359,7 +359,8 @@ class Reserve(unittest.TestCase):
             p.stop()
 
     def reserve(self, gpus, backend="cuda", old=None, **kw):
-        for name in ("maya-mm3.json", "maya-mm3-hip.json"):
+        for name in ("maya-mm3.json", "maya-mm3-hip.json",           # (either family: the one before, or fresh)
+                  "saguaro-mm3.json", "saguaro-mm3-hip.json"):
             (self.root / name).unlink(missing_ok=True)
         if old is not None:
             (self.root / ("maya-mm3-hip.json" if backend == "hip" else "maya-mm3.json")).write_text(json.dumps(old))

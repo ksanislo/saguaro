@@ -200,7 +200,7 @@ class RestartAfterUpdate(unittest.TestCase):
 
 
 class RunScript(unittest.TestCase):
-    """run-maya-<model>.sh starts its config through saguaro.py - on the screen in a terminal, as ./saguaro.sh does - not
+    """run-<model>.sh starts its config through saguaro.py - on the screen in a terminal, as ./saguaro.sh does - not
     the server alone in the terminal."""
 
     def test_the_script_starts_its_config_through_maya_py(self):
