@@ -549,6 +549,45 @@ const m = {family: "qfn", running: false, choices: {draft: ["mtp", "none"], imag
 console.log(JSON.stringify(mp.fieldsOf(m, {...s}).map((g) => g.label)));""")
         self.assertEqual(got, ["Model", "GPUs and memory", "Prompts and cache"])
 
+    def test_an_open_page_follows_a_model_switch(self):
+        """item 10: the server restarts into another config - the page re-reads the identity (on reconnect, or when
+        the metrics name another model than the labels show) and every label changes without a reload; the chat
+        list and the open chat stay."""
+        got = self.node("""
+const mem = {};   // (a localStorage that keeps what the model switch check stores between its calls)
+globalThis.localStorage = {getItem: (k) => (k in mem ? mem[k] : null), setItem: (k, v) => { mem[k] = String(v); },
+                           removeItem: (k) => { delete mem[k]; }};
+const sv = await import(web + "/server.js"), st = await import(web + "/state.js"), lib = await import(web + "/lib.js");
+const old = {model: "qwen3.8-flash-next", model_label: "Qwen3.8-Flash-Next · Q8_0 (saguaro-qfn)",
+             model_name_pretty: "Qwen3.8 Flash Next", model_quant: "Q8_0"};
+const out = {
+  same: sv.identityChanged(old, {model: old.model, model_label: old.model_label}),
+  otherModel: sv.identityChanged(old, {model: "glm-5.3-flash", model_label: "GLM-5.3 · Maya-L"}),
+  otherLabel: sv.identityChanged(old, {model: old.model, model_label: "Qwen3.8-Flash-Next · UD-Q4_K_XL (saguaro-qfn)"}),
+  saysNothing: sv.identityChanged(old, {}),
+  idOnlyOld: sv.identityChanged({model: "x"}, {model: "x", model_label: null}),
+  otherId: sv.identityChanged({model: "x"}, {model: "y", model_label: null}),
+};
+// the switch: /health is re-read, the labels of every page follow - and what was open stays open
+st.S.health = old; st.S.chats = [{id: "c", messages: []}]; st.S.current = "c";
+st.newModelCheck();                                          // (the page loaded with this model)
+const before = lib.modelLabel(st.S.health, {compact: true});
+st.S.health = {model: "glm-5.3-flash", model_label: "GLM-5.3 · Maya-L",
+               model_name_pretty: "GLM 5.3", model_quant: "Maya-L"};
+const switched = st.newModelCheck();
+console.log(JSON.stringify({...out, before, after: lib.modelLabel(st.S.health, {compact: true}),
+                            switched, chats: st.S.chats.length, current: st.S.current}));""")
+        self.assertFalse(got["same"])
+        self.assertTrue(got["otherModel"])
+        self.assertTrue(got["otherLabel"])          # (two configs of one model: a quant switch too)
+        self.assertFalse(got["saysNothing"])        # (an engine that names nothing: never a switch)
+        self.assertFalse(got["idOnlyOld"])
+        self.assertTrue(got["otherId"])
+        self.assertEqual(got["before"], "Qwen3.8 Flash Next (Q8_0)")
+        self.assertEqual(got["after"], "GLM 5.3 (Maya-L)")    # (every label re-reads it from S.health)
+        self.assertTrue(got["switched"])            # (its own standard parameters, as at a page load)
+        self.assertEqual((got["chats"], got["current"]), (1, "c"))
+
     def test_a_server_behind_its_api_key_says_so(self):
         """/api/context answering 401: the page knows why the context range is missing - Settings says
         "API key needed", not "this server does not say its context range" (serve/web/server.js' loadCtxInfo)."""
