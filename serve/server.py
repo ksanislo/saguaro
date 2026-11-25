@@ -7130,6 +7130,8 @@ def make_handler(svc: Service):
                 return
             if path == "":
                 body = (ROOT / "serve" / "web" / "index.html").read_bytes()
+                # the favicon's cache-bust version comes from VERSION (a no-op when index.html carries no placeholder)
+                body = body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))

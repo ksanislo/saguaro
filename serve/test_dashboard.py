@@ -72,6 +72,13 @@ class Dashboard(unittest.TestCase):
         s, _, b = self.req("GET", "/health")
         self.assertEqual(json.loads(b)["version"], SAGUARO_VERSION)
 
+    def test_index_busts_the_favicon_cache_with_the_version(self):
+        s, _, b = self.req("GET", "/")
+        html = b.decode()
+        self.assertEqual(s, 200)
+        self.assertIn(f"web/icon.svg?v={SAGUARO_VERSION}", html)
+        self.assertNotIn("?v=__VERSION__", html)
+
     def test_context_range(self):
         s, _, b = self.req("GET", "/api/context")
         j = json.loads(b)
