@@ -7479,7 +7479,8 @@ def qfn_mtp_step(a, models: Path) -> Path | None:
     d = models / m["name"]
     files = [d / n for n in m["files"]]
     if any(file_incomplete(m, f) for f in files) and not offer_download(a, "the MTP draft layer", d, files, m):
-        warn("drafting off: the draft layer was not downloaded")
+        warn("drafting off: the draft layer was not downloaded (--yes answers the download question no; "
+             f"--download-model answers it yes) - {ME} --setup --download-model asks for it again")
         return None
     for f in files:
         if m["sha256"].get(f.name) and not sha256_checked(f, m["sha256"][f.name]):
@@ -7624,7 +7625,8 @@ def qfn_vision_step(a, pc: dict, meta: dict, llama: Path, d: Path, files: list) 
     if any(file_incomplete(m, f) for f in got):
         reused = qfn_vision_reuse(m, d)         # (the base model's mmproj: another QFN install may already have it)
         if reused is None and not offer_download(a, "the vision tower", vd, got, m):
-            warn(f"the vision tower was not downloaded: the model reads text only ({ME} --setup asks again)")
+            warn(f"the vision tower was not downloaded: the model reads text only (--yes answers the download "
+                 f"question no; --download-model answers it yes - {ME} --setup --download-model asks again)")
             return None
         if reused is not None:
             got = reused

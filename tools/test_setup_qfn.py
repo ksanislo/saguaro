@@ -340,6 +340,34 @@ class ExpertProfileShapes(unittest.TestCase):
             self.assertIn("--expert-profile", cfg["args"])
 
 
+class YesAloneNamesDownloadModel(unittest.TestCase):
+    """v1.2.1-D: --yes without --download-model answers the download question no, so the picture reader and the
+    draft layer are skipped by design - and the two warnings that say so must name the flag that says yes
+    (the queue note 11-24 20:45: "the message could say so")."""
+
+    def test_the_picture_reader_warning_names_the_flag(self):
+        with tempfile.TemporaryDirectory() as t:
+            t, d = Path(t), Path(t) / "models" / "Qwen3.8-Flash-Next-UD-Q4_K_XL"
+            said = []
+            with patch.object(maya, "step", lambda *x: None), patch.object(maya, "warn", said.append), \
+                    patch.object(maya, "offer_download", return_value=False):
+                self.assertIsNone(maya.qfn_vision_step(args(), pc_hip(), {}, t / "llama", d, []))
+        self.assertIn("text only", said[0])
+        self.assertIn("--download-model", said[0])               # (the flag that answers the question yes)
+        self.assertIn("--yes", said[0])                          # (and the one that answered it no)
+
+    def test_the_draft_layer_warning_names_the_flag(self):
+        with tempfile.TemporaryDirectory() as t:
+            said = []
+            with patch.object(maya, "warn", said.append), patch.object(maya, "ok", lambda *x: None), \
+                    patch.object(maya, "step", lambda *x: None), \
+                    patch.object(maya, "offer_download", return_value=False):
+                self.assertIsNone(maya.qfn_mtp_step(args(), Path(t) / "models"))
+        self.assertIn("drafting off", said[0])
+        self.assertIn("--download-model", said[0])
+        self.assertIn("--yes", said[0])
+
+
 class PascalBuild(unittest.TestCase):
     """U8 step 2: the P40 build line. An sm_61 card builds with CUDA 12.x (nvcc_range, test_maya_pascal) and a host
     g++ that toolkit accepts: NVIDIA's supported-matrix stops CUDA 12.0 - 12.3 at gcc 12, so on a PC whose default
