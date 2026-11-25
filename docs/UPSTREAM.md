@@ -44,6 +44,9 @@ branding). Every upstream release is taken in full. Intakes must stay routine: a
 - Smoke every live profile (mangonel llama-swap, mortar :8080); then it ships in the next Saguaro release.
 
 ## 7. Triage log (open upstream PRs)
-| Date | Newest PR checked | Snapshot | PRs | Report |
+| Date | Newest PR checked | PR list fetched | PRs | Report |
 |---|---|---|---|---|
-| 2026-11-24 | #1236 | open PRs as of 2026-11-24 ~23:00 UTC | 143 open | `docs/triage/TRIAGE-upstream-prs-20261124.md` |
+| 2026-11-24 | #1236 | 2026-11-24 23:38 UTC (16:38 MST) | 143 open | `docs/triage/TRIAGE-upstream-prs-20261124.md` |
+
+Next pass, from the last row: `gh pr list -R mw00/project-maya --state open --search "updated:>2026-11-24T23:38:25Z"`
+(new PRs and older ones changed since; a PR merged or closed since arrives with the next release intake).
