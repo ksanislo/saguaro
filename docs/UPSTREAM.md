@@ -41,7 +41,7 @@ branding). Every upstream release is taken in full. Intakes must stay routine: a
   set + new tests.
 - Where upstream says "same tokens": T4 SASS / output identity spot check. Where upstream changes answers: KL vs the
   previous release on our T4s (opt-in if it fails our bar). Q8_0 stays exact.
-- Smoke every live profile (mangonel llama-swap, mortar :8080); then it ships in the next Saguaro release.
+- Smoke every live profile (the T4 box, the AMD box); then it ships in the next Saguaro release.
 
 ## 7. Triage log (open upstream PRs)
 | Date | Newest PR checked | PR list fetched | PRs | Report |

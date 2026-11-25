@@ -10,8 +10,8 @@ gain** with the line of the source that states it, or "not measured"; and whethe
 / bit-identical) or **answer-changing**. Numbers are quoted as written in the source (ref/PERF-LEDGER.md,
 ref/ROLLBACK.md, ref/live-stack-notes.md, ref/reports/REPORT-*.md); nothing here is re-derived.
 
-Hardware note: every gain below is on the machines in those sources - four Tesla T4s (mangonel), an RX 9070 XT
-(mortar), or a Tesla P40 (paulai). Long QFN/GLM reads on the T4s are power-capped at 70 W/card, so a kernel that is
+Hardware note: every gain below is on the machines in those sources - four Tesla T4s, an RX 9070 XT
+or a Tesla P40. Long QFN/GLM reads on the T4s are power-capped at 70 W/card, so a kernel that is
 faster in isolation can be flat there (ref/PERF-LEDGER.md:456-465).
 
 QFN (engines/qfn) is our own port of Strata, carried as its own CMake sub-project; the Maya engines (GLM, DS4, MM3,
@@ -29,7 +29,7 @@ Biggest first.
    `src/kernels/cuda/glm_fast.cu` (`SAGUARO_GLM_RESIDENT_TOPK` read there) and the per-request path in
    `src/core/glm_window.cu`; the request key comes from `serve/turbo_live.py`.
    Switch and default: per request `"turbo": {"drop": N}` (off); engine-wide `SAGUARO_GLM_RESIDENT_TOPK` default
-   0 = off, 5 in the mortar KL runs (= drop 3-of-8, ref/reports/REPORT-mortar-glm.md:20); decode
+   0 = off, 5 in the AMD KL runs (= drop 3-of-8, ref/reports/REPORT-mortar-glm.md:20); decode
    only, prompt reads stay exact. Gain (RX 9070 XT): Maya-L +66 % (8.45 -> 13.85 tok/s), Maya-S +29 %
    (ref/reports/REPORT-mortar-glm.md:27-28). Answer-changing: KL 0.192 (5x the engine's own floor) on Maya-L, and
    GPQA-Diamond lost no accuracy (70.7 % vs 66.7 %, p 0.29) but answers loop more (13 -> 21 cut-offs;
