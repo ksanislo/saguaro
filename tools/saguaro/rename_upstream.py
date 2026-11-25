@@ -115,13 +115,16 @@ def apply_names(text: str, rel: str, fam, explicit: bool) -> tuple[str, list]:
     return text, fams
 
 
-def exception_hits(files: dict, texts: dict) -> list:
-    """the stale old-name mentions the exception list keeps (scratch/notes.md C): reported, never rewritten"""
+def exception_hits(files: dict) -> list:
+    """the stale old-name mentions the exception list keeps (scratch/notes.md C): reported, never rewritten.
+    Finding 5: the line numbers are those of the files as they were read (files[rel][2]), not of the planned
+    texts - when --check is red the two can differ, and the report points at the file on disk."""
     hits = []
     for exc_rel, rx in T.EXC_TEXT:
-        if exc_rel in texts:
-            for m in rx.finditer(texts[exc_rel]):
-                line = texts[exc_rel][:m.start()].count("\n") + 1
+        if exc_rel in files:
+            text = files[exc_rel][2]
+            for m in rx.finditer(text):
+                line = text[:m.start()].count("\n") + 1
                 hits.append(f"{exc_rel}:{line}: {m.group(0)}")
     return hits
 
@@ -213,7 +216,7 @@ def main() -> int:
 
     files = collect(roots)
     texts, changed, rep = plan_tree(files)
-    hits = exception_hits(files, texts)
+    hits = exception_hits(files)
 
     by_fam = {f: 0 for f in FAM_NAME}
     for fams in changed.values():

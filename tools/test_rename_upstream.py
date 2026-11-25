@@ -173,6 +173,17 @@ class SharedSkipLists(unittest.TestCase):
         for rel in ("src/core/x.cu", "saguaro.py", "docs/SETTINGS.md"):
             self.assertFalse(T.internal_skipped(rel), rel)
 
+    def test_exception_hits_line_up_with_the_file_on_disk(self):
+        """finding 5: exception_hits reads the files as they were collected, not the planned texts - a plan
+        that shifted a file's text cannot make the reported line drift from the file on disk"""
+        rel = "src/hy4/hy4_main.cpp"
+        on_disk = '#include "x"\n// HY4_FETCH_MEASURE=1 or maya --speed-calibration measures\n'
+        files = {rel: [Path(rel), "cpp", on_disk, False, False]}
+        self.assertEqual(ru.exception_hits(files), [rel + ":2: maya"])
+        # the pre-fix report came from the planned texts: a file whose text gained a line reported one lower
+        shifted = {rel: [Path(rel), "cpp", "\n" + on_disk, False, False]}
+        self.assertEqual(ru.exception_hits(shifted), [rel + ":3: maya"])
+
     def test_exception_mask_round_trip(self):
         t = 'port = getenv("STRATA_PORTABLE");  // start Maya again\n'
         m, hid = T.mask_exceptions(t, "saguaro.py")
