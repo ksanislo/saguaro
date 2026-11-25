@@ -477,6 +477,23 @@ class QfnContext(unittest.TestCase):
         eng.set_context(32768)
         self.assertEqual(eng.spawn[1], ["--pack", "p", "--max-context", "32768"])
 
+    def test_a_past_256k_line_moves_its_yarn_factor_too(self):
+        """Review finding 2: set_context's YaRN branch, run - the cases above never carried the pair, so the
+        sync in serve/qfn_engine.py never executed here.  A 512K spawn line (the setup's --rope-scale 2)
+        raised to 1M gets 4 with the new --max-context, back down gets 2, and a move to or under the trained
+        262144 keeps the written factor (inside it the elastic engine never reads the YaRN table)."""
+        eng = self.engine(["--pack", "p", "--max-context", "524288", "--rope-scaling", "yarn",
+                           "--rope-scale", "2", "--yarn-orig-ctx", "262144"])
+        eng.set_context(1048576)
+        a = eng.spawn[1]
+        self.assertEqual(a[a.index("--max-context") + 1], "1048576")
+        self.assertEqual(a[a.index("--rope-scale") + 1], "4")
+        eng.set_context(524288)
+        self.assertEqual(eng.spawn[1][eng.spawn[1].index("--rope-scale") + 1], "2")   # (follows back down)
+        eng.set_context(262144)
+        self.assertEqual(eng.spawn[1][eng.spawn[1].index("--rope-scale") + 1], "2")   # (at it: stays)
+        self.assertEqual(eng.spawn[1].count("--rope-scale"), 1)                       # (never a second pair)
+
     def test_the_reload_flow_reaches_it(self):
         # Service._restart_with: hasattr(engine, "set_context") -> stop, set_context, restart.  QfnEngine.stop is
         # the known no-op (each request stops its own slot); set_context is the driver's, and restart() re-runs
