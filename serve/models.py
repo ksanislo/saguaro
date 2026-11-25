@@ -492,6 +492,22 @@ def _dec(s: dict, key: str, lo: float, hi: float, what: str):
     return v
 
 
+def qfn_yarn_follow(args: list) -> list:
+    """The QFN args with --rope-scale kept in step with --max-context: past the trained reach the elastic YaRN
+    extension reaches max / 262144, so a context of 1M needs --rope-scale 4 (512K: 2, 384K: 1.5; the engine
+    parses the factor as a double, so it is written as computed, never rounded).  At or below the trained
+    reach, and on a config without the YaRN pair, the args come back as they are (inside the trained context
+    the elastic engine never reads the YaRN table, so the written factor stays).  One rule for every writer of
+    a QFN context: the Models page (apply), the running server saving a live slider move (server._save_context
+    - a 1M move that saved only --max-context left the next start spawning a context its factor cannot reach,
+    under-scaled and silent), and the driver rewriting its spawn command (engines/qfn/serve/server.py's
+    set_context, whose copy of this rule it matches)."""
+    yctx, yorig = _int(flag(args, "--max-context"), 0), _int(flag(args, "--yarn-orig-ctx"), 0)
+    if yctx > QFN_YARN_ORIG and flag(args, "--rope-scaling") == "yarn" and yorig > 0:
+        return set_flag(args, "--rope-scale", "%g" % (yctx / yorig))
+    return args
+
+
 def apply(cfg: dict, settings: dict) -> dict:
     """The config with `settings` written into it (a ValueError says what is wrong, nothing changed).  Keys left out
     keep the config's value."""
@@ -632,14 +648,10 @@ def apply(cfg: dict, settings: dict) -> dict:
     elif fam == "qfn":
         # (saguaro-qfn's own: the RAM tier is --resident-budget-gib, several answers at once are the config's
         #  "parallel" key (the driver turns it into --batch), and drafting off is --mtp-max-t 1 with --mtp kept)
-        # C18: the Context size and the elastic YaRN factor stay in step - past the trained 262144 the extension
-        # reaches max / 262144, so a page that raises the context to 1M gets --rope-scale 4 (512K: 2, 384K: 1.5;
-        # the engine parses the factor as a double, so it is written as computed, never rounded).  At or below
-        # the trained reach, and on a config without the YaRN pair, nothing is touched.
-        yctx = int(str(flag(args, "--max-context") or 0))
-        yorig = int(str(flag(args, "--yarn-orig-ctx") or 0))
-        if yctx > QFN_YARN_ORIG and flag(args, "--rope-scaling") == "yarn" and yorig > 0:
-            args = set_flag(args, "--rope-scale", "%g" % (yctx / yorig))
+        # C18: the Context size and the elastic YaRN factor stay in step - qfn_yarn_follow above, the same rule
+        # the running server saves a live slider move with (server._save_context) and the driver's set_context
+        # applies to its spawn command.
+        args = qfn_yarn_follow(args)
         if s.get("draft") not in can["draft"]:
             raise ValueError("Drafting: this setup did not download the MTP draft layer (run the setup again)"
                              if s.get("draft") == "mtp" else "Drafting: MTP or none")

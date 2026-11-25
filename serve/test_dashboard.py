@@ -143,6 +143,27 @@ class Dashboard(unittest.TestCase):
         s, _, _ = self.req("POST", "/api/context", {"max_context": 2097152})   # (past the YaRN reach)
         self.assertEqual(s, 400)
 
+    def test_a_qfn_reload_saves_the_yarn_factor_with_the_context(self):
+        """Review finding 1: a live slider move past 256K saves the factor that reaches the saved context too.
+        The running command got the new --rope-scale (the driver's set_context) but the run config only ever
+        saw --max-context - and the next start spawns from that file, past the reach of the factor written
+        there, silently. A 1M move on the 512K config below saves --rope-scale 4 beside --max-context 1048576,
+        and the mirror move back to 512K writes 2 with it (no over-large factor kept)."""
+        self.cfg.write_text(json.dumps({"exe": "saguaro-qfn",
+                                        "args": ["--pack", "/x/pack", "--max-context", "524288", "--kv", "int8",
+                                                 "--rope-scaling", "yarn", "--rope-scale", "2",
+                                                 "--yarn-orig-ctx", "262144"]}, indent=1))
+        self.engine.info = dict(self.engine.info, engine_kind="qfn")
+        self.req("POST", "/api/context", {"max_context": 1048576})
+        self.assertEqual(self.wait_reload()["reload"]["state"], "done")
+        args = json.loads(self.cfg.read_text())["args"]
+        self.assertEqual(args[args.index("--max-context") + 1], "1048576")
+        self.assertEqual(args[args.index("--rope-scale") + 1], "4")
+        self.req("POST", "/api/context", {"max_context": 524288})
+        self.assertEqual(self.wait_reload()["reload"]["state"], "done")
+        args = json.loads(self.cfg.read_text())["args"]
+        self.assertEqual(args[args.index("--rope-scale") + 1], "2")            # (the factor follows back down)
+
     def test_context_reports_the_engines_own_kv_bytes(self):
         """/api/context carries the engine's own K/V bytes (its INFO's kv_bytes_token / kv_ram_bytes) to the page: an
         engine that reports none leaves them null, and the page then shows no size (never a guessed one)."""

@@ -3519,7 +3519,9 @@ class Service:
                                    context=self.engine.max_context)
 
     def _save_context(self, n: int):
-        """--max-context in the run config (its other keys as they are), so the next start keeps the new size."""
+        """--max-context in the run config (its other keys as they are), so the next start keeps the new size -
+        and with it --rope-scale on a QFN config past its YaRN origin: the live move synced the driver's
+        command but not this file, and the next start spawns from the file (models.qfn_yarn_follow)."""
         if not self.config_path:
             return
         try:
@@ -3533,6 +3535,8 @@ class Service:
                 args[args.index("--max-context") + 1] = str(int(n))
             else:
                 args += ["--max-context", str(int(n))]
+            args = models.qfn_yarn_follow(args)          # (a 1M slider move saves --rope-scale 4 with it: saved
+                                                         #  args the saved factor can actually reach)
             cfg["args"] = args
             tmp = p.with_name(p.name + ".tmp")
             tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
