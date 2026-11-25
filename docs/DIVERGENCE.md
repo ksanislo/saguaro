@@ -380,7 +380,8 @@ The Inkling 2 Mini engine (saguaro-ik2), our own port; live since 11-23 as the t
    expert is resident and `BLOCK_EXACT=0` (the rounding-level window) on the T4 UD dynamic cache; AMD offload, Pascal,
    the two-GPU split and `--parallel 2`: drafting off. Gain: T4 UD +8.6 % (agent turns +23..+27 %), T4 resident
    +4.4 %, RX 9070 XT resident +11.3 %, and -1..-12 % on the AMD offload layout, so off there
-   (ref/PERF-LEDGER.md:877-878, ref/reports/REPORT-ik2-draft-gain.md:22-26). The resident gains are bit-identical;
+   (ref/reports/REPORT-ik2-draft-gain.md:22-26; PERF-LEDGER.md:877-878 carries the preliminary +8.3 / +4.3 / +12.6 %).
+   The resident gains are bit-identical;
    the +8.6 % is answer-changing at near-ties (window KL mean 5.3e-5, top-1 99.73 %).
 2. **Pascal (Tesla P40): our own kernels, and the host memory released.** Why: the generic scalar kernels sit at
    45-50 % of the P40's bandwidth and ik2 pinned its whole GGUF. Where: `src/ik2/ik2_pascal.cu` / `.cuh` (the gates
