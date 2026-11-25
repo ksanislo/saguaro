@@ -24,13 +24,15 @@ copied from the sources, never re-derived.
 | Dropped from upstream on purpose | - | the Maya Qwen path, written in step 1 |
 | Renamed | - | the rename layer, written in step 1 |
 
-Commits, one per plan step (docs/DIVERGENCE.md only, `git add` of that file alone each time):
+Commits: one per plan step, plus the one correction step 5's name sweep turned up (only `docs/DIVERGENCE.md` and this
+report were staged, each by name, never `git add -A`):
 
     d1e8fc5fd  step 1: the register's shape + "Dropped from upstream on purpose" + "Renamed"
     2da3029c8  step 2: QFN (16) and GLM (16)
     f9c91f9eb  step 3: DS4 (17) and MM3 (13)
     8012848bb  step 4: HY4 (6), IK2 (6), serve + web (8), setup/tools (7)
-    (this report)  step 5
+    c6a8cc8e3  step 5's name sweep: DS4 item 17's switch names put right
+    20e518c7a  step 5: this report
 
 ## Files
 
