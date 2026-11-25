@@ -11,7 +11,7 @@ import unittest
 class VisionCacheHTTP(unittest.TestCase):
     def test_request_ownership_and_missing_cache_recovery(self):
         root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(prefix="maya-vision-http-") as directory:
+        with tempfile.TemporaryDirectory(prefix="saguaro-vision-http-") as directory:
             output = Path(directory) / "replay"
             run = subprocess.run(
                 [sys.executable, "-B", str(root / "tools/vision_cache_e2e.py"), "--out", str(output)],
