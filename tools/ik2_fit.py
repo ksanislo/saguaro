@@ -335,7 +335,7 @@ def unsupported(backend: str, windows: bool, gpus_asked: int, cards: list, ram_g
     if cards:
         new = [g for g in cards if int(g.get("arch") or 0) >= MIN_CC]
         if not new:
-            return ("Inkling 2 Mini needs an NVIDIA Tesla P40 / GTX 10 (Pascal, experimental) or newer GPU (compute "
+            return ("Inkling 2 Mini needs an NVIDIA Tesla P40 / GTX 10 (Pascal) or newer GPU (compute "
                     "capability 6.0 or newer) - older cards are not supported by its engine")
         vram = max(float(g.get("vram_gb") or 0) for g in new)
         if vram < MIN_VRAM_GB:
