@@ -407,6 +407,12 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     # --resident-budget-gib: a pinned tier of RAM - 20 (never above the model's expert bytes) only while the page
     # cache cannot hold the experts; when it can, no tier: the file cache is it, as the live 252 GB box runs it.
     budget = resident_budget_gib(ram_gb, quant) if ram_gb and not page_cache_tier(ram_gb, quant) else None
+    if slow and budget is not None:                # (v1.2.1-B review finding 3: the tier's 8 GiB floor sits beside
+        room = int(ram_gb - ram_min_gib(quant))    #  the minimum's own budget on a thin-RAM PC - a 16 GB one clears
+        budget = min(budget, room) or None         #  the 15.9 GB minimum but could not pin 8 GiB and run too.  On a
+                                                   #  slow layout the tier shrinks to what the RAM minimum leaves,
+                                                   #  and where it leaves nothing there is no tier at all: the
+                                                   #  experts stream through the page cache there)
     # the live 4x Tesla T4 configs' own splits: four cards, all sm_75, the quant one of them ran - the pipe rate
     # belongs to THAT layout (a computed split that happened to hit the same bounds on other cards gets "1")
     live = bool(split) and n == 4 and t4 and split in set(MEASURED_SPLITS.values())
@@ -423,7 +429,9 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
     measured = why is None and (live or (n == 1 and amd and t4_sized(cards[0]) and ram_gb >= 90.0))
     tier_said = ("the next ones read through the OS file cache, the experts all fitting in RAM"
                  if page_cache_tier(ram_gb, quant) else
-                 f"the next ones in a {budget if budget is not None else 'RAM - 20'} GiB RAM tier, the rest from the SSD")
+                 f"the next ones in a {budget} GiB RAM tier, the rest from the SSD" if budget is not None else
+                 "the next ones read through the OS file cache - this PC's RAM leaves no room for a pinned tier"
+                 if ram_gb else "the next ones in a RAM - 20 GiB RAM tier, the rest from the SSD")
     said = ("no cards named" if not cards else
             f"one card: the experts it holds in VRAM, {tier_said}, a {ctx // 1024}K context" if n <= 1 else
             f"{n} cards: the {LAYERS} layers split across them ({split}), each caching its own layers' experts, "

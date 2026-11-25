@@ -1270,6 +1270,16 @@ class SetupFlow(unittest.TestCase):
         self.assertNotIn("--mtp-max-t", cfg["args"])
         self.assertFalse([q for q in asked if "very slow" in q])
 
+    def test_a_16_gb_pc_pins_no_tier_and_streams_through_the_cache(self):
+        """Review finding 3 through the setup: a 16 GB PC clears the RAM minimum by 0.07 GiB - the written layout
+        scales the pinned tier down to nothing instead of pinning 8 GiB beside the ~8 the minimum leaves."""
+        with tempfile.TemporaryDirectory() as t:
+            cfg = self.setup(Path(t), _mem=(16.0, 8.0))
+        a = cfg["args"]
+        self.assertNotIn("--resident-budget-gib", a)               # (no tier: the file cache is it, scaled slow)
+        self.assertEqual(a[a.index("--kv-resident") + 1], "4096")  # (still the scaled layout - the context here
+                                                                   #  is the 65536 the flow itself names)
+
     def test_drafting_on_overrides_the_scale_down(self):
         """Review finding 3: with --drafting on the step-2 line says drafting STAYS on - it does not announce a
         drafting off the flag overrides (and without the flag the scale-down line still says drafting off)."""

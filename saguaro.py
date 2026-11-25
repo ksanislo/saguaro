@@ -7522,7 +7522,8 @@ def qfn_ram_said(lay: dict) -> str:
     when all the experts fit in RAM and no --resident-budget-gib is written (qfn_fit's page_cache_tier)."""
     b = lay["resident_budget_gib"]
     return (f"{b} GB of RAM the next ones, the SSD the rest" if b is not None
-            else "the OS file cache the rest (all of them fit in RAM)")
+            else "the OS file cache the rest (no pinned tier: the experts all fit in RAM, or a thin-RAM layout "
+                 "leaves no room to pin one - they stream through the cache)")
 
 
 def qfn_cpu_info() -> dict:

@@ -183,6 +183,21 @@ class SlowZone(unittest.TestCase):
         self.assertTrue(p["slow"])
         self.assertEqual(p["layer_split"], "11,24,36")             # (the live split stays the live split)
 
+    def test_a_thin_ram_slow_pc_scales_its_pinned_tier(self):
+        """Review finding 3: resident_budget_gib floors at 8 GiB, but the RAM minimum (dense + buffers + system
+        = 15.9 GB) leaves a 16 GB PC no room beside it - the slow zone scales the tier to what the minimum
+        leaves instead of pinning 8 GiB the machine cannot spare."""
+        p = F.plan([gpu(0, 8.0, "89", "RTX 4060")], 16.0)          # (clears the 15.9 GB minimum, leaves 0.07)
+        self.assertTrue(p["fits"] and p["slow"], p["reason"])
+        self.assertIsNone(p["resident_budget_gib"])                # (no tier: the experts stream through the
+        self.assertIn("no room for a pinned tier", p["said"])      #  page cache on this one)
+        q = F.plan([gpu(0, 8.0, "89", "RTX 4060")], 24.0)
+        self.assertEqual(q["resident_budget_gib"], 8)              # (24 GB: the floor fits beside the minimum)
+        r = F.plan([gpu(0, 8.0, "89", "RTX 4060")], 64.0)
+        self.assertEqual(r["resident_budget_gib"], 44)             # (32/64 GB - the Layouts matrix rows: unchanged)
+        c = F.plan([gpu(0, 24.0, "86", "RTX A5000")], 96.0)        # (comfortable RAM: the tier rule is untouched)
+        self.assertEqual(c["resident_budget_gib"], 76)
+
     def test_comfortable_is_not_slow(self):
         for cards, ram in ((t4s(4), 220.0), ([gpu(0, 24.0, "86", "RTX A5000")], 128.0), ([amd()], 91.7)):
             p = F.plan(cards, ram)
