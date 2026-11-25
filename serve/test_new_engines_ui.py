@@ -334,7 +334,8 @@ class Catalog(unittest.TestCase):
         self.assertIn("Inkling 2 Mini is the model for this PC", c["hy4-flash-maya-s"]["fit"])
 
     def test_one_rx_9070_xt(self):
-        """AMD (the setup's own choice, mortar 2026-11-22): one 16 GB RDNA 4 GPU is Inkling 2 Mini's - the offload
+        """AMD (the setup's own choice, the 9070 XT box 2026-11-22): one 16 GB RDNA 4 GPU is Inkling 2 Mini's - the
+        offload
         path, measured; the iGPU beside it is not counted; Hy4-Flash does not run on AMD."""
         xt = {"index": 0, "name": "AMD Radeon RX 9070 XT", "vram_gb": 15.9, "arch": "gfx1201", "vendor": "amd"}
         igpu = {"index": 1, "name": "AMD Radeon (gfx1036)", "vram_gb": 2.0, "arch": "gfx1036", "vendor": "amd"}

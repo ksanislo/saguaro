@@ -184,8 +184,8 @@ def sysfs_card(root: Path, connectors: dict, used_mib: int, device="0x7550", rev
 
 class Reserve(unittest.TestCase):
     """The VRAM an engine leaves free on a card - AMD's and NVIDIA's alike, v1.2.1-A: 3072 MiB where the desktop may
-    run on it, 512 on a card with no display connected (AMD's sysfs: and next to no VRAM in use - mortar's RX 9070 XT
-    beside an iGPU: Maya-L read prompts token by token with 3072; NVIDIA's display_active says it outright), 1024 on
+    run on it, 512 on a card with no display connected (AMD's sysfs: and next to no VRAM in use - the RX 9070 XT beside
+    an iGPU: Maya-L read prompts token by token with 3072; NVIDIA's display_active says it outright), 1024 on
     a Linux AMD APU.  v1.2.1-D: a headless card keeps 1024 when every card is Pascal sm_6x (the P40 warm-up fell to
     264 MiB free with 512)."""
 
