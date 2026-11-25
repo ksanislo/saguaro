@@ -19,6 +19,29 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
    see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### Saguaro 1.2.1 (2026-11-25)
+
+Based on Project Maya v1.1.78.
+
+- **Qwen3.8-Flash-Next (saguaro-qfn):** setup offers 512K and 1M contexts (elastic YaRN) and asks how many answers run at
+  once, with one combined cost line; the Settings context slider saves the matching factor. Live Turbo: skip (RAM / SSD,
+  only offered where the engine applies it) and drop are per-request, off by default, and the top Turbo button no longer
+  turns drop on. The picture reader gets its VRAM back in the low-RAM layout (the loan is its size plus the engine's own
+  room). Prompt reading reports its progress about once a second, one figure over all cards. The thinking ends at the
+  model's own end token: a quoted `</think>` in it no longer leaks the rest into the answer or loses the tool call.
+- **Pascal (Tesla P40 / P100, GTX 10):** the QFN setup's Pascal class, GSQ-RCO quants (IQ3_S, Coder IQ1_M) and measured
+  speeds; the setup refuses only what cannot run and says what it scaled down.
+- **GLM-5.3-Flash:** the shared CPU lane is left unpinned when it would leave fewer than 4 cores for the GPUs' service
+  threads (v1.1.77's pinning cut a 2 x 10-core, 4 x T4 box's decode to less than half; `SAGUARO_GLM_CPU_PIN=1` pins all
+  the same). IQ2_XXS / IQ2_S experts to FP16 twice as fast, bit-identical (project-maya PR #1225 by Kanorin-chan).
+- **The page:** model names from the server's own fields; the top Turbo button restarts only for what cannot be set live;
+  nothing is asked of a model that is off the card behind llama-swap (an open page no longer reloads it); Settings show
+  the unloaded state; no engine version strings anywhere; the Monitor's Turbo tags and the read progress fixed.
+- **Setup and docs:** one display reserve rule for NVIDIA and AMD; memlock warning; a docs/DIVERGENCE.md register; the
+  README's speed tables brought to v1.1.78's and a "Measured on Saguaro" table; an upstream intake is one rename command.
+- Project Maya v1.1.76 - v1.1.78 taken in (the Maya Qwen path dropped: QFN runs on saguaro-qfn).
+- **Not run on a card in this release:** the Hy4-Flash engine (built and syntax-checked; nothing in it was run).
+
 ### Upstream Project Maya v1.1.76 - v1.1.78 taken in (2026-11-24)
 
 - **VRAM reserve (#1026, #1156):** the measured extra kept free on top of a reserve never refuses a model, is capped

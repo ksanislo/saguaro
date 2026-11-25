@@ -38,7 +38,8 @@ MIN_CC = 61                                           # NVIDIA, v1.2.1-B: Pascal
 #                                                     #  sm_70 build through engines/qfn's experimental pre-Turing
 #                                                     #  path (STRATA_EXPERIMENTAL_SM60), which needs a CUDA 12.x
 #                                                     #  toolkit: CUDA 13 dropped Pascal (saguaro.py's nvcc_range)
-# v1.2.1-B: the TRUE minimum, measured on one card (mortar Monitor, UD-Q4_K_XL): dense weights 3.9 GB (a layer
+# v1.2.1-B: the TRUE minimum, measured on one card (the 9070 XT box's Monitor, UD-Q4_K_XL): dense weights 3.9 GB (a
+# layer
 # split shares them by the split), the resident K/V window of --kv-resident N (its own bytes: the engine's INFO
 # kv_bytes_token above - 0.39 GiB at 32768 cells, 0.05 GiB at the minimum's 4096, kv_resident_gib; v1.2.1-B
 # review finding 2 settled this one constant against generate.cpp:12401 - the plan's "2.8 GB" Monitor line
@@ -287,8 +288,8 @@ def unsupported(cards: list, ram_gb: float, quant: str | None = None) -> str | N
     is the true minimum (card_min_gib / ram_min_gib): between it and the comfortable layout (every card
     MIN_VRAM_GB and MIN_RAM_GB of RAM - the layout as measured) the model RUNS and streams most of its experts
     from the RAM tier and the SSD, the same for a quant whose experts are more than these cards' VRAM and this
-    PC's RAM together hold - streaming experts from RAM and the SSD is the engine's point (mortar runs Q8_0 on
-    16 GB + 96 GB at 14-16 tok/s, SSD-bound; QFN ran on a Tesla P40 with 32 GB of RAM)."""
+    PC's RAM together hold - streaming experts from RAM and the SSD is the engine's point (the 9070 XT box runs Q8_0
+    on 16 GB + 96 GB at 14-16 tok/s, SSD-bound; QFN ran on a Tesla P40 with 32 GB of RAM)."""
     q = quant or "ud-q4_k_xl"
     mins, b = card_min_gib(cards, q), stage_bounds(cards, q)
     for i, (g, m) in enumerate(zip(cards, mins)):

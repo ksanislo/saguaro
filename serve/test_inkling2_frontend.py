@@ -279,7 +279,8 @@ class Serving(unittest.TestCase):
     def test_a_tiny_max_tokens_still_answers(self):
         """max_tokens 100 with thinking on (an Anthropic /v1/messages default): as the other engines' budget does for
         a limit of THINK_TINY_LIMIT or less, the reasoning is closed with room left and the answer follows - not a
-        thinking block alone (mortar, 2026-11-22).  saguaro-ik2 closes nothing itself: the server puts <|content_text|>."""
+        thinking block alone (the 9070 XT box, 2026-11-22).  saguaro-ik2 closes nothing itself: the server puts
+        <|content_text|>."""
         long = " ".join(f"w{i}" for i in range(150))     # (no sentence end: closed at the latest point)
         svc, eng, tok = service(MODEL + THINK + long, "Paris." + END)
         got = answer(svc, {"messages": ASK, "max_tokens": 100})

@@ -56,8 +56,9 @@ class Docs(unittest.TestCase):
         self.assertIn("nvidia-smi -lgc 1590,1590", PAGES["docs/HY4-FLASH.md"])
 
     def test_inkling_on_amd_is_said_alike_everywhere(self):
-        """README, SETUP, the setup's --help, the web catalog and AMD_SAGUARO.md say what the setup does (mortar,
-        2026-11-22): Inkling 2 Mini runs on NVIDIA and on one AMD RDNA 3 / 4 GPU of 12 GB+ (the offload path), and is
+        """README, SETUP, the setup's --help, the web catalog and AMD_SAGUARO.md say what the setup does (the 9070 XT
+        box, 2026-11-22): Inkling 2 Mini runs on NVIDIA and on one AMD RDNA 3 / 4 GPU of 12 GB+ (the offload path),
+        and is
         recommended there; the RX 9070 XT speeds quoted are ik2_fit's."""
         flat = lambda t: " ".join(t.split())   # noqa: E731
         readme, setup = flat(PAGES["README.md"]), flat(PAGES["docs/SETUP.md"])

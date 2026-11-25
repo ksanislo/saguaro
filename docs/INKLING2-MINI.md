@@ -56,7 +56,8 @@ KL here: against SQ-20 (the original weights), 2,000 tokens of text through `too
 the RX 9070 XT to within 0.0004); Strata's figures are on their own test prompts. Speeds: decode at ~50 / 8K tokens
 deep, 8K read, one request, GPU clocks not pinned, the setup's layouts (the RX 9070 XT's resident packs with `--chunk
 1024` and `SAGUARO_IK2_RESERVE_MB=1024`; without them SQ-15 there runs out of VRAM and slows to ~45 tok/s), measured
-2026-11-22 with the dynamic expert cache (`runs/s3`, mortar `ab-runs/r7`). A pack keeps each expert in its own codec;
+2026-11-22 with the dynamic expert cache (`runs/s3`, the 9070 XT box's `ab-runs/r7`). A pack keeps each expert in its
+own codec;
 held resident, each expert is packed in a pool of its own size, which is what keeps SQ-15 (11.5 GiB of experts) whole on
 a 16 GB card. On a Tesla T4 that is not faster than the offload path (28.0 / 24.5 tok/s with a 1 GiB reserve): the 3-bit
 experts' row dots are the T4's limit there, not the bus. Two T4s: SQ-20 runs (the same answers as one card, bit for

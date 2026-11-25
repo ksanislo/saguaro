@@ -530,8 +530,9 @@ class Steps(unittest.TestCase):
         return path, json.loads(path.read_text(encoding="utf-8"))
 
     def test_each_quant_its_own_config_and_layout(self):
-        """Switching quants with the setup (mortar, 2026-11-22: the one-T4 quant kept UD-Q4's --chunk 2048 and a 10K
-        prompt ran the card out of memory): each GGUF its own config, so the Models page switches between them each
+        """Switching quants with the setup (the 9070 XT box, 2026-11-22: the one-T4 quant kept UD-Q4's --chunk 2048
+        and a 10K prompt ran the card out of memory): each GGUF its own config, so the Models page switches between
+        them each
         with its own layout - UD-Q4_K_XL --chunk 2048, the one-T4 quant 1024 - and a setup again recomputes only what
         the setup chose."""
         d, ud = self.files()

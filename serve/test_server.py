@@ -3175,7 +3175,8 @@ class EngineEndTests(unittest.TestCase):
         self.assertNotIn("RAM", n)
 
     def test_a_gpu_out_of_memory_in_a_request_is_said_as_such(self):
-        """saguaro-ik2 (mortar, 2026-11-22): a cudaMalloc out of memory in a 10K prompt ends the request with an ERR
+        """saguaro-ik2 (the 9070 XT box, 2026-11-22): a cudaMalloc out of memory in a 10K prompt ends the request with
+        an ERR
         and the engine with exit 4 - not "running out of RAM"; Saguaro's own stall watchdog is not RAM either."""
         n = self.note("saguaro ik2: cudaMalloc(&p, ...): out of memory (src/ik2/ik2_main.cu:380)\n"
                       "saguaro ik2 serve: the GPU ran out of memory during this request (a smaller --chunk, context "
@@ -3205,8 +3206,8 @@ class EngineEndTests(unittest.TestCase):
             list(e.generate([1, 2, 3], 10, {}, threading.Event()))
         self.assertIn("ran out of memory", str(c.exception))
         self.assertIsNone(e.lines.get_nowait())          # (the DONE was taken; the engine's end is next)
-        # (its exit awaited before the request lets go: the next one starts a fresh engine - on mortar the request
-        #  0.1 s after the OOM wrote to the one on its way out and failed too)
+        # (its exit awaited before the request lets go: the next one starts a fresh engine - on the 9070 XT box the
+        #  request 0.1 s after the OOM wrote to the one on its way out and failed too)
         self.assertTrue(waited and e.ended)
 
     def test_a_stop_after_the_engine_ended_is_quiet(self):
