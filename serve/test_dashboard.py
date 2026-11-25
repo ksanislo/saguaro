@@ -1433,6 +1433,63 @@ console.log(JSON.stringify({exact, switched, typed,
         self.assertFalse(got["back"]["approx"])
         self.assertEqual(got["back"]["asked"], 2)                                # (once per chat, never while off-card)
 
+    def test_typing_off_card_never_stringifies_the_whole_chat(self):
+        # (P12: while the model was off the card the meter keyed its estimate on apiMessages(...) stringified - the
+        #  whole chat, arrays and all - on every key press.  The key is now cheap (the chat's id, its instructions,
+        #  the edit point, the messages' count and lengths, the draft, the attachments): 200 rapid inputs re-estimate
+        #  off at most a couple of whole-chat stringifications, the meter still moves, a chat switch and an edited
+        #  message still re-estimate, and the model is still asked for nothing off-card.)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const ch = await import(web + "/chats.js");
+document.getElementById = () => null;                          // (enough DOM for the composer focus editMessage wants)
+const log = [];
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: []}
+    : u === "api/tokens" ? {tokens: 1234}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                // (the model is off the card)
+let whole = 0;                                                  // (a whole-chat estimate: an array stringified)
+const realStringify = JSON.stringify;
+JSON.stringify = (...a) => { if (Array.isArray(a[0])) whole++; return realStringify(...a); };
+const a = ch.newChatObj(), b = ch.newChatObj();
+a.messages.push({role: "user", text: "how are the llamas today"});
+a.messages.push({role: "assistant", text: "Thirsty, mostly. Bring water."});
+b.messages.push({role: "user", text: "a completely different question about cacti and the desert"});
+st.S.chats = [a, b];
+ch.openChat(a);
+const opened = {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx};
+for (let i = 0; i < 200; i++) {                                 // (200 rapid key presses into the composer)
+  st.S.draft = "typing one more character into the composer " + "x".repeat(i);
+  ch.updateCtxMeter();
+}
+const typed = {whole, tokens: st.S.ctx.tokens, log: log.slice()};
+st.S.draft = "";
+ch.openChat(b);                                                 // (another chat: its own figure, not a's)
+await new Promise((ok) => setTimeout(ok, 50));
+const switched = {whole, tokens: st.S.ctx.tokens, approx: st.S.ctx.approx, log: log.slice()};
+ch.editMessage(0);                                              // (a message back in the composer to be edited...)
+st.S.draft = "a much shorter question"; ch.updateCtxMeter();    // (... and made shorter: the estimate follows)
+await new Promise((ok) => setTimeout(ok, 50));
+const edited = {whole, tokens: st.S.ctx.tokens, approx: st.S.ctx.approx, log: log.slice()};
+JSON.stringify = realStringify;
+sv.stopPoll();
+console.log(realStringify({opened, typed, switched, edited}));""")
+        self.assertTrue(got["opened"]["tokens"] > 0 and got["opened"]["approx"])   # (off-card: the local estimate)
+        self.assertLessEqual(got["typed"]["whole"], 2)                             # (200 inputs: at most a couple)
+        self.assertNotEqual(got["typed"]["tokens"], got["opened"]["tokens"])       # (... and the meter still moves)
+        self.assertEqual(got["typed"]["log"], ["/running"])                        # (typing asked nothing of the model)
+        self.assertLessEqual(got["switched"]["whole"], 2)
+        self.assertNotEqual(got["switched"]["tokens"], got["typed"]["tokens"])     # (the switch: b's own figure)
+        self.assertTrue(got["switched"]["approx"])
+        self.assertEqual(got["switched"]["log"], ["/running"])                     # (the switch asked nothing either)
+        self.assertLessEqual(got["edited"]["whole"], 2)
+        self.assertNotEqual(got["edited"]["tokens"], got["switched"]["tokens"])    # (the edit re-estimated)
+        self.assertTrue(got["edited"]["approx"])
+        self.assertEqual(got["edited"]["log"], ["/running"])
+
     def test_the_ram_skip_carries_its_warning_under_the_row_only_for_ram(self):
         # Settings > Turbo, live: the rows name the options plainly, and the RAM warning (callout--warn, the
         # class the page already has for warnings) shows under the Skip row only while RAM is chosen

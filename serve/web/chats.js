@@ -284,18 +284,27 @@ export function liveCtx() {
   }
   return {tokens: live.prompt_tokens + (live.generated || 0), approx: false, why: "This request"};
 }
+// (P12) the off-card key without stringifying the whole chat on every key press: the cheap fields the local estimate
+// reads - the chat itself, its instructions, where an edit cuts, the messages' count and text lengths, the draft and
+// what is attached - carry every change that can move the figure
+function offCardKey(msgs) {
+  const c = S.current;
+  let chars = 0;
+  for (const m of msgs) chars += (m.text || "").length + (m.images || []).length + (m.files || []).length;
+  return `off-card ${c.id} ${(c.system || "").length} ${S.editIndex} ${msgs.length} ${chars} ${S.draft.length} ${S.attachments.length}`;
+}
 export function updateCtxMeter() {
   clearTimeout(ctxTimer);
   if (liveCtx()) return;
   const msgs = draftChat();
   if (!msgs.length) { ctxKey = null; S.ctx = {tokens: null, approx: false, why: ""}; emit(); return; }
   if (unloaded()) {                                  // (behind llama-swap api/tokens would load the model as much as
-    const off = "off-card " + JSON.stringify(apiMessages(S.current, msgs, true));   //  /metrics did - but the meter must
-    if (S.ctx.tokens == null || ctxKey !== off) {    //  never show another chat's figure: switching to a chat, or
-      ctxKey = off;                                  //  changing this one's messages, re-estimates locally (the mark
-      S.ctx = {tokens: estimateTokens(msgs), approx: true, why: "This chat"};   //  keeps it clear of the exact count's
-      emit();                                        //  ctxKey, so the real count asks once the gate opens)
-    }
+    const off = offCardKey(msgs);                    //  /metrics did - but the meter must never show another chat's
+    if (S.ctx.tokens == null || ctxKey !== off) {    //  figure: switching to a chat, or changing this one's messages,
+      ctxKey = off;                                  //  re-estimates locally - off a cheap key, not the whole chat
+      S.ctx = {tokens: estimateTokens(msgs), approx: true, why: "This chat"};   //  stringified per key press (P12);
+      emit();                                        //  the mark keeps it clear of the exact count's ctxKey, so the
+    }                                                //  real count asks once the gate opens)
     return;
   }
   ctxTimer = setTimeout(async () => {
