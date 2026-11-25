@@ -10,7 +10,7 @@ import {api, esc, store} from "./lib.js";
 import {S, THINKING, P, confirmDialog, emit, loadPrefs, prefsKey, toast} from "./state.js";
 import {loadTime} from "./server.js";
 import {TURBO_DROPS, TURBO_SKIPS, turboEnter, turboLeave} from "./turbo-core.js";
-import {Seg, Switch} from "./ui.js";
+import {Seg} from "./ui.js";
 
 S.turbo = {on: false, engine: false, plan: {}, env: {}, restarts: false, busy: false};
 
@@ -157,18 +157,20 @@ export async function setTurboLive(next) {   // {"drop","skip"} (parts that stay
 
 export function TurboLive() {
   if (S.turboLive === undefined) return null;   // older server: no live Turbo
-  const t = S.turboLive;
-  const on = (v) => setTurboLive({drop: t ? t.drop : 1, skip: t ? t.skip : "off", ...(v || {})});
+  const t = S.turboLive || {drop: 0, skip: "off"};
+  const set = (v) => {                           // (both off = no model default: requests run exact)
+    const n = {drop: t.drop || 0, skip: t.skip || "off", ...v};
+    setTurboLive(n.drop || n.skip !== "off" ? n : null);
+  };
   return html`<div class="set-head"><h3>Turbo, live</h3></div>
     <p class="set-intro">Lossy speed for every request this model answers that does not set its own - the apps, the
       agents and new chats. A chat's own Turbo (the bolt in its message box) wins over this. It applies to the next
-      request as it is asked - nothing restarts - and a request without it stays exact when this is off.</p>
-    <div class="set-row"><span class="set-row__text"><span class="set-row__label">Live Turbo</span><span class="set-row__sub">drop the weakest experts, keep an answer the model still stands behind</span></span>
-      <${Switch} label="Live Turbo for this model" on=${!!t} onChange=${(v) => setTurboLive(v ? {drop: 1, skip: "off"} : null)}/></div>
-    ${t ? html`<div class="set-row"><span class="set-row__text"><span class="set-row__label">Drop experts</span><span class="set-row__sub">per token, the lowest router weights of the 10; the rest carry their share</span></span>
-      <${Seg} label="Experts dropped" value=${String(t.drop)} onChange=${(v) => on({drop: +v})}
-        options=${TURBO_DROPS.map((d) => ({id: String(d), label: `${d}`, title: `run top-10 minus ${d}: the ${d} weakest experts of every token dropped, the kept ones renormalised`}))}/></div>
-      <div class="set-row"><span class="set-row__text"><span class="set-row__label">Skip</span><span class="set-row__sub">an expert the engine would fetch the slow way is dropped instead</span></span>
-      <${Seg} label="Skip tier" value=${t.skip || "off"} onChange=${(v) => on({skip: v})}
-        options=${TURBO_SKIPS.map((s) => ({id: s.id, label: s.name, title: s.hint}))}/></div>` : null}`;
+      request - nothing restarts. Both off: requests run exact.</p>
+    <div class="set-row"><span class="set-row__text"><span class="set-row__label">Drop experts</span><span class="set-row__sub">per token, the lowest router weights of the 10; the rest carry their share</span></span>
+      <${Seg} label="Experts dropped" value=${String(t.drop || 0)} onChange=${(v) => set({drop: +v})}
+        options=${[{id: "0", label: "off", title: "every expert the router picks is used"},
+                   ...TURBO_DROPS.map((d) => ({id: String(d), label: `${d}`, title: `run top-10 minus ${d}: the ${d} weakest experts of every token dropped, the kept ones renormalised`}))]}/></div>
+    <div class="set-row"><span class="set-row__text"><span class="set-row__label">Skip experts</span><span class="set-row__sub">an expert the engine would fetch the slow way is dropped instead</span></span>
+      <${Seg} label="Skip tier" value=${t.skip || "off"} onChange=${(v) => set({skip: v})}
+        options=${TURBO_SKIPS.map((s) => ({id: s.id, label: s.name, title: s.hint}))}/></div>`;
 }
