@@ -6,7 +6,8 @@ previous run's mistake is named in the plan and was avoided.
 
 ## What changed
 
-`docs/DIVERGENCE.md` (new, 694 lines / 64 KB): the register docs/UPSTREAM.md §3 asks for, with the ten headings the
+`docs/DIVERGENCE.md` (new, 707 lines / 65 KB after the review fix-ups; 694 lines / 64 KB at step 5): the register
+docs/UPSTREAM.md §3 asks for, with the ten headings the
 plan named and 89 numbered entries. Entry format as specified: what, why, where (`file:function`), switch and default,
 the measured gain with the source line that states it (or "not measured"), and exact vs answer-changing. Numbers are
 copied from the sources, never re-derived.
@@ -67,7 +68,8 @@ beyond read-only greps. What was verified instead:
   are branch work, DeepSeek's `--ssd-cache auto` setup rule is branch work too (the engine flag exists, `saguaro.py`
   does not write it), and `tools/test_hip_compat.py` in this tree does not run `tools/hip_syntax_check.py` although the
   tool's own header says it does.
-- `git diff --stat e6d840db2..HEAD`: one file, 694 insertions, no deletions - no code touched.
+- `git diff --stat e6d840db2..HEAD`: docs files only (`docs/DIVERGENCE.md`, this report, `REVIEW-RESULT.md`),
+  insertions only - no code touched (as each step commit was made, the same command showed only the register file).
 - Line lengths kept under 125 characters, in line with `docs/UPSTREAM.md` (max 122).
 
 ## Open questions
