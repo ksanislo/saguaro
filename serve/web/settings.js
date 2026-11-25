@@ -2,7 +2,7 @@
 // (the API prices the sidebar's Saved counts with), Chat defaults (sampling, thinking, shared with other apps), Instructions, Tools (MCP), Connect your tools, Data, About and
 // updates.  A change applies at once; the two that restart the model ask first.
 import {html, useEffect, useRef, useState} from "./preact.js";
-import {MOD, api, ctxfmt, fmt, gb, isPhone, modelName, store} from "./lib.js";
+import {MOD, api, ctxfmt, fmt, gb, isPhone, modelLabel, store} from "./lib.js";
 import {DEFAULTS, LEVELS, P, PENALTIES, PRESETS, S, confirmDialog, copyText, emit, presetOf, resetPrefs, savePrefs, schemeChoice, setScheme, setTheme,
         themeChoice, thinkTitles, toast} from "./state.js";
 import {usd} from "./sidebar.js";
@@ -75,14 +75,14 @@ function Model() {
   }
   const pi = S.portInfo, pv = /^\d+$/.test(port.trim()) ? +port.trim() : null;
   const portChanged = pi && pv != null && pv !== pi.port;
-  const engine = ENGINES[eng.engine_kind] || eng.engine_kind;
   const reload = async () => {
     const tokens = S.ctx.tokens != null ? S.ctx.tokens : estimateTokens(S.current.messages);
     if (await confirmContext(v, tokens)) setCtx(null);
   };
   return html`<h3>Model</h3>
     <div class="model-card"><${ModelLogo} model=${h.model} size=${36}/>
-      <span><b>${modelName(h.model)}</b><span>${[h.model, engine, h.version ? `Saguaro v${h.version}` : ""].filter(Boolean).join(" · ")}</span></span></div>
+      <span><b>${modelLabel(h, {compact: true})}</b><span>API id: ${h.model}
+        <button type="button" class="btn btn--ghost btn--sm" onClick=${() => copyText(h.model)}><${Icon} name="copy" sm/>Copy</button></span></span></div>
     ${h.supervisor ? html`<p class="set-note">This server runs under ${h.supervisor}: it starts, stops and switches the models,
       and their context sizes, ports and engine settings are its configuration. Pick another model by its id in your app.</p>`
     : c ? html`<div class="set-block">
@@ -151,7 +151,7 @@ function ChatDefaults() {
   useEffect(() => { loadTurboLive(); }, []);
   return html`<div class="set-head"><h3>Chat defaults</h3><${TurboButton}/></div>
     <${TurboLive}/>
-    <p class="set-intro">How ${modelName(S.health.model)} writes new answers. Each model keeps its own.</p>
+    <p class="set-intro">How ${modelLabel(S.health).name} writes new answers. Each model keeps its own.</p>
     <${Row} label="Presets"><${Seg} label="Presets" value=${preset} onChange=${(id) => set(PRESETS[id])}
       options=${[{id: "precise", label: "Precise", title: "Temperature 0: the same question gives the same answer"},
                  {id: "balanced", label: "Balanced", title: "Temperature 0.6, top-p 0.95, top-k 20"},
@@ -291,13 +291,13 @@ function PriceCard({p, src, onSaved}) {
   const save = async (price) => {
     try {
       onSaved(await api("api/savings/prices", {method: "POST", body: {model: p.model, price}}));
-      toast("success", "Prices saved", `${modelName(p.model)}: every total is counted again with them.`);
+      toast("success", "Prices saved", `${modelLabel(p, {compact: true})}: every total is counted again with them.`);
     } catch (e) { toast("error", "Not saved", e.message, 6000); }
   };
   const id = `price-${p.model.replace(/[^a-z0-9]/gi, "-")}`;
-  return html`<section class="price" aria-label=${`${modelName(p.model)}'s prices`}>
+  return html`<section class="price" aria-label=${`${modelLabel(p, {compact: true})}'s prices`}>
     <div class="price__head"><${ModelLogo} model=${p.model} size=${32}/>
-      <span><b>${modelName(p.model)}</b><span>${p.custom ? `Your prices (not ${def ? def.api : "any API"}'s)`
+      <span><b>${modelLabel(p, {compact: true})}</b><span>${p.custom ? `Your prices (not ${def ? def.api : "any API"}'s)`
         : def ? `${def.api}'s prices: ${from}${src && src.as_of ? ` (as of ${priceMonth(src.as_of)})` : ""}`
         : "No API price yet: give it one to count what it saves"}</span></span>
       ${p.running ? html`<span class="pill pill--accent">Running</span>` : null}</div>

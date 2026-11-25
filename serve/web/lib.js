@@ -148,6 +148,18 @@ export function modelName(id, short) {
   }).join(" ");
 }
 
+// the one model label, everywhere a model is named (sidebar, chat header, Settings, Models, Savings): compact for
+// the tight places - "Qwen3.8 Flash Next (Q8_0)" - or the {name, quant} pair where the quant gets a line of its own
+// (the Models list).  The quant exactly as the server named it, never prettified ("Q8_0", "UD-Q4_K_XL", "Maya-L")
+// and never split from the model id; a page row (the Models list, the Saved rows) carries model + quant; a server
+// without the new fields: today's text (its model_label, else the model id as modelName words it).
+export function modelLabel(h = {}, {compact = false} = {}) {
+  const pretty = h.model_name_pretty || "";
+  const name = pretty || h.model_label || modelName(h.model || "");
+  const quant = pretty ? h.model_quant || "" : h.quant || "";
+  return compact ? (quant ? `${name} (${quant})` : name) : {name, quant};
+}
+
 // the platform's modifier key, as the shortcuts are shown
 export const MOD = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "⌘" : "Ctrl";
 export const isPhone = () => matchMedia("(max-width: 767px)").matches;

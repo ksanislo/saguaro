@@ -1763,8 +1763,9 @@ class WebApp(unittest.TestCase):
             self.svc.model_label = None
         self.assertEqual((health["model_label"], health["model"]), ("MiniMax M3.1 · Maya-XS", self.svc.model))
         self.assertIsNone(json.loads(self.get("/health")[2])["model_label"])   # (a hand-written config: the id)
-        side = (ROOT / "serve/web/sidebar.js").read_text(encoding="utf-8")   # (the sidebar's model card)
-        self.assertIn("S.health.model_label || modelName(S.health.model)", side)
+        side = (ROOT / "serve/web/sidebar.js").read_text(encoding="utf-8")   # (the sidebar's model card: the one label)
+        self.assertIn("modelLabel(S.health, {compact: true})", side)
+        self.assertNotIn("S.health.model_label || modelName", side)
 
     def test_the_model_is_named_in_two_parts(self):
         """/health's and /metrics' model_name_pretty and model_quant: the model's display name and its files' name

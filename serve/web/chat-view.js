@@ -2,7 +2,7 @@
 // (an answer is painted in place while it streams), the message box with its thinking speedometer, and a new chat's
 // greeting: the model that answers it and ideas to start from.
 import {Component, html, useEffect, useLayoutEffect, useRef, useState} from "./preact.js";
-import {SPRITE, coarse, ctxfmt, esc, fmt, isPhone, modelName, timeStr, tokfmt} from "./lib.js";
+import {SPRITE, coarse, ctxfmt, esc, fmt, isPhone, modelLabel, timeStr, tokfmt} from "./lib.js";
 import {LEVELS, P, PRESET_NAMES, S, copyText, emit, presetOf, savePrefs, thinkPill, thinkTitles} from "./state.js";
 import {mcpOn} from "./server.js";
 import {addFiles, cancelEdit, chatView, ctxMeter, editMessage, focusInput, newChat, painters, regenerate,
@@ -32,7 +32,7 @@ function ModelMenu({open, close, anchor}) {
   const go = (s) => () => { close(); openSettings(s); };
   return html`<${Menu} open=${open} onClose=${close} anchor=${anchor} label="Model" align="left" cls="model-menu" width=${340}>
     <div class="model-menu__card"><${ModelLogo} model=${h.model} size=${36}/>
-      <span><b>${modelName(h.model, !!h.model_label)}</b><span>${h.model_label || h.model} · on this machine${h.version ? ` · v${h.version}` : ""}</span></span></div>
+      <span><b>${modelLabel(h, {compact: true})}</b><span>on this machine${h.version ? ` · v${h.version}` : ""}</span></span></div>
     <${MenuSep}/>
     ${c && isPhone() ? html`<div class="model-menu__meter"><${MeterRing} c=${c}/><span>${c.why}: ${c.approx ? "≈" : ""}${fmt(c.tokens)} of ${fmt(c.max)} tokens</span></div>` : null}
     <button type="button" role="menuitem" class="menu__item" onClick=${go("model")}><span class="menu__label">Context size</span>
@@ -50,7 +50,7 @@ function ModelMenu({open, close, anchor}) {
 function Header({empty}) {
   const [model, setModel] = useState(false), [opts, setOpts] = useState(false);
   const mBtn = useRef(null), oBtn = useRef(null);
-  const name = modelName(S.health.model, true);   // (the short form here: "Qwen-3.8-Flash-Next"; the menu's line below it has the full one)
+  const name = modelLabel(S.health, {compact: true});   // ("Qwen3.8 Flash Next (Q8_0)": the one label, the quant as named)
   if (isPhone()) {
     return html`<header class="chat-head chat-head--float">
       <button type="button" class="glass-btn" aria-label="Chats" onClick=${() => { S.drawer = true; emit(); }}><${Icon} name="menu"/></button>
@@ -443,7 +443,7 @@ function ModelCard({phone}) {
   const h = S.health || {}, m = S.metrics, st = status(true);
   const ready = S.conn === "ok" && st.text === "Idle";
   const last = m && (m.requests || [])[0], sv = m && m.savings;
-  const name = h.model_label || modelName(h.model) || "The model", state = ready ? "Ready" : st.text;
+  const name = modelLabel(h, {compact: true}) || "The model", state = ready ? "Ready" : st.text;
   const pill = html`<span class=${`pill pill--${ready ? "ok" : st.tone}`}><i class="status__dot"></i>${state}</span>`;
   if (phone) {   // (the whole card a button: the name, then its state and the facts on one line, short)
     // (the speed and what it saved; the context size when there is neither yet - a narrow line has room for two)

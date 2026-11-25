@@ -1,6 +1,6 @@
 // serve/web/server.js - what the page asks the server: its health (the model, its defaults), the live metrics every
 // second, the MCP servers, the context size and port (each a restart), the update, the shared settings and the report.
-import {api, ctxfmt, esc, fmt, headers} from "./lib.js";
+import {api, ctxfmt, esc, fmt, headers, modelLabel} from "./lib.js";
 import {DEFAULTS, P, PENALTIES, S, THINKING, confirmDialog, emit, loadPrefs, modelId, newModelCheck, setFamily, toast} from "./state.js";
 
 // ------------------------------------------------------------------ health: the model and its recommended settings
@@ -27,7 +27,7 @@ export async function loadHealth() {
       S.current.thinking = P.thinking;
       S.current.thinkingFor = modelId();
     }
-    if (switched) toast("info", `${h.model_label || h.model}: its own settings`, "A new model starts at its standard " +
+    if (switched) toast("info", `${modelLabel(h, {compact: true})}: its own settings`, "A new model starts at its standard " +
                         "parameters and thinking level; change them in Settings › Chat defaults.", 6000);
     emit();
     onHealth();
