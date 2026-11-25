@@ -1328,6 +1328,54 @@ console.log(JSON.stringify({unloaded,
                                                        "api/thinking-budget", "api/update"]))   # (ready: all six once)
         self.assertTrue(got["loaded"])
 
+    def test_the_meter_re_estimates_when_the_chat_changes_while_unloaded(self):
+        # (the P2 review's L4: with the gate closed the meter only re-estimated when it held no figure - so a chat
+        # opened after one the server had counted went on showing that count as "This chat". It re-estimates whenever
+        # the chat or its messages change, still asking nothing of the model, and the exact count asks again once
+        # the model is back on the card.)
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const ch = await import(web + "/chats.js");
+const log = [];
+let ready = true;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "api/tokens" ? {tokens: 1234}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+const a = ch.newChatObj(), b = ch.newChatObj();
+a.messages.push({role: "user", text: "how are the llamas today"});
+b.messages.push({role: "user", text: "a completely different question about cacti and the desert"});
+st.S.chats = [a, b];
+ch.openChat(a);                                                 // (ready: the server's exact count)
+await new Promise((ok) => setTimeout(ok, 500));
+const exact = {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx};
+ready = false;
+await sv.poll();                                                // (the model is swapped off the card)
+ch.openChat(b);                                                 // (another chat: its own figure, not a's)
+await new Promise((ok) => setTimeout(ok, 50));
+const switched = {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx, why: st.S.ctx.why, log: log.slice()};
+st.S.draft = " and typing a new message"; ch.updateCtxMeter();  // (its messages change: re-estimate again)
+await new Promise((ok) => setTimeout(ok, 50));
+const typed = {tokens: st.S.ctx.tokens, log: log.slice()};
+ready = true;
+await sv.poll();                                                // (back on the card)
+ch.updateCtxMeter();
+await new Promise((ok) => setTimeout(ok, 500)); sv.stopPoll();
+console.log(JSON.stringify({exact, switched, typed,
+                            back: {tokens: st.S.ctx.tokens, approx: st.S.ctx.approx,
+                                   asked: log.filter((u) => u === "api/tokens").length}}));""")
+        self.assertEqual((got["exact"]["tokens"], got["exact"]["approx"]), (1234, False))
+        self.assertEqual(got["switched"]["log"], ["api/tokens", "/running"])     # (the switch asked nothing)
+        self.assertNotEqual(got["switched"]["tokens"], 1234)                     # (not the previous chat's figure)
+        self.assertTrue(got["switched"]["approx"])
+        self.assertEqual(got["typed"]["log"], ["api/tokens", "/running"])        # (typing asks nothing either)
+        self.assertNotEqual(got["typed"]["tokens"], got["switched"]["tokens"])   # (changed messages: a fresh estimate)
+        self.assertEqual(got["back"]["tokens"], 1234)                            # (back on the card: the real count)
+        self.assertFalse(got["back"]["approx"])
+        self.assertEqual(got["back"]["asked"], 2)                                # (once per chat, never while off-card)
+
     def test_the_ram_skip_carries_its_warning_under_the_row_only_for_ram(self):
         # Settings > Turbo, live: the rows name the options plainly, and the RAM warning (callout--warn, the
         # class the page already has for warnings) shows under the Skip row only while RAM is chosen
