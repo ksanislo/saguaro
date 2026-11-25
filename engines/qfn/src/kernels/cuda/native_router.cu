@@ -59,6 +59,7 @@ __device__ __forceinline__ void turbo_count(const TurboRoute& tr, int row, int n
     if (tr.stats == nullptr) return;
     if ((tr.drop != nullptr && tr.drop[row] != 0) || (tr.skip != nullptr && tr.skip[row] != 0)) {
         const int bucket = tr.tag != nullptr ? tr.tag[row] : 0;
+        if (bucket < 0 || bucket >= 16) return;   // the engine hands out 0 (solo) and 1+slot; nothing else
         atomicAdd(tr.stats + (size_t) bucket * 3 + 0, (unsigned long long) n_pick);
         atomicAdd(tr.stats + (size_t) bucket * 3 + 1, (unsigned long long) n_drop);
         atomicAdd(tr.stats + (size_t) bucket * 3 + 2, (unsigned long long) n_skip);
