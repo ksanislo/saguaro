@@ -437,6 +437,26 @@ second card's experts from RAM, so they run at the offload path's speed. On Wind
 are untested there). CMake skips `saguaro-ik2` without a CUDA arch of 70 or more in the list (`-DMAYA_IK2_WINDOWS=OFF`:
 not on Windows).
 
+**Long prompts on Turing and two cards (upstream PR #1233; all opt-in, the defaults and their answers unchanged).** Our sm_75 builds
+already run the fused prompt attention in a one-tile layout; upstream added two further Turing layouts to pick:
+`SAGUARO_IK2_FLASH_TURING=1` selects the 32-key one (K then V in one 19 KB tile, three blocks an SM; `SAGUARO_IK2_FLASH_TV=0`:
+the 64-key single-buffer one, our default's form), the FP16 cache's path (the FP8 cache keeps our one-tile kernel). Same FP32
+accumulation in another order: most answers the same tokens, some differ in their wording after the first lines.
+`SAGUARO_IK2_PF_GPU1=1` (the two-card split on the offload path, not with `--ep` or `--tp 2`): the prompt's experts that GPU 0's
+tier lacks run on GPU 1, which holds them, instead of streaming from RAM; the rows between the cards go by peer copies with
+`SAGUARO_IK2_PF_PEER=1` (access enabled and copies checked at load, both ways, on the source card's stream) or through pinned
+host memory (`SAGUARO_IK2_PF_HOST=1` forces that). The answers do not change (the sums split in two parts, added).
+`SAGUARO_IK2_DRAFT_GPU=1` runs the drafter on GPU 1 of the split (with the output head as planar Q8), which gives its VRAM back
+to GPU 0's expert tier; the same answers. `SAGUARO_IK2_PA70_TURING=1` runs Volta's fused prompt attention on sm_75 past 16384
+positions (`SAGUARO_IK2_PA70_MIN`), the option that needs no new layout; `SAGUARO_IK2_PROF=1` prints a request's time by phase
+(full / sliding attention, its pieces, the experts' pieces, GPU 0's wait for GPU 1) on stderr. Upstream measured on RTX 2080 Ti
+(262K context, greedy): with `SAGUARO_IK2_FLASH_TURING=1 --chunk 8192` a 100K prompt read rose from 342 to about 1994 tok/s on one
+card, and to about 2289 on an NVLink pair with `SAGUARO_IK2_PF_GPU1=1 SAGUARO_IK2_PF_PEER=1` added - their numbers, our T4s not
+measured. They also found that a peer copy issued on the DESTINATION card's stream arrives partly wrong between about 256 KB and
+3 MB on such a pair (on the SOURCE card's stream every size is right), which is why the checks above issue theirs on the source's
+stream. `tools/ik2_check.py` reproduces their speed table and checks the settings' answers; `tests/ik2_p2p_stream.cu` shows which
+way a pair of cards' peer copies behave; `tests/ik2_kernels_test.cu` covers the flash kernel's layouts against a double reference.
+
 **AMD (HIP, Linux).** A HIP build has `saguaro-ik2` for every arch of its list (not for AMD on Windows yet). The kernels
 written for `mma.sync` / `ldmatrix` / `cp.async` run through AMD versions that keep their fragment layouts; the prompt's
 hot paths have kernels of their own on RDNA 3 / 3.5 / 4's matrix cores (`src/ik2/ik2_rdna.inc`): a layer's routed
