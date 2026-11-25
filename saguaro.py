@@ -7666,6 +7666,45 @@ def qfn_ram_budget(ram: float) -> int:
     return max(8, int(ram - QFN_RAM_SPARE_GB))
 
 
+def qfn_profile_shape(path: Path):
+    """An expert profile's (layers, experts a layer) from its header - "STRP", u32 version, u32 layers, u32 experts
+    (engines/qfn/src/core/expert_cache.cpp refuses anything that is not this shape with "a profile for a different
+    artifact") - or None when the file is not there or does not read as a version 1 profile."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+        magic, ver, nl, ne = struct.unpack("<4sIII", head)
+    except (OSError, ValueError, struct.error):
+        return None
+    return (nl, ne) if magic == b"STRP" and ver == 1 else None
+
+
+def qfn_expert_shape(pack: Path):
+    """A quant's own (layers, experts a layer) as its pack's index says: the router rows of blk.0.ffn_gate_inp.weight
+    are the experts it keeps (iq_pack.py: "router rows = experts kept - pruned models ship < 512", the Coder's 256
+    of 512) and the blk.N. tensors say its layers.  None when the pack or its index is not there to read."""
+    try:
+        rows, layers = {}, set()
+        with open(pack / "index.txt", encoding="utf-8") as f:
+            for line in f:
+                fl = line.split()
+                if not fl or fl[0].startswith("#"):
+                    continue
+                rows[fl[0]] = fl
+                if fl[0].startswith("blk.") and fl[0].split(".")[1].isdigit():
+                    layers.add(int(fl[0].split(".")[1]))
+    except (OSError, ValueError, IndexError):
+        return None
+    r = rows.get("blk.0.ffn_gate_inp.weight")
+    if not r or len(r) < 9 or not layers:
+        return None
+    try:
+        return (max(layers) + 1, int(r[8]))
+    except ValueError:
+        return None
+
+
 def qfn_ram_said(lay: dict) -> str:
     """The tier's phrase in the setup's layout line: the pinned RAM tier and the SSD below it, or the OS file cache
     when all the experts fit in RAM and no --resident-budget-gib is written (qfn_fit's page_cache_tier)."""
@@ -7714,14 +7753,45 @@ def write_config_qfn(a, pc: dict, meta: dict, quant: str, files: list, pack: Pat
     var = models / name / "var"
     (var / "sessions").mkdir(parents=True, exist_ok=True)
     profile = var / "expert-profile.bin"
-    if not profile.exists() and QFN_PROFILE.is_file():   # (the shipped ranking; the engine adds this PC's to it)
-        shutil.copyfile(QFN_PROFILE, profile)
     ram = mem_gb()[0]
     lay = QF.plan(pc["gpus"], ram, quant, qfn_cpu_info())   # (NVIDIA: one card or the layer split; adds nothing on
                                                             #  AMD; the CPU's facts drive the TOPOLOGY class)
+    # v1.2.1-D fix (f): data/expert-profile-qfn.bin ranks 48 layers x 512 experts, and copying it into every quant's
+    # var/ stopped the Coder (256 experts a layer, half of them pruned) at load with "a profile for a different
+    # artifact".  The shipped ranking is copied only when its shape matches the quant's own - read from the pack's
+    # index, not hard-coded (no index to read: the rule as it was).  With no matching profile the --expert-profile /
+    # --expert-profile-save pair stays out of the config and the engine starts and learns on its own - unless the
+    # layout REQUIRES a static one: the pinned RAM tier (--resident-budget-gib, the low-RAM complement layout) runs
+    # only from a profile of the model's own shape, so there the setup stops with a plain line naming the file that
+    # is missing and how to make one, instead of writing a config that cannot start.
+    shape = qfn_expert_shape(pack)
+    if shape is None:
+        if not profile.exists() and QFN_PROFILE.is_file():   # (the shipped ranking; the engine adds this PC's to it)
+            shutil.copyfile(QFN_PROFILE, profile)
+        profile_ok = profile.exists()
+    else:
+        if not profile.exists() and QFN_PROFILE.is_file() and qfn_profile_shape(QFN_PROFILE) == shape:
+            shutil.copyfile(QFN_PROFILE, profile)            # (the shipped ranking is of this shape)
+        profile_ok = qfn_profile_shape(profile) == shape     # (a file of another artifact stays where it is and
+                                                             #  is not read: the engine would stop at load)
+        if not profile_ok and lay["resident_budget_gib"] is not None:
+            have, shipped = qfn_profile_shape(profile), qfn_profile_shape(QFN_PROFILE)
+            fail(f"{Q.shown('qfn', quant)}: this layout pins its experts in a {lay['resident_budget_gib']} GiB RAM "
+                 f"tier, which needs a static expert profile of this model's shape ({shape[0]} layers x {shape[1]} "
+                 f"experts) - {profile} " +
+                 (f"is a profile for {have[0]} x {have[1]}, a different artifact" if have else "is not there") +
+                 (f", and the shipped {QFN_PROFILE.name} is {shipped[0]} x {shipped[1]}" if shipped else
+                  f", and the shipped {QFN_PROFILE.name} is not here"),
+                 f"make a matching profile first: {sys.executable} tools/make_profile.py --no-base --n-expert "
+                 f"{shape[1]} --out {profile} (a routing trace of yours - a run with --dump-routing - ranks it; "
+                 "--help for the rest) and run the setup again")
     args = ["--pack", str(pack), "--native", str(files[0])]
-    if profile.exists():
+    if profile_ok:
         args += ["--expert-profile", str(profile), "--expert-profile-save", str(profile)]
+    elif shape is not None:
+        ok(f"expert profile: none of this model's {shape[0]} x {shape[1]} shape on the PC, so --expert-profile stays "
+           "out and the engine starts without one and learns as it runs (this layout has no RAM tier, which is the "
+           f"only one that needs a static profile - tools/make_profile.py --no-base --n-expert {shape[1]} writes one)")
     args += ["--expert-cache", "auto", "--prefill", "auto", "--spec", "3", "--spec-min-p", "0.7"]
     if mtp is not None:
         args += ["--mtp", str(mtp)]
