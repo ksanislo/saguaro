@@ -226,12 +226,15 @@ write the bare form. Biggest first.
     an AMD DeepSeek config is still made by hand. Gain: decode 4.4 -> 11.1-13.2 tok/s on the 9070 XT
     (ref/reports/REPORT-amd-ds4mm3.md:58, 150). Exact for the logits that matter: AMD-vs-T4 KL 0.013-0.025 against a
     T4 run-to-run floor of 0.009-0.020 (ref/reports/REPORT-amd-ds4mm3.md:14).
-17. **Measured and not shipped** (so an intake does not re-do them): the 7,7,13,13 layer split (reads -4.2 % but solo
+17. **Measured and not shipped** (so an intake does not re-do them). The switch names below are as the ledger wrote
+    them; the arms ran on experiment branches, so most of them are not in this tree (noted where it is not the one
+    that shipped). The 7,7,13,13 layer split (reads -4.2 % but solo
     -3.4 % / n2 -5.1 %, and it deadlocked the read helper before the guard - keep 10x4,
-    ref/PERF-LEDGER.md:614-616, 802-805); uneven `--tp 2` (`DS4_TP_GGUF_UNEVEN`, worse everywhere,
+    ref/PERF-LEDGER.md:614-616, 802-805); uneven TP2 (`DS4_TP_GGUF_UNEVEN`, worse everywhere,
     ref/PERF-LEDGER.md:603-605); the Engram decode partition (`DS4_ENGRAM_DECODE_KEEP`, rejected,
-    ref/PERF-LEDGER.md:563-568); the read share (`MAYA_DS4_READ_SHARE`, none met the 25 %-of-solo bar,
-    ref/PERF-LEDGER.md:506-510); expert-parallel decode (`DS4_EP`, parked: -38 % solo vs live,
+    ref/PERF-LEDGER.md:563-568); the read share (`SAGUARO_DS4_READ_SHARE`, which *is* in the tree at
+    `src/ds4/ds4_main.cpp:2166`, none of its arms met the 25 %-of-solo bar, ref/PERF-LEDGER.md:506-510);
+    expert-parallel decode (`DS4_EP`, parked: -38 % solo vs live,
     ref/PERF-LEDGER.md:732-737); `--parallel 8` (no gain, "keep 4", ref/PERF-LEDGER.md:624-629); Engram O_DIRECT
     (slower on x86, ref/PERF-LEDGER.md:693-697); `DS4_MODULE_WARM` lazy modules (+5-6 experts, under the bar,
     ref/PERF-LEDGER.md:588-593); `DS4_SETTLE_FEED` (harmful: n2 -28 %, ref/PERF-LEDGER.md:535-539); card-local expert
