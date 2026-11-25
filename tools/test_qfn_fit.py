@@ -163,7 +163,7 @@ class SlowZone(unittest.TestCase):
                 self.assertTrue(p["slow"])
                 self.assertIn(f"{ram:.0f} GB of RAM", p["slow_why"])
                 self.assertIn("expect slow decode", p["said"])
-                self.assertIn("drafting off (--mtp-max-t 1)", p["turned_off"])
+                self.assertIn("drafting off", p["turned_off"])
                 self.assertIn("--kv-resident 4096 instead of 32768", p["turned_off"])
                 self.assertIn("a 32K context instead of 64K", p["turned_off"])
                 self.assertEqual((p["context"], p["kv_resident"]), (32768, 4096))
@@ -456,7 +456,7 @@ class Cli(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("layer_split: 11,24,36", text)
         self.assertIn("slow: its 8 GB card holds few", text)       # (the warn the setup shows too)
-        self.assertIn("the setup scales down: drafting off (--mtp-max-t 1)", text)
+        self.assertIn("the setup scales down: drafting off", text)
         self.assertIn("does not fit: Qwen3.8-Flash-Next on saguaro-qfn cannot run on this PC's GPU 0: its 4 GB "
                       "cannot hold the 6.0 GB", text)
         self.assertIn("does not fit: Qwen3.8-Flash-Next on saguaro-qfn runs on one GPU, or up to 4 equal ones", text)

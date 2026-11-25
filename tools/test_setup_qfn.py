@@ -868,7 +868,7 @@ class CheckLine(unittest.TestCase):
                                                                 "arch": "89"}], 96.0))
         self.assertIn("below the measured layout", slow)               # (v1.2.1-B: --check reports the slow row:
         self.assertIn("expect slow decode", slow)                      #  the cause, and the scale-down it would
-        self.assertIn("the setup scales this down: drafting off (--mtp-max-t 1)", slow)   #  write - no question)
+        self.assertIn("the setup scales this down: drafting off", slow)   #  write - no question; no --mtp-max-t
         self.assertIn("cannot run on this PC's RTX 4060",
                       maya.qfn_check_line("q8_0", maya.QF.plan([{"index": 0, "name": "RTX 4060", "vram_gb": 8.0,
                                                                  "arch": "89"}], 96.0, "q8_0")))
@@ -1315,8 +1315,23 @@ class SetupFlow(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t, cpu():
             self.setup(Path(t), _mem=(64.0, 50.0), _out=out2)                  # (no --drafting: the default)
         said = [ln for ln in out2.getvalue().splitlines() if "scales this layout down" in ln][0]
-        self.assertIn("drafting off (--mtp-max-t 1)", said)                    # (still scaled down as before)
+        self.assertIn("drafting off", said)                                    # (still scaled down as before; the
+        self.assertNotIn("--mtp-max-t", said)                                  #  line claims no flag - finding 5)
         self.assertNotIn("drafting stays on", said)
+
+    def test_a_slow_pc_with_no_drafter_claims_no_flag(self):
+        """Review finding 5: turned_off always said "drafting off (--mtp-max-t 1)", but write_config_qfn writes
+        that flag only when a drafter exists (saguaro.py:7576) - a slow PC whose draft layer was not downloaded
+        gets the scale-down line without the flag, and a config with neither --mtp nor --mtp-max-t."""
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as t, cpu():
+            cfg = self.setup(Path(t), _mem=(64.0, 50.0), _nomtp=True, _out=out)
+        self.assertNotIn("--mtp", cfg["args"])                    # (no drafter: nothing loaded, nothing capped)
+        self.assertNotIn("--mtp-max-t", cfg["args"])
+        said = [ln for ln in out.getvalue().splitlines() if "scales this layout down" in ln][0]
+        self.assertNotIn("--mtp-max-t", said)                     # (no flag claimed where there is no drafter)
+        self.assertIn("drafting off", said)                       # (still plain and true: nothing drafts here)
+        self.assertIn("--kv-resident 4096 instead of 32768", said)
 
 
 class Parallel(unittest.TestCase):

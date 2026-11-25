@@ -280,8 +280,8 @@ def slow_why(cards: list, ram_gb: float, quant: str) -> str:
     parts = []
     small = [float(g["vram_gb"]) for g in cards if 0 < float(g.get("vram_gb") or 0) < MIN_VRAM_GB]
     if small:
-        parts.append(f"its {min(small):.0f} GB card{'s hold' if len(small) > 1 else ' holds'} few of their "
-                     "layers' experts in VRAM (the layout was measured on 16 GB ones)")
+        parts.append(f"its {min(small):.0f} GB card{'s hold' if len(small) > 1 else ' holds'} few of the "
+                     "model's layers' experts in VRAM (the layout was measured on 16 GB ones)")
     if ram_gb and ram_gb < MIN_RAM_GB:
         parts.append(f"{ram_gb:.0f} GB of RAM pins only a thin expert tier (the layout was measured on about 96)")
     experts, room = quant_gib(quant), ram_gb + sum(float(g.get("vram_gb") or 0) for g in cards)
@@ -437,9 +437,12 @@ def plan(cards: list, ram_gb: float, quant: str = "ud-q4_k_xl", cpu: dict | None
             f"{n} cards: the {LAYERS} layers split across them ({split}), each caching its own layers' experts, "
             f"a {ctx // 1024}K context")
     said += " - below the measured layout: expect slow decode" if slow else ""
-    turned = ([f"drafting off (--mtp-max-t 1)",
-               f"--kv-resident {min(ctx, KV_RESIDENT_MIN)} instead of {min(full_ctx, KV_RESIDENT)}",
-               f"a {ctx // 1024}K context instead of {full_ctx // 1024}K"] if slow else [])
+    turned = (["drafting off",                                # (v1.2.1-B review finding 5: no (--mtp-max-t 1)
+               f"--kv-resident {min(ctx, KV_RESIDENT_MIN)} instead of {min(full_ctx, KV_RESIDENT)}",   #  here - the
+               f"a {ctx // 1024}K context instead of {full_ctx // 1024}K"] if slow else [])            #  flag is
+                                                          #  only written where a drafter exists, and only
+                                                          #  write_config_qfn knows that; a layout with no
+                                                          #  drafter drafts off either way)
     return {"fits": why is None, "reason": why, "gpus": list(cards), "n_gpus": n, "layer_split": split,
             "context": ctx, "kv_resident": min(ctx, KV_RESIDENT_MIN if slow else KV_RESIDENT),
             "resident_budget_gib": budget,
