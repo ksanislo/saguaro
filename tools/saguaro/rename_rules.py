@@ -234,7 +234,8 @@ SKIP_DIR_NAMES = {".git", "third_party", "node_modules", "__pycache__", ".venv",
 SKIP_DIR_RE = re.compile(r"^(build[^/\\]*|.*-build|cmake-build.*)$", re.I)
 SKIP_PATHS = ("ref-configs/", "bench/results/", "engines/qfn/bench/results/", "tools/saguaro/",
               "engines/qfn/", "tools/qfn/", "ref/", "scratch/", "serve/qfn_engine.py",
-              "tools/test_rename_upstream.py")          # the tool's own tests must spell the old names too
+              "tools/test_rename_upstream.py",          # the tool's own tests and its manual must spell the
+              "docs/UPSTREAM.md")                       # old names to describe them
 SKIP_NAMES = {"CHANGELOG.md", "NOTICE.md"}
 SKIP_NAME_RE = re.compile(r"^(PLAN|REPORT|NEXT)-.*\.md$|^LICENSE(\.|$)")
 SKIP_SUFFIXES = {".log", ".jsonl", ".patch", ".orig"}

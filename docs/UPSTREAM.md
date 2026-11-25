@@ -11,10 +11,25 @@ branding). Every upstream release is taken in full. Intakes must stay routine: a
 
 ## 2. The rename layer (the main source of pointless conflicts)
 - Upstream code arrives with upstream names; ours are SAGUARO_* settings, saguaro-* programs, Saguaro branding.
-- Before an intake merge, the upstream release is renamed on a throwaway branch by ONE tool run
-  (tools/saguaro/rename_*.py: settings MAYA_X -> SAGUARO_X by pattern, so new upstream settings are caught automatically;
-  program/brand names; an explicit exceptions list). That renamed copy is what gets merged, so the merge only shows
-  REAL conflicts. The tool is idempotent and tested; a missed name is a tool bug, fixed in the tool, not by hand.
+- ONE command applies the layer: `python3 tools/saguaro/rename_upstream.py [--diff] [--paths] [paths...]`
+  (tools/test_rename_upstream.py tests it; the table is tools/saguaro/rename_rules.py). It renames, in one
+  idempotent pass: the internal names (include/strata, `strata::`, strata_* cmake words, STRATA_X options ->
+  maya / MAYA_X, upstream's own v1.1.75 naming), the settings (`MAYA_X`/`STRATA_X` -> `SAGUARO_X` by pattern,
+  so a new upstream setting is caught without being listed), the engines' log prefixes ("strata part:",
+  "maya-ds4:", "ds4:" -> "saguaro ..."), the program, launcher and artifact names in text (maya.py ->
+  saguaro.py, ./maya.sh -> ./saguaro.sh, START-MAYA.bat, maya-nightly*, the saguaro-* temp-dir prefixes,
+  `[maya]` -> `[saguaro]`) and the brand words in user-visible docs ("restart Maya", "Maya checks ..." ->
+  Saguaro). The explicit exceptions stay: credits and upstream URLs, LICENSE texts, vendored dirs, history
+  files, engines/qfn's and the CMake targets' own names (maya, maya-ds4, maya-vision, maya_kernels, maya_mmq,
+  -DMAYA_* options), the maya-*.json config names, `maya.` browser keys, ds4/hy4 internal names and the
+  Maya quant names (Maya-S/M/L/XS/S24). The three earlier scripts (rename_env.py, rename_internal_maya.py,
+  rename_log_prefixes.py) keep working; they read the same table.
+- An intake uses it on a throwaway branch: check the release tag out -> `rename_upstream.py --paths` for the
+  `git mv`s (maya.py, maya.sh, START-MAYA.bat, include/strata/) -> `rename_upstream.py` rewrites the tree ->
+  `rename_upstream.py --check` says CHECK OK (it also reports what the exception list keeps, and --diff
+  reviews everything before a write). That renamed copy is what gets merged, so the merge shows only REAL
+  conflicts (resolved against docs/DIVERGENCE.md). After the merge, `--check` again on the integrated tree:
+  a missed name is a tool bug - fixed in the rule table and its tests, never by hand in the tree.
 - Optional later: a compatibility map so a user's MAYA_* setting still works (read as SAGUARO_*).
 
 ## 3. Divergence register (why we differ)
