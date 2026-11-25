@@ -179,6 +179,57 @@ class Migration(unittest.TestCase):
             with mock.patch.object(maya, "ROOT", d):
                 self.assertEqual([f.name for f in maya.configs()], ["saguaro-maya-m.json"])
 
+    def test_a_crash_between_the_moves_is_finished_at_the_next_start(self):
+        """the process died right after the config moved, before its sidecars followed: the leftovers under the
+        old stem are no orphans - the next start finds them beside the moved config and finishes the set"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            p = cfg_file(d, "maya-maya-m.json")
+            (d / "maya-maya-m.log").write_text("a log line\n")
+            (d / "maya-maya-m.turbo.json").write_text('{"turbo": 1}')
+            (d / "run-maya-maya-m.sh").write_text("exec saguaro.py --config " + str(p) + " --port 8080\n")
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn"), \
+                    mock.patch.object(maya, "_finish_config_rename"):          # (dies right after the config)
+                self.assertEqual(maya.migrate_config_names(), ["saguaro-maya-m.json"])
+            self.assertTrue((d / "maya-maya-m.turbo.json").is_file())          # ... the sidecars stayed behind
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
+                self.assertEqual(maya.migrate_config_names(), [])              # the next start: finished, said of
+                warn.assert_not_called()                                       #  nothing
+                self.assertEqual(maya.migrate_config_names(), [])              # idempotent: nothing left to do
+            self.assertEqual(sorted(f.name for f in d.iterdir() if f.is_file()),
+                             ["run-saguaro-maya-m.sh", "saguaro-maya-m.json", "saguaro-maya-m.log",
+                              "saguaro-maya-m.turbo.json"])
+            self.assertTrue((d / "saguaro-maya-m.log").read_text() == "a log line\n")   # contents came along
+            self.assertEqual(json.loads((d / "saguaro-maya-m.json").read_text())["log"],
+                             str(d / "saguaro-maya-m.log"))                    # the "log" key follows as ever
+            self.assertIn("--config " + str(d / "saguaro-maya-m.json"), (d / "run-saguaro-maya-m.sh").read_text())
+
+    def test_a_locked_sidecar_moves_at_the_next_start(self):
+        """one file beside the config is open elsewhere while everything else moves: it is said and stays - and
+        the next start's leftover pass moves it once it has let go, so the page's Turbo file reads again"""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            cfg_file(d, "maya-maya-m.json")
+            (d / "maya-maya-m.turbo.json").write_text('{"turbo": 1}')
+            real = os.replace
+
+            def locked(src, dst, **kw):                     # (the one file Windows would not let go)
+                if str(src).endswith("maya-maya-m.turbo.json"):
+                    raise OSError(13, "Permission denied")
+                return real(src, dst, **kw)
+
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn, \
+                    mock.patch.object(maya.os, "replace", locked):
+                self.assertEqual(maya.migrate_config_names(), ["saguaro-maya-m.json"])
+                self.assertEqual(warn.call_count, 1)       # said: it stays where it is
+            self.assertTrue((d / "maya-maya-m.turbo.json").is_file())     # the config moved, this one did not
+            self.assertTrue((d / "saguaro-maya-m.json").is_file())
+            with mock.patch.object(maya, "ROOT", d), mock.patch.object(maya, "warn") as warn:
+                self.assertEqual(maya.migrate_config_names(), [])         # it let go: the next start finishes
+                warn.assert_not_called()
+            self.assertFalse((d / "maya-maya-m.turbo.json").exists())
+            self.assertEqual(json.loads((d / "saguaro-maya-m.turbo.json").read_text()), {"turbo": 1})
+
     def test_a_neighbouring_config_is_no_sidecar(self):
         """dot-named variants (maya-2.json beside maya-2.5.json): the first config's rename must not sweep the
         second's files - both move with their own sidecars, run scripts rewritten, nothing said"""
