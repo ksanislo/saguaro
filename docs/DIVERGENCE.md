@@ -28,7 +28,8 @@ Biggest first.
    is bound by moving experts, not by arithmetic. Where: the engine's `res_k` route limit in
    `src/kernels/cuda/glm_fast.cu` (`SAGUARO_GLM_RESIDENT_TOPK` read there) and the per-request path in
    `src/core/glm_window.cu`; the request key comes from `serve/turbo_live.py`.
-   Switch and default: per request `"turbo": {"drop": N}` (off), engine-wide `SAGUARO_GLM_RESIDENT_TOPK=5`; decode
+   Switch and default: per request `"turbo": {"drop": N}` (off); engine-wide `SAGUARO_GLM_RESIDENT_TOPK` default
+   0 = off, 5 in the mortar KL runs (= drop 3-of-8, ref/reports/REPORT-mortar-glm.md:20); decode
    only, prompt reads stay exact. Gain (RX 9070 XT): Maya-L +66 % (8.45 -> 13.85 tok/s), Maya-S +29 %
    (ref/reports/REPORT-mortar-glm.md:27-28). Answer-changing: KL 0.192 (5x the engine's own floor) on Maya-L, and
    GPQA-Diamond lost no accuracy (70.7 % vs 66.7 %, p 0.29) but answers loop more (13 -> 21 cut-offs;
