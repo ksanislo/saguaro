@@ -1766,6 +1766,41 @@ class WebApp(unittest.TestCase):
         side = (ROOT / "serve/web/sidebar.js").read_text(encoding="utf-8")   # (the sidebar's model card)
         self.assertIn("S.health.model_label || modelName(S.health.model)", side)
 
+    def test_the_model_is_named_in_two_parts(self):
+        """/health's and /metrics' model_name_pretty and model_quant: the model's display name and its files' name
+        exactly as named ("Qwen3.8 Flash Next", "Q8_0" - never "Q8 0"), from maya_quants and the config's installer
+        record; a hand-made config with neither: the model_name with "-" as spaces minus a recognised quant suffix."""
+        import maya_quants
+        qfn = {"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-Q8_0",
+               "installer": {"family": "qfn", "qwen_quant": "q8_0", "engine": "saguaro-qfn", "written": "2026-11-01 09:00"}}
+        frost = {"exe": "/b/maya", "args": ["--pack", "/p", "--ple-gguf", "/g.gguf"], "model_name": "cyber-frost-3.8-ps",
+                 "installer": {"family": "qwen", "quant": "CYBER-FROST-3.8-PS", "qwen_quant": "q5_k_m", "written": "x"}}
+        glm = {"exe": "/m/build/maya", "args": ["--glm-pack", "/p"], "model_name": "glm-5.3-flash",
+               "installer": {"quant": "Maya-L", "written": "x"}}
+        for cfg, want in (
+            (qfn, ("Qwen3.8 Flash Next", "Q8_0")), (frost, ("Qwen3.8 Flash Next", "CYBER-FROST-3.8 Q5_K_M")),
+            (glm, ("GLM 5.3", "Maya-L")),
+            # hand-made, no installer record: the model_name, "-" as spaces, a recognised quant suffix as the quant
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next-UD-Q4_K_XL"},
+             ("Qwen3.8 Flash Next", "UD-Q4_K_XL")),
+            ({"exe": "/b/saguaro-qfn", "args": ["x"], "model_name": "Qwen3.8-Flash-Next"},
+             ("Qwen3.8 Flash Next", "")),
+            ({"exe": "/m/build/maya-mm3", "args": ["--pack", "/p"], "model_name": "minimax-m3.1-flash"},
+             ("minimax m3.1 flash", "")),
+            ({"exe": "/b/x", "args": []}, (None, None)),                                   # (nothing to say)
+        ):
+            with self.subTest(model=cfg.get("model_name")):
+                self.assertEqual(maya_quants.display_names(cfg), want)
+        self.svc.model_name_pretty, self.svc.model_quant = "Qwen3.8 Flash Next", "Q8_0"
+        try:
+            health = json.loads(self.get("/health")[2])
+            eng = json.loads(self.get("/metrics")[2])["engine"]
+        finally:
+            self.svc.model_name_pretty = self.svc.model_quant = None
+        self.assertEqual((health["model_name_pretty"], health["model_quant"]), ("Qwen3.8 Flash Next", "Q8_0"))
+        self.assertEqual((eng["model_name_pretty"], eng["model_quant"]), ("Qwen3.8 Flash Next", "Q8_0"))
+        self.assertIsNone(json.loads(self.get("/health")[2])["model_name_pretty"])   # (unsaid: the page's old text)
+
     def test_text_file_limit_follows_the_context(self):
         """#635: /health tells the chat page how big a text file the context holds (about 4 bytes a token, 512 KB to
         16 MB); the page reads it instead of a fixed 512 KB."""

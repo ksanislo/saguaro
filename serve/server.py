@@ -2869,6 +2869,9 @@ class Service:
         self.savings = None                              # serve/savings.py's Ledger: what the API would have charged
         self.model_dir = None                            # the model's folder (free disk on the dashboard)
         self.model_label = None                          # what runs, as users see it: "MiniMax M3.1 · Maya-XS"
+        self.model_name_pretty = None                    # /health, /metrics: the model's display name on its own
+        self.model_quant = None                          #   ("Qwen3.8 Flash Next") and its files' name as named
+        #                                                  ("Q8_0"); None: this server does not say (the page's old text)
         self.supervisor = None                           # (llama-swap: it owns starts, stops, switches and configs)
         self.trained_context = None                      # what the model was trained for (its GGUF): the slider's top
         self.lookup = None                               # DeepSeek's prompt lookup (--suffix-draft above 0); the others' INFO says
@@ -4422,6 +4425,7 @@ class Service:
         # the prompt the conversation cache already held (the Monitor's Context bar), from the engine's PP lines
         live["prompt_reused"] = progress[2] if s.get("busy") and progress and len(progress) > 2 else None
         engine = {"model": self.model, "model_label": self.model_label, "max_context": self.engine.max_context,
+                  "model_name_pretty": self.model_name_pretty, "model_quant": self.model_quant,
                   "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {}), "saguaro_version": SAGUARO_VERSION,
                   "trained_context": self.trained_context,
@@ -7153,7 +7157,9 @@ def make_handler(svc: Service):
                                            "reloading" if svc.reloading() else "ok",
                                  "max_context": svc.engine.max_context, "model": svc.model,
                                  "max_text_file": text_file_limit(svc.engine.max_context),
-                                 "model_label": svc.model_label,   # (the model first: "GLM-5.3 · Maya-S24")
+                                  "model_label": svc.model_label,   # (the model first: "GLM-5.3 · Maya-S24")
+                                  "model_name_pretty": svc.model_name_pretty,   # (the two parts a page names with:
+                                  "model_quant": svc.model_quant,   #  "Qwen3.8 Flash Next" + "Q8_0"; None: not said)
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key), "defaults": rec,
                                  "version": SAGUARO_VERSION, "mcp_tools": bool(svc.mcp), "unloaded": svc.unloaded,
                                  **({"thinking_levels": levels} if levels else {}),
@@ -8755,6 +8761,8 @@ def main() -> int:
     svc.engine_kind = "qfn" if kind == "batch" else (maya_quants.family_of(cfg) if cfg else "mock")
     svc.model_label = cfg.get("label") or (maya_quants.config_label(cfg)   # (configs of every release: their installer record)
                                           if (cfg.get("installer") or {}).get("written") else None)   # (else the id)
+    svc.model_name_pretty, svc.model_quant = maya_quants.display_names(cfg) if cfg else (None, None)
+    # (/health and /metrics name the model in two parts: the page never splits the id to guess the quant)
     if a.config:
         svc.config_path = str(Path(a.config).resolve())  # a context change from the dashboard is saved there
         p = Path(svc.config_path)                        # the tokens it serves, and what its API would have charged
