@@ -290,6 +290,12 @@ class TakeOver(unittest.TestCase):
         self.assertEqual(json.loads(b)["choices"][0]["message"]["content"], "hello")
         self.assertEqual(req(self.base, "GET", "/")[0], 200)   # (the page, from the real handler as ever)
 
+    def test_the_health_version_is_the_version_file(self):
+        # (/health's version must be the installed VERSION file's line, never a stale or upstream string)
+        take_over(self.httpd, self.svc)
+        s, _, b = req(self.base, "GET", "/health")
+        self.assertEqual((s, json.loads(b)["version"]), (200, (ROOT / "VERSION").read_text(encoding="utf-8").strip()))
+
 
 # ----------------------------------------------------------------------------------------- the real start, as a child
 WRAPPER = '''"""scratch: the real serve.server.main() with the mock engine slow or dead (issue #20 tests)."""
