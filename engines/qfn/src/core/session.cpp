@@ -202,8 +202,9 @@ bool session_slot_fit(SessionState& s, int64_t cells, bool trim) {
     if (s.slot_cells < 0) {
         // P124e (manager card test, 11-26): not an elastic-VRAM slot (SAGUARO_ELASTIC_SLOTS off, or no VMM on the
         // card) - but its HOST copies can still grow with the conversation (qsa_set_host_elastic_slots): the same
-        // helper and the same step as the solo session's, given back on trim.  The VRAM half has nothing to do;
-        // `slot_cells` stays -1 - it counts the ring, which never moves here.
+        // helper and the same step as the solo session's, given back on trim.  P124e round 4: session_host_fit is
+        // both halves now - it grows/trims the follow pools, the scratch and the RoPE rows too; `slot_cells` stays
+        // -1 - it counts the budget's ring, which does not move here.
         if (!session_host_elastic(s)) return true;
         cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
         if (trim) {

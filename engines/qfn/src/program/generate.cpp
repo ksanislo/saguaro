@@ -13967,8 +13967,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                 const strata::core::OnDevice on_k(eslot_dev(k));
                 if (strata::core::session_slot_fit(u, target, trim) || strata::core::session_slot_fit(u, need, false))
                     continue;
-                if (u.slot_cells < 0) return 1;   // host copies only: no VRAM budget to hand over - the RAM give-way
-                                                  // (the expert tier) already ran inside the failed qsa_host_grow
+                if (u.slot_cells < 0) return 1;   // host copies (+ P124e's follow pools) only: no VRAM budget to
+                                                  // hand over - the RAM give-way ran inside the failed qsa_host_grow
+                                                  // and the expert cache's relief inside the failed qsa_follow_grow
                 if (!give_on || gv[k].lo <= give_floor) return 1;
                 if (!quiet(k)) return 2;
                 int64_t fr = 0;
