@@ -77,6 +77,25 @@ int main() {
         off.free_bytes = 0;
         check(plan(four, parked, 90 * G, 0, low, off, true, true).empty(), "SAGUARO_PARK_FREE_MIB=0 turns the floor off");
     }
+    // PLAN-p124a (mortar, 2026-11-25): the resident RAM mode pins 68 GiB of experts + the K/V pool and the host is
+    // wide open - the reading counts our own tier as used, and the old rule dropped every park seconds after it
+    // landed while `free` showed 81 GB.  The engine's own pinned RAM is credited for the release decision.
+    Memory mortar{8 * G, 0.0};           // what the sampler reads with the 68 GiB charged against the limit
+    mortar.own_pinned = 68 * G;          // the tier + pool: ours, and no release gives them back
+    check(pressure_need(mortar, lim) == 0, "the engine's own pinned RAM is credited: 8 GiB free of a 96 GB host is not pressure");
+    check(plan(four, parked, 90 * G, 0, mortar, lim, true, true).empty(), "mortar's figures: the parks stay, nothing is released");
+    {
+        Memory raw = mortar;
+        raw.own_pinned = 0;   // the old reading, or an engine pinning nothing of its own
+        check(pressure_need(raw, lim) == 10 * G && !plan(four, parked, 90 * G, 0, raw, lim, true, true).empty(),
+              "without the credit the same 8 GiB under the 16 GiB floor is still pressure (8 + an eighth asked)");
+    }
+    {
+        Memory deep = mortar;
+        deep.available = 1 * G;   // the host genuinely critical: severe judges the raw reading, uncredited
+        check(pressure_need(deep, lim) == 0 && severe(deep, lim),
+              "a raw 1 GiB is under the hard floor: severe sees it uncredited, unsaved entries still go");
+    }
     // memory stalls with RAM above the floor: one entry a round, only when the caller says a round is due
     const Memory stalled{40 * G, 23.5};
     check(said(plan(four, parked, 90 * G, 0, stalled, lim, true, true)) == "1d:pressure ", "memory stalls: the oldest entry on disk");
