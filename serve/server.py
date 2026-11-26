@@ -4746,9 +4746,9 @@ class Service:
         else:
             state = "unloaded" if self.unloaded else "idle"
         live = {"state": state, "queued": s.get("queued", 0), "active": active,   # (answering at once: --parallel)
-                 "writing": writing, "spec_off": spec_off,   # (the request(s) running asked for no drafting)
-                 "priority": priority, "paused_for_priority": paused,   # (R122: whose turn this is, and whether an
-                 #  answer is sitting out for one above it - the chats rows carry each request's own)
+                "writing": writing, "spec_off": spec_off,   # (the request(s) running asked for no drafting)
+                "priority": priority, "paused_for_priority": paused,   # (R122: whose turn this is, and whether an
+                #  answer is sitting out for one above it - the chats rows carry each request's own)
                 "phase": s.get("phase") if s.get("busy") else None,
                 "prompt_tokens": s.get("prompt_tokens") if s.get("busy") else None,
                 "prompt_read": None, "prompt_total": None, "generated": s.get("generated") if s.get("busy") else None,
