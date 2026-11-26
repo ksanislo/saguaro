@@ -737,7 +737,9 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
             state.insert(state.end(), r.ids.begin() + (long) a, r.ids.begin() + (long) a + done);
             a += (size_t) done;
             if (!whole || T <= 16) pp_line(a);   // (a short call: a window, no chunks reported)
-            if (done < T || (in.stop.load() && !last)) {
+            // (P124j: a STOP during the LAST chunk ends the read after it too - what it read stands in the state,
+            //  the resumed read below re-reads the last token alone; before, it fell through to decode)
+            if (done < T || in.stop.load()) {
                 cancel = true;
                 break;
             }
@@ -1445,11 +1447,13 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
             std::printf("PP %d %zu %zu %.1f %.1f %zu\n", g.rid, a, ids.size(), ms,
                         ms > 0 ? 1000.0 * (double) (a - bfrom2) / ms : 0.0, bfrom2);
             std::fflush(stdout);
-            if (last) break;
+            // (P124j: the STOP is taken after the LAST chunk too - before, `last` broke to decode first;
+            //  the cancel path below keeps what this request read)
             if (in.stop.load() || in.stopped(g.rid)) {
                 cancel = true;
                 break;
             }
+            if (last) break;
             if (between && !run.empty()) {   // (the running requests' next token: the read waits, its clock does not)
                 const double tg = now() * 1e3;
                 step();
