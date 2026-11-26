@@ -188,6 +188,13 @@ What still needs a person:
 - A `DIFF` that is meant (an answer-changing fix): decide, then capture again.
 - The loop test, vision, tool calls, long context (32K and the deep points), the dashboard - the bench's requests do
   not cover them.
+- Every install's page, on every machine: `python3 tools/page_check.py http://127.0.0.1:<port>` - it loads the page
+  in headless chromium and fails on any uncaught error or console error, or when neither the shell nor the loading
+  screen draws (1.2.2 shipped a page that died on load while every API smoke passed - none of them opened the page).
+  Where a machine uses llama-swap, the page of the install it runs as well - that server's own port, with
+  llama-swap holding it loaded (the page only answers while the Saguaro runs); `--key-file <the install's key file>`
+  proves the install's key against `/v1/models` too (the page renders without it - the app asks inside). A PC with
+  no chromium prints SKIP and exits 0: open that page by hand there.
 - Sampling: the saved answers are greedy; nothing here checks the sampler.
 - Machines without a nightly yet, AMD on Windows, and any layout a machine's list does not name.
 - The release decision itself.
