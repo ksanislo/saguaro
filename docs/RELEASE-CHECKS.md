@@ -11,6 +11,7 @@ A fourth (section 4) keeps a load from holding memory that no context is using.
 | `tools/maya_golden.py` | are this build's greedy answers the ones the release gave, and if not, where they part | yes (one `--bench`) |
 | `tools/maya_nightly.py` | per machine and model, every night: answers and speed against the previous release | yes |
 | `tools/mem_vs_ctx.py <config>` | does the model hold the same memory at load whatever `--max-context` says | yes (two loads) |
+| `tools/refresh_prices.py` | before cutting the release: refill the shipped Saved-line price fallback `data/api-prices.json` from OpenRouter's public model list (the file's `match`, `api`, `peak` and ids stay as written; docs/SETTINGS.md) | no |
 
 The first three sit on `./saguaro.sh --bench` (the speed-test standard: quiet machine, GPU lock, warm-up, 3 answers of
 256 tokens, the 2K / 8K prompts, greedy, thinking off, and after them 1 / 2 / 4 different 2K prompts sent together

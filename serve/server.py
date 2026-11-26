@@ -8128,7 +8128,7 @@ def make_handler(svc: Service):
                 # what would restart this server, move it or rewrite a config is refused - said, not attempted
                 if svc.supervisor and path in ("/api/port", "/api/update", "/api/models/settings", "/api/models/switch",
                                                "/api/models/delete", "/api/models/leftovers", "/api/context",
-                                               "/api/turbo", "/api/pull", "/api/delete"):
+                                               "/api/turbo", "/api/pull", "/api/delete", "/api/savings/live"):
                     self._body()
                     self._json(409, {"error": {"type": "invalid_request_error", "message":
                                      f"this server runs under {svc.supervisor}, which starts, stops and switches the "
@@ -8188,6 +8188,24 @@ def make_handler(svc: Service):
                         if not isinstance(req, dict):
                             raise ValueError("the request body must be a JSON object")
                         svc.savings.set_price(req.get("model"), req.get("price"))
+                    except (TypeError, ValueError) as e:
+                        self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                        return
+                    self._json(200, svc.savings.report())
+                    return
+                if path == "/api/savings/live":
+                    # Settings > Savings: fetch the API prices from OpenRouter once a day, or keep to the shipped
+                    # table ({"live": true|false}); saved in the run config, the app's own page only
+                    body = self._body()
+                    if not self._own_page("live prices can be turned on"):
+                        return
+                    try:
+                        req = json.loads(body or b"{}")
+                        if svc.savings is None:
+                            raise ValueError("nothing is counted here")
+                        if not isinstance(req, dict) or not isinstance(req.get("live"), bool):
+                            raise ValueError('the request body must be {"live": true} or {"live": false}')
+                        svc.savings.set_live(req["live"])
                     except (TypeError, ValueError) as e:
                         self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
                         return
@@ -10027,8 +10045,8 @@ def main() -> int:
         svc.config_path = str(Path(a.config).resolve())  # a context change from the dashboard is saved there
         p = Path(svc.config_path)                        # the tokens it serves, and what its API would have charged
         svc.savings = savings.Ledger(savings.ledger_path(p), p.name, svc.model, models.quant_label(cfg, p),
-                                     names=(svc.model_name_pretty, svc.model_quant))   # (/api/savings rows name the
-                                                                                        #  model as /health does)
+                                     names=(svc.model_name_pretty, svc.model_quant),   # (/api/savings rows name the
+                                     config=p, live=savings.live_enabled(cfg.get("live_prices")))   #  model as /health does)
         threading.Thread(target=svc.finish_delete, daemon=True).start()   # (the model before, if the page deleted it)
     args = [str(x) for x in cfg.get("args") or []]
     flag = next((f for f in ("--glm-pack", "--gguf") if f in args[:-1]), None)   # (Metal: the first GGUF file, no pack)
