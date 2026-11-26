@@ -219,4 +219,22 @@ inline bool held_by_slot(const A& live, const B& slot) {
     return true;
 }
 
+/// P124b: a prompt read cancelled INSIDE a window or a batched/pipelined part leaves the session somewhere between
+/// two reported positions (pp_exact false), so #1620's keep cannot make the tokens it read the live conversation -
+/// and unless the cut read lands on something, the switch to another conversation drops every token it read and the
+/// request coming back re-reads the prompt from 0.  The checkpoints the read took hold the complete running state at
+/// their positions, so the deepest one at or below `reached` (the position the read last reported) whose tokens are
+/// this prompt's (`on_path(i)` true for chain item i) is where the cut read lands: the session goes back to it and
+/// the next request continues from it, or a switch parks it like a finished turn.  Returns the chain index, or -1
+/// when the cut read has nothing to land on (no checkpoint at or below `reached`).  Pure, so conv_cache_test.cpp can
+/// walk the scenarios by hand.
+template<class OnPath>
+inline int64_t cut_read_landing(const int64_t* lens, size_t n, int64_t reached, OnPath on_path) {
+    int64_t best = -1;
+    for (size_t i = 0; i < n; ++i)
+        if (lens[i] > 0 && lens[i] <= reached && on_path(i) && (best < 0 || lens[i] > lens[(size_t) best]))
+            best = (int64_t) i;
+    return best;
+}
+
 }  // namespace strata::program::conv_cache

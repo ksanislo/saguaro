@@ -5675,6 +5675,8 @@ class Service:
         prio = request_priority(sampling)               # (R122: this answer gives its place up at once for a waiter
         preempt = None                                  #  of a higher priority; while it waits, what it waits for)
         pos = None                                      # (a read cut: where its PP/BRP tick found it)
+        resume_note = None                              # (P124b: a read cut that got its place back: the prompt
+        #  tokens it is waiting to log the engine's real reused figure for; None: nothing to report)
         sent = 0                                        # produced[:sent] went to the caller (the guard holds the rest)
         # the thinking budget closed at a sentence's or line's end (THINK_GRACE, #613): past `soft` tokens of
         # reasoning, the first token that ends one is followed by the end of the thinking - this call stops there and
@@ -5698,6 +5700,15 @@ class Service:
             t_read, paused_for = None, set()            # fair reads: the first chunk report's time, who it paused for
             try:
                 for t in gen:
+                    if resume_note is not None:         # P124b: the resumed read logs the engine's OWN reused
+                        kept = getattr(self.engine, "reused", None)   #  figure (QFN's RESUME line, the same one its
+                        if isinstance(kept, int) and not isinstance(kept, bool) and 0 <= kept <= resume_note:
+                            print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} prompt read continued: "
+                                  f"{kept:,} of {resume_note:,} tokens reused", flush=True)   #  DONE carries), or
+                        else:                           #  the old numberless wording for an engine that reports no
+                            print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} prompt read continues "  #  figure
+                                  f"from where the engine kept it", flush=True)   #  over the pipe: never a reuse
+                        resume_note = None                                    #  that did not happen
                     if guard is None:
                         yield t
                     elif t is None:
@@ -5885,12 +5896,15 @@ class Service:
                 with self.status_lock:
                     self.status["queued"] -= 1
             if preempt:                                 # R122: its turn again - the answer goes on from exactly the
-                stat.paused_for_priority = False        #  token it reached, nothing the engine holds re-read. The
-                #  read's line says where the engine kept it, not where the tick saw it: the engine cannot report
-                #  more over the pipe, and a stop between two windows may quietly keep less than the tick printed
-                print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} "
-                      f"{'answer continues' if produced else 'prompt read continues from where the engine kept it'}",
-                      flush=True)
+                stat.paused_for_priority = False        #  token it reached, nothing the engine holds re-read.
+                if produced:
+                    print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} answer continues", flush=True)
+                else:
+                    # P124b: a resumed READ used to say "continues from where the engine kept it" whether the engine
+                    # had kept it or not - mortar's switch to another conversation had quietly dropped the partial
+                    # read, and the "continued" read started from 0 again. The number the engine really reuses only
+                    # exists on the resumed call (its RESUME line); the line waits for that call's first output.
+                    resume_note = pos[1] if pos else None
             with self.status_lock:
                 self.active += 1
                 self.touch_telemetry()
