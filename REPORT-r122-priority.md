@@ -83,19 +83,22 @@ log line, no chunked padding to HTTP/1.0, the `live` dict indent, cached seconds
 - serve/responses.py — the `"priority"` field through the normalizer, the keep-alive `response.in_progress`.
 - serve/model_api.py — the ollama-style requests carry the field through.
 - serve/web/monitor.js — the `high` / `low` tags and the paused detail text.
-- serve/test_priority.py — new: 42 tests (the grant order, preemption in answers and reads, the engines that
+- serve/test_priority.py — new: 51 tests (the grant order, preemption in answers and reads, the engines that
   keep a stopped read and the ones that would lose it (batch QFN, solo-pause, no-keep), equals never
   preempting, the thinking budget and the loop guard across a pause, cancel while paused, parallel two, aging
   off/on, a faked ten-minute pause, the idle rule (grace, a normal inside the grace, grace 0, it through
-  `run()`), the fields and the 400 (with `background`/`idle` refused), `/metrics`, and each API's
-  empty-event shape parsed back with the client's SSE rules, the non-streaming space path, a GpuBusy-class
-  error riding the body, and the HTTP/1.0 client getting no chunked padding).
+  `run()`), the fields and the 400 (with `background`/`idle` refused) including the two ollama endpoints,
+  `/metrics`, each API's empty-event shape parsed back with the client's SSE rules, the non-streaming space
+  path, a GpuBusy-class error riding the body, the HTTP/1.0 client getting no chunked padding, the trigger
+  gate from the other side (an un-queued slow answer keeps its plain framing and its error keeps its real
+  status, an un-queued long read gets no empty events), and the normal that started last stepping aside while
+  the earlier one runs on untouched).
 - docs/SETTINGS.md — the settings (incl. `SAGUARO_PRIORITY_IDLE_S`), the prose, and the one-entry llama-swap
   alias example checked on v260.
 
 ## Tests (python -m unittest, one module at a time, all OK)
 
-- serve.test_priority: 42 tests OK (new)
+- serve.test_priority: 51 tests OK (new)
 - serve.test_fair: 14 tests OK (unchanged: equal priorities keep the old order exactly)
 - serve.test_server: 179 tests OK (re-run after every step)
 - serve.test_dashboard: 85 tests OK
@@ -117,12 +120,15 @@ log line, no chunked padding to HTTP/1.0, the `live` dict indent, cached seconds
 - The padding answers are chunked HTTP/1.1 (`_collect_wait` raises `protocol_version` for them and is skipped
   whole for an HTTP/1.0 client, which could not parse it); the pause trigger recognizes the request by the
   conversation id its rows already carry.
-- Open for Ken (review finding 5): the step 3b padding triggers on total elapsed time, so a >20 s non-streaming
-  answer on an idle server that was never queued or paused still gets its early 200 + chunked spaces, and a
-  queued stream that never mentions priority gets the empty event after `SAGUARO_WAIT_EVENT_S`. That is what
-  the step 3b text says, but it is not byte-identical to the pre-R122 wire for those two default paths; if the
-  intent was "only a queued or paused request changes its framing", the trigger should gate on "was queued once
-  or paused" instead — one deliberate line, waiting for the word.
+- Decided and implemented (was the open question of the first two passes): the step 3b padding and the empty
+  stream events gate on "this request was queued at least once, or paused" - Ken's recorded decision, now the
+  code: `RequestStat.had_to_wait` marks the first real FIFO wait and every give-place-back, `_cid_waited` reads
+  it off the request's own live row, and `_collect_wait`, `wait_events` and `response_events` open their gate on
+  it. A request that never waited is framed byte-for-byte as in 1.2.1 (no early 200 + chunked spaces on a
+  >`SAGUARO_WAIT_SPACE_S` answer - its late error keeps its real status; no empty event on a
+  >`SAGUARO_WAIT_EVENT_S` prompt read), which is what the brief's "behaviour with the feature OFF is
+  byte-identical" needed; the queued/paused paths keep the padding exactly as tested before, a pause still
+  starting it at once.
 - Ken's first 11-25 note (no aging by default, no `SAGUARO_PRIORITY_MAX_PAUSE_S`) was applied when it came in
   (`ee9fd808f`); his second and third ("names and the idle rule", "ONE name") were NOT applied in the first
   cut — the review caught that, and they are applied in this pass (`f001ece39`, `75847ab9b`). An earlier
