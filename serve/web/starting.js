@@ -9,7 +9,8 @@ import {S, emit, useStore} from "./state.js";
 
 // the screen's text from a starting /health (pure, unit-tested): how to name the model, how long it has run, the
 // engine's last line, and a failed load's error and offer
-export function startingView(h = {}) {
+export function startingView(h) {
+  h = h || {};                                     // (S.starting is null on the first paint: a default {} is not)
   const failed = h.status === "failed";
   return {
     state: h.status || "waiting",                  // (waiting: /health has not answered to this page yet)

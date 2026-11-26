@@ -484,6 +484,7 @@ console.log(JSON.stringify({
   failed: so.startingView({status: "failed", model: "glm-5.3-flash", error: "nope",
                            last_good: {config: "maya-good.json", time: 1}}),
   waiting: so.startingView(undefined),
+  first: so.startingView(null),
 }));""")
         self.assertEqual((got["loading"]["state"], got["loading"]["name"], got["loading"]["elapsed"],
                           got["loading"]["line"]), ("loading", "GLM 5.3 Flash", "2 min", "experts 1200/2000"))
@@ -492,6 +493,7 @@ console.log(JSON.stringify({
                           got["failed"]["lastGood"]),
                          ("failed", True, "nope", {"config": "maya-good.json", "time": 1}))
         self.assertEqual(got["waiting"]["state"], "waiting")   # (/health has not answered to this page yet)
+        self.assertEqual(got["first"]["state"], "waiting")     # (the page's first paint: S.starting is null)
 
     def test_the_screen_waits_one_second_and_becomes_the_page_on_the_first_200(self):
         got = self.node("""
