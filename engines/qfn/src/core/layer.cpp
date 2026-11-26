@@ -892,6 +892,13 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
             whole = false;
             if (err != nullptr && *err == cudaSuccess)
                 *err = e != cudaSuccess ? e : (e2 != cudaSuccess ? e2 : cudaErrorUnknown);   // (d == null: no alias)
+            // P124e r3 finding 2: a registration that SUCCEEDED but answered no usable alias must give its
+            // registration back (the pieces path does the same at the grow loop's `d != a` bail): the `!whole`
+            // rollback unregisters only the arrays whose alias arrived, so without this the refused array's run
+            // stays registered, uncounted in g_kv_host_bytes - and every later registration at that address
+            // fails with it, dooming every grow of this copy to the fallback.
+            if (e == cudaSuccess) (void) cudaHostUnregister(at);
+            (void) cudaGetLastError();
             break;
         }
     }
@@ -907,13 +914,23 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
             std::vector<uint8_t*> rd(p.per.size(), nullptr);
             uint64_t rb = 0;
             for (size_t i = 0; i < p.per.size() && fits; ++i) {
+                uint8_t* at = p.base + p.off[i];
                 void* d = nullptr;
                 const uint64_t bytes = kv_host_prefix_bytes(pg, p.per[i], 4096);
-                if (cudaHostRegister(p.base + p.off[i], (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped) ==
-                        cudaSuccess && cudaHostGetDevicePointer(&d, p.base + p.off[i], 0) == cudaSuccess && d != nullptr) {
+                const cudaError_t e = cudaHostRegister(at, (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped);
+                const cudaError_t e2 = e == cudaSuccess ? cudaHostGetDevicePointer(&d, at, 0) : e;
+                if (e == cudaSuccess && e2 == cudaSuccess && d != nullptr) {
                     rd[i] = (uint8_t*) d;
                     rb += bytes;
-                } else fits = false;
+                } else {
+                    // P124e r3 finding 2 (here too): the array whose registration this step brought in but whose
+                    // alias was refused must not stay registered - the give-back loop below walks the arrays that
+                    // ANSWERED an alias (rd != null) and would skip it, poisoning the address for every later step
+                    // and every later grow of this copy.
+                    if (e == cudaSuccess) (void) cudaHostUnregister(at);
+                    (void) cudaGetLastError();
+                    fits = false;
+                }
             }
             if (fits) {
                 p.d = rd;
