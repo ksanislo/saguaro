@@ -1,9 +1,11 @@
 # P124e - QFN K/V memory grows with use, not up front - REPORT
 
-Branch `saguaro/q1-p124e-elastic-kv`, two commits on top of `88809c4ea` (Saguaro 1.2.3):
+Branch `saguaro/q1-p124e-elastic-kv`, commits on top of `88809c4ea` (Saguaro 1.2.3):
 
 * `747fe1908` - step 2+3: the elastic host K/V (growth modes, relief, load-time start)
 * `ee8e3dc89` - step 4: pure sizing/growth helper + unit test + the manager's card-test script
+* `ab3817c5`..`318f5da92` - round 1 of the review (see this file's git history for that FIX-REPORT)
+* `1002b5c78`.. - round 2 of the review: `FIX-REPORT.md` maps every `REVIEW-RESULT.md` finding to its commit
 
 ## Step 1 - how the streamed host K/V was sized and pinned before this change
 
@@ -46,18 +48,26 @@ warning. Elastic positions (YaRN) were per-conversation; the memory was not.
 
 1. **The gate is a probe now, not just the attribute** (`layer.cpp: probe_registered_page_address()`).
    One `kHostPiece`-sized piece of a scratch `MAP_NORESERVE` range is really registered and
-   `cudaHostGetDevicePointer`-checked (`d == a`). NVIDIA passes as before (attribute first, probe to
-   confirm); HIP fails the attribute but passes the probe (flat VA), so mortar gets the *pieces* mode
-   it was silently being denied. K/V stays INT8 throughout - no dtype or layout change anywhere.
+   `cudaHostGetDevicePointer`-checked (`d == a`) on EVERY device; the attribute only chooses which
+   stderr line a refusal prints. HIP fails the attribute but passes the probe (flat VA), so mortar
+   gets the *pieces* mode it was silently being denied - round 2 (`1002b5c78`) had to make the probe
+   actually run for attribute-less cards (until then it was seeded from the attribute and could only
+   demote, so this claim was false and mortar still got prefix mode). K/V stays INT8 throughout - no
+   dtype or layout change anywhere.
 2. **Prefix mode for the real fallback** (`layer.cpp: HostPool::prefix`, `host_prefix_reregister_locked()`):
    when a card truly cannot hand the kernels a registered page's host address, growth still works:
    every array is ONE registered prefix `[off_i, off_i + backed x per_i)` and a grow/trim
    re-registers the (all-or-nothing) set and rewrites the owner state's `host` pointers from the new
-   device bases (`HostPool::owner`, `host_apply()`). The device is synchronized before every remap;
-   no copy can ever straddle a registration boundary (each copy site is one array run). This is the
-   plan's "chunked pinned allocations" - the arrays are the chunks. The old "pinned whole" outcome
-   survives only as `SAGUARO_KV_HOST_ELASTIC=0` or Windows (message text updated:
-   `... the host copies grow as one registered prefix per array (P124e)`).
+    device bases (`HostPool::owner`, `host_apply()`). The device is synchronized before every remap;
+    no copy can ever straddle a registration boundary (each copy site is one array run). This is the
+    plan's "chunked pinned allocations" - the arrays are the chunks. A trim also `MADV_DONTNEED`s the
+    run it gives back (round 2): unregistering alone keeps the populated `MAP_NORESERVE` pages
+    resident, so a parked conversation would keep the RAM while the log said it was given back. The
+    `host` pointers this mode installs are DEVICE bases, not CPU addresses - the snapshot copy path
+    keeps them off the threaded CPU memcpy (`qsa_host_elastic_prefix()`, round 2) and open question 1
+    still stands. The old "pinned whole" outcome
+    survives only as `SAGUARO_KV_HOST_ELASTIC=0` or Windows (message text updated:
+    `... the host copies grow as one registered prefix per array (P124e)`).
 3. **Memory follows use at every size** (`kv_host_growth.hpp` helpers, used by both modes):
    * the step and the load-time start is `SAGUARO_KV_HOST_STEP`, default now **32768 cells** (was 8192) -
      "about 32768 positions, the cells QFN keeps in VRAM already", per conversation, at 262144 exactly
@@ -67,9 +77,13 @@ warning. Elastic positions (YaRN) were per-conversation; the memory was not.
      `session_slot_fit(slot, 1)` (`generate.cpp:5985`) backs its start, and each batch slot's drafter its
      start (`generate.cpp:6189`); a prompt read still backs the whole prompt ahead of need (the admit
      path fits prompt + max_new before the read; `qsa_host_grow` on a fresh state pins the whole ask);
-   * past the backed end a grow doubles what the state holds (`kv_host_grow_pages`) - 1M fills in ~5
-     steps, not 32; each step logs `the host copy backs N cells now (X GiB pinned for K/V in all, T ms)`
-     (prefix mode times its own remap, pieces mode the grow call) - so the card test can report every
+   * past the backed end a grow in PREFIX mode doubles what the state holds (`kv_host_grow_pages` - 1M
+     fills in ~5 steps, not 32); the pieces mode pins exactly the asked step (the doubling is not both
+     modes - restated after round 2). Each grow logs `the host copy backs N cells now (X GiB pinned for
+     K/V in all, T ms)` - prefix mode times its own remap, pieces mode the grow call (round 2 put the ms
+     on the pieces line too) - and a grow is one call per *state*, so a conversation step logs one line
+     per QSA layer crossing a boundary (the card script collapses the lines to one per step; a session
+     with several layers does NOT produce "a handful" of raw lines). So the card test can report every
      growth step's time, and no step runs per-token (decode only crosses a boundary if it overruns the
      pinned `max_new`, and then the grow happens between windows, never mid-copy);
    * **give-back**: `qsa_host_trim` (park/reset/end via `session_slot_fit(trim)` / `solo_host_trim`)
@@ -87,10 +101,18 @@ warning. Elastic positions (YaRN) were per-conversation; the memory was not.
       walked by descending arena offset (the copy is hottest-first), their offset set to `kNoComplement`
       so later reads fall through to the mapped files, their working-set lock undone (a locked page
       survives `MADV_DONTNEED`), and their pages `madvise(DONTNEED)`-ed only after a grace window, so a
-      CPU reader that latched a blob before the trim never reads zeroed weights (open question 4);
-      the registered PCIe prefix and a `cudaHostAlloc` arena are never trimmed, and
+       CPU reader that latched a blob before the trim never reads zeroed weights (open question 4).
+      Round 2 covers the WRITERS too: phase 1's offset trims and every update of those offsets
+      (`commit_exchanges`/`commit_flip`/`install_resident`) are mutually excluded under the source's
+      `complement_mu_`, so a prefetch that read a slot's place before a trim can no longer adopt it
+      after; an arena that is not page-aligned (the pageable `malloc` fallback when `cudaHostAlloc`
+      refuses) is declined - its `madvise` would EINVAL and the give-way would report RAM it never
+      freed - and the counted `gave` is the bytes actually DISCARDED, not each trimmed slot's blob.
+      The registered PCIe prefix and a `cudaHostAlloc` arena are never trimmed, and
      `exchange_storage_` (SAGUARO_EXCHANGE_ROTATE) turns the give-way off. The relief handler syncs every
-     device first; if giving way did not help, the existing `ram_reclaim` (park an idle conversation,
+     device first; one give-way holds layer's `g_host_mu` across that sync AND the grace window (other
+     threads' grows/trims and the `HMEM` status read wait it out - a rare, already-slow path, named
+     here rather than hidden). If giving way did not help, the existing `ram_reclaim` (park an idle conversation,
      drop the conversation cache) still runs unchanged. The tier takes the room back naturally: freed
      pages are ordinary reclaimable RAM, and `--session-dir`/idle-park paths are untouched.
 5. **Load-time reporting**: both KV-streaming lines now count the *backed* bytes and say the copy grows
@@ -155,7 +177,11 @@ warning. Elastic positions (YaRN) were per-conversation; the memory was not.
 1. **Prefix mode is untested on real hardware** - no card here lacks the host-address property; NVIDIA
    (attribute + probe pass) and the piece mode are what this box could exercise (compile-only, sm_75).
    The WSL2/dxg path is the realistic prefix-mode user; the card script's step C should be run once on a
-   WDDM-ish box before trusting it (it degrades to "grow re-registers", never to wrong data).
+   WDDM-ish box before trusting it (it degrades to "grow re-registers", never to wrong data). The run
+   must include a PARK + RESTORE of a streamed conversation, not just a grow: in this mode the state's
+   `host` pointers are device bases, and the snapshot copy path only keeps them off the threaded CPU
+   memcpy because `qsa_host_elastic_prefix()` says so (round 2) - a real card is the proof. Keep records
+   key on those bases, so every remap degrades them to re-staging (slower, never wrong).
 2. **A mid-decode boundary crossing stalls for one remap** if a conversation overruns its admitted
    `max_new` pinning: the prefix mode synchronizes the device before re-registering (pieces mode never
    remaps, so only the fallback pays). Growth never happens per token; with `--serve` the admit pins
@@ -177,6 +203,7 @@ warning. Elastic positions (YaRN) were per-conversation; the memory was not.
 6. Whether `--resident-budget-gib auto` should *raise* its fill above today's number once the K/V
    stops eating RAM - it already does (the budget is sized from the real free RAM), but the
    lend-region sizing path was not otherwise touched; a mortar run will show the exact new figure.
-7. The piece-mode growth log line prints on every grow call that pins something (one line per 32768
-   cells) - intended for the card test's "report the time any growth step took"; if it turns out noisy
-   on a busy server it can be raised to log only >1-step jumps.
+7. The growth log line prints on every grow call that pins something - and a grow call is per *state*, so a
+   conversation step logs one line per QSA layer crossing a boundary (dozens of raw lines, not a handful;
+   the card script now collapses them to one per step). Intended for the card test's "report the time any
+   growth step took"; if it turns out noisy on a busy server it can be raised to log only >1-step jumps.
