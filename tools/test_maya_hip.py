@@ -669,7 +669,10 @@ class HipSetupTests(unittest.TestCase):
                 patch.object(sys, "argv", ["saguaro.py", "--backend", "hip", "--bench"]), \
                 patch.object(maya, "bench", return_value=0) as bench:
             self.assertEqual(maya.main(), 0)
-        bench.assert_called_once_with(hip, (maya.HERE / "VERSION").read_text().strip(), None, 2, 10.0)
+        # (parallel=True: the several-at-once default the CLI now always states - the point of the test stays
+        #  the call's shape: the HIP config is the one handed to --bench, at most one call, every argument)
+        bench.assert_called_once_with(hip, (maya.HERE / "VERSION").read_text().strip(), None, 2, 10.0,
+                                      parallel=True)
 
     def test_cli_explicit_config_for_bench_and_report(self):
         path = self.installed_config()
