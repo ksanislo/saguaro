@@ -255,7 +255,8 @@ request is running or waiting - even when a place is free, since `low` means "on
 engine it would otherwise keep the card's speed from the people using it (every running low answer steps aside,
 not one per waiter); a `normal` one only when a `high` request is waiting AND every place is taken, and then only
 as many as that waiter needs - the low ones, which step aside anyway, are what frees its place, so a normal one
-is cut only when there is no low one to give. A `high` answer never gives its place up. The giving-up is the way a
+is cut only when there is no low one to give, and when more than one `normal` answer runs it is the one that
+started its turn LAST that gives its place up. A `high` answer never gives its place up. The giving-up is the way a
 fair slice does it (PAUSE where the engine can, else
 a cut), and without waiting for `SAGUARO_FAIR_SLICE_S`; when its turn comes back it resumes at exactly the token it
 reached - nothing it had written is generated again, and the thinking budget and the loop guard count from where it

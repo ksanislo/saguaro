@@ -561,6 +561,50 @@ class ServicePreempts(Env):
         self.assertEqual(self.svc.fifo.waiting(), 0)
         self.assertEqual(self.svc.fifo._yields, 0)
 
+    def calls_for(self, key: str):
+        """The engine calls made for the conversation whose prompt contains `key` (all of them: its first and
+        any resume - more than one means the answer was cut and continued)."""
+        base = next(b for b in self.engine.bases if key in self.engine.tok.decode(b))
+        return [c for c in self.engine.calls if c[0][:len(base)] == base]
+
+    def test_the_normal_that_started_last_steps_aside_for_a_high_one(self):
+        # (finding 4, PLAN line 40): parallel 2, TWO normals running and a high waiting that cannot fit: the
+        # normal that STARTED LAST is the one that gives its place up - not whichever runner first ticks on it.
+        longs = {f"long {c}": "".join(random.Random(800 + i).choices(string.ascii_letters, k=400))
+                 for i, c in enumerate("AB")}
+        self.engine = ResumingEngine(self.tok, {**longs, "short": SHORT}, delay_s=0.003)
+        self.svc.engine = self.engine
+        self.svc.fifo.set_capacity(2)                   # both places taken: the high one cannot fit
+        out, log = {}, io.StringIO()
+        started = lambda key: any(key in self.engine.tok.decode(b) for b in self.engine.bases)
+        a = threading.Thread(target=ask, args=(self.svc, "long A one", 4096, out, PRIORITY_NORMAL))
+        a.start()
+        while not started("long A"):
+            time.sleep(0.001)                           # A has its turn: the FIFO's first normal grant
+        b = threading.Thread(target=ask, args=(self.svc, "long B one", 4096, out, PRIORITY_NORMAL))
+        b.start()
+        while not started("long B"):
+            time.sleep(0.001)                           # B started LAST: B is the one meant to step aside
+        time.sleep(0.05)                                # both answers are past their first tokens
+        with contextlib.redirect_stdout(log):
+            hi = threading.Thread(target=ask, args=(self.svc, "short one", 4096, out, PRIORITY_HIGH))
+            hi.start()
+            for th in (a, b, hi):
+                th.join(60)
+        self.assertEqual(out["short one"][0], SHORT)
+        for user, text in longs.items():
+            self.assertEqual(out[user + " one"][0], text)      # both answers end whole
+        self.assertEqual(len(self.calls_for("long A")), 1)     # the earlier starter ran on, untouched
+        self.assertGreaterEqual(len(self.calls_for("long B")), 2)   # the last-started one was cut ...
+        text = log.getvalue()                                   #  ... and continued from its token
+        self.assertEqual(text.count("priority: a normal answer paused"), 1)
+        self.assertIn("for a high-priority request", text)
+        self.assertEqual(text.count("priority: the normal answer continues"), 1)
+        self.assertLess(out["short one"][1], out["long B one"][1])
+        self.assertFalse(self.svc.fifo.locked())
+        self.assertEqual(self.svc.fifo.waiting(), 0)
+        self.assertEqual(self.svc.fifo._yields, 0)
+
     def test_a_high_request_cuts_a_running_normal(self):
         # Ken's 11-25 block, scenario 3: parallel 1, a normal running + a high arriving -> the normal
         # pauses (the high waits, all places are taken, and claim_yield's counting cuts this one runner)

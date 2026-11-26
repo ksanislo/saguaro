@@ -431,8 +431,9 @@ class FairLock:
     FIFO's, unchanged.  A low waiter older than SAGUARO_PRIORITY_AGE_S counts as normal (aging), and a low one
     starts or resumes only while the model is idle (SAGUARO_PRIORITY_IDLE_S, `_idle_wait`); `waiting(above=p)`
     counts the waiters that would step ahead of a runner at level p, and `step_aside(p)` is the runner's own
-    tick decision: a low one gives its place up whenever a normal or high one runs OR waits - even when a place
-    is free - a normal one only for a waiting high one that does not fit (claim_yield's counting), a high never."""
+tick decision: a low one gives its place up whenever a normal or high one runs OR waits - even when a place
+     is free - a normal one only for a waiting high one that does not fit (claim_yield's counting, and of several
+     running normals it is the one that started last), a high never."""
 
     def __init__(self, capacity: int = 1):
         self._cv = threading.Condition(threading.Lock())
@@ -441,9 +442,12 @@ class FairLock:
         self._used = 0
         self._yields = 0                                       # runners that decided to give their place up (claim_yield)
         self._one = False                                      # one holder at a time, whatever the capacity (Turbo)
-        self._held: list = []                                  # one entry per grant: the priority it was taken at -
-        #  the idle rule's "nothing normal or high runs" (a release without a level pops the newest, which is its own:
-        #  an all-places holder can only have it while the list is otherwise empty)
+        self._held: list = []                                  # one entry per grant: (the priority it was taken at,
+        #  the thread that took it) - the idle rule's "nothing normal or high runs", and the order the running
+        #  requests started their turns in: of several running normals it is the one that started LAST that steps
+        #  aside for a waiting high one (Ken's "then the normal one that started last", `_last_normal`), and the
+        #  ident is how a runner names itself about that without a handle plumbed through _turn and _sliced - a
+        #  request's whole run, FIFO turn included, lives on one thread
         self._last_finish = 0.0                                # when the last normal or high request ended (release
         #  with its priority): the idle rule's grace counts from here; 0: since before the process started
 
@@ -507,8 +511,8 @@ class FairLock:
             # while the model is idle (the idle rule, `_idle_wait`)
             if self._fits(k) and not any(self._eff(e) >= p for e in self._queue) and self._idle_wait(p) == 0.0:
                 self._used += k
-                self._held.append(p)                      # (running at p: the idle rule counts it)
-                return True
+                self._held.append((p, threading.get_ident()))    # (running at p: the idle rule counts it, and
+                return True                                      #  the start order names who steps aside first)
             if not blocking:
                 return False
         me = self.enqueue(units, p)
@@ -523,12 +527,12 @@ class FairLock:
         finished in the last SAGUARO_PRIORITY_IDLE_S seconds (0 = no grace), so a person's follow-up a few
         seconds after an answer finds the model where they left it.  -1: a normal or high request has the
         engine - its release wakes the line.  Waiters are not looked at: the grant order already keeps a low
-        one behind every normal or high one in line.  Called under the lock; `self._held` carries one entry per
-        live grant, and a release naming no level is a context manager or a maintenance path - it holds every
-        place, so nothing else can have a grant to lose."""
+        one behind every normal or high one in line.  Called under the lock; `self._held` carries one (level,
+        thread) entry per live grant, and a release naming no level is a context manager or a maintenance path -
+        it holds every place, so nothing else can have a grant to lose."""
         if p > PRIORITY_LOW:
             return 0.0
-        if PRIORITY_HIGH in self._held or PRIORITY_NORMAL in self._held:
+        if any(lvl > PRIORITY_LOW for lvl, _ in self._held):
             return -1.0
         return max(0.0, priority_idle_seconds() - (time.monotonic() - self._last_finish))
 
@@ -567,15 +571,44 @@ class FairLock:
         with self._cv:
             self._yields = max(0, self._yields - 1)
 
+    def _unhold(self, p):
+        """Giving one `_held` entry back (called under the lock): THIS thread's grant first - the (level, thread)
+        pairs make the giver's own findable - at level p, or at any level when p is None; failing that any entry
+        at p (a place taken on one thread and given back on another: the old behaviour the odd maintenance path
+        needs); and with no level named and nothing of this thread's held, the newest, which is what a release
+        without a level always popped."""
+        tid = threading.get_ident()
+        for i in range(len(self._held) - 1, -1, -1):
+            lvl, th = self._held[i]
+            if th == tid and (p is None or lvl == p):
+                return self._held.pop(i)
+        if p is not None:
+            for i in range(len(self._held) - 1, -1, -1):
+                if self._held[i][0] == p:
+                    return self._held.pop(i)
+            return None
+        return self._held.pop() if self._held else None
+
+    def _last_normal(self):
+        """The thread that took its turn last among the running NORMAL grants - `_held` is appended in grant
+        order, so the newest NORMAL entry names the one that started last (Ken's "then the normal one that
+        started last" steps aside for a waiting high one); None with no normal running. Called under the lock."""
+        for lvl, _tid in reversed(self._held):
+            if lvl == PRIORITY_NORMAL:
+                return _tid
+        return None
+
     def step_aside(self, p: int, slice_s: float = 0.0) -> bool:
         """The runner's preemption decision on its token tick (R122, Ken's "who steps aside, exactly"): True when
         a runner at level p gives its place up now.  A LOW one does so whenever ANY normal or high request runs
         or waits - even when a place is free: low is "only while idle", and with parallel > 1 it would otherwise
         keep the card's speed from the people using it (every low runner steps aside on its own, all of them,
-        while a person is around).  A NORMAL one only for a waiting HIGH one that does not
+        while a person is around).  A NORMAL one only for a waiting HIGH one that does
         fit - `claim_yield`'s counting cuts just as many runners as that waiter needs, and a free place is its
-        place, not a reason to cut anybody.  A HIGH one never.  A True claims the decision like `claim_yield`
-        does: the runner then either gives its place up (`yield_place`) or says it did not
+        place, not a reason to cut anybody; when more than one normal runs, the one that STEPS ASIDE is the one
+        that started its turn LAST (Ken's choice of victim, `_last_normal`) - an earlier one keeps its place and
+        an earlier runner's tick simply does not claim.  A HIGH one never.  A True claims the decision like
+        `claim_yield` does: the runner then either gives its place up (`yield_place`) or says it did not
         (`unclaim_yield`); the low one's claim needs no need/free arithmetic - it gives its place up beside a
         running person, where nobody is waiting at all."""
         if p >= PRIORITY_HIGH:
@@ -587,13 +620,16 @@ class FairLock:
                     return False
                 self._yields += 1                               # (counted, as a fair slice's claim is: the place
                 return True                                     #  is on its way out - nobody else must give one)
+        with self._cv:
+            if self._last_normal() != threading.get_ident():
+                return False                        # (a normal that started earlier: not this one's place to give)
         return self.waiting(above=p) > 0 and self.claim_yield(slice_s, above=p)
 
     def highest_active(self):
         """The highest priority running or waiting (waiters aged), None with nothing at all: whose name a
         stepping-aside line logs - a low answer cut while a normal one runs has no WAITER to name."""
         with self._cv:
-            levels = list(self._held) + [self._eff(e) for e in self._queue]
+            levels = [lvl for lvl, _ in self._held] + [self._eff(e) for e in self._queue]
         return max(levels, default=None)
 
     def yield_place(self, units: int | None = 1, priority: int | None = None) -> object:
@@ -607,9 +643,8 @@ class FairLock:
         with self._cv:
             self._queue.append(me)
             self._used -= min(k, self._used)
-            if p in self._held:                           # (waiting in line again, not running: the idle rule)
-                self._held.remove(p)
-            self._yields = max(0, self._yields - 1)
+            self._unhold(p)                               # (waiting in line again, not running: the idle rule -
+            self._yields = max(0, self._yields - 1)       #  and its OWN grant entry goes: the pairs are the key)
             self._cv.notify_all()
         return me
 
@@ -635,8 +670,8 @@ class FairLock:
                     self._queue.remove(me)
                     me[1] = min(me[1], self.capacity)
                     self._used += me[1]
-                    self._held.append(p)                    # (running at p: the idle rule counts it)
-                    self._cv.notify_all()                   # the next in line may fit in what is left
+                    self._held.append((p, threading.get_ident()))   # (running at p: the idle rule counts it, and
+                    self._cv.notify_all()                   #  the start order names who steps aside first)
                     return True
                 left = None if end is None else end - time.monotonic()
                 if left is not None and left <= 0:
@@ -666,10 +701,11 @@ class FairLock:
                 k = self._used
             self._used -= k
             if priority is None:
-                if self._held:                            # (no level given: it gives back its own newest grant)
-                    self._held.pop()
-            elif priority in self._held:
-                self._held.remove(priority)
+                if self._held:                            # (no level given: this thread's own newest grant - and
+                    self._unhold(None)                    #  the newest at all when it holds none of them here,
+            else:                                         #  the release-without-a-level of before)
+                self._unhold(priority)                    # (this thread's own at that level first: the pairs make
+                #  the giver's entry findable; a level with no entry at all leaves _held alone, as before)
             if priority is not None and priority > PRIORITY_LOW:
                 self._last_finish = time.monotonic()      # (a person's answer finished: the low grace starts)
             self._cv.notify_all()
