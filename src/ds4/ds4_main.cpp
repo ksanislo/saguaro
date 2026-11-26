@@ -747,7 +747,7 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
     std::printf("INFO logit_bias=1\n");   // (GEN logit_bias=<id>:<bias>,...: added to the logits of every pick)
     // (#1026: this start came out short of --reserve-mib - the server starts the engine once more, which keeps it)
     if (m.reserve_short_mib() > 0) std::printf("INFO reserve_short=%d\n", m.reserve_short_mib());
-    // keepread (P124c's item 4): a prompt read that a STOP ends keeps its conversation live at the deepest state the
+    // keepread (P124k; the audit's §8.4): a prompt read that a STOP ends keeps its conversation live at the deepest state the
     // read already stores - the end of its last whole piece, which its keep checkpoints as the read goes, or the last
     // restore point at or before the run that was stopped - and says it as the DONE's reused, so the next request of
     // the same prompt shares it and reads the rest, as it shares a finished turn's conversation.  READY says keepread
