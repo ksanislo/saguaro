@@ -687,6 +687,14 @@ class FairLock:
         with self._cv:
             return max((self._eff(e) for e in self._queue), default=None)
 
+    def all_low_waiting(self) -> bool:
+        """True when the line holds waiters and every one of them is a low request (R122, the queue watchdog):
+        a low request waiting a long time behind the people is Ken's rule (no promotion by waiting), not a
+        wedged FIFO - the WARNING would fire on ordinary busy evenings.  With an age setting on an aged low
+        waiter counts as normal, and the line is worth printing again."""
+        with self._cv:
+            return bool(self._queue) and all(self._eff(e) == PRIORITY_LOW for e in self._queue)
+
     def oldest_wait(self) -> float:
         """Seconds the request first in line has been waiting (0 when nobody waits): 0 while it is being served."""
         with self._cv:
@@ -4223,9 +4231,12 @@ class Service:
                 time.sleep(QUEUE_TICK_S)
                 try:
                     oldest, waiting = self.fifo.oldest_wait(), self.fifo.waiting()
+                    low_only = self.fifo.all_low_waiting()   # (R122: a low request waiting long behind the
+                    #  people is the no-aging rule, not a wedge: the WARNING is for the line a person waits in)
                 except Exception:  # noqa: BLE001 - a diagnostic must never end the thread
                     continue
-                if not waiting or oldest < QUEUE_WEDGED_S or time.monotonic() - warned < QUEUE_WARN_S:
+                if not waiting or oldest < QUEUE_WEDGED_S or low_only \
+                        or time.monotonic() - warned < QUEUE_WARN_S:
                     continue
                 warned = time.monotonic()
                 with self.status_lock:
