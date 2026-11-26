@@ -83,10 +83,12 @@ warning. Elastic positions (YaRN) were per-conversation; the memory was not.
    * when a grow still runs out of RAM, `qsa_host_grow` asks the new host-relief hook
      (`layer.hpp: set_host_relief/host_relief`, wired in `generate.cpp:6728`) BEFORE parking anything:
      `ExpertSource::relieve_ram(bytes)` (new virtual; `FileExpertSource` override at
-     `expert_source.cpp:3465`) hands back the resident complement's **coldest** experts - its slots are
-     walked by descending arena offset (the copy is hottest-first), their pages `madvise(DONTNEED)`-ed,
-     their working-set lock undone, and their offset set to `kNoComplement` so later reads fall through
-     to the mapped files; the registered PCIe prefix and a `cudaHostAlloc` arena are never trimmed, and
+      `expert_source.cpp:3465`) hands back the resident complement's **coldest** experts - its slots are
+      walked by descending arena offset (the copy is hottest-first), their offset set to `kNoComplement`
+      so later reads fall through to the mapped files, their working-set lock undone (a locked page
+      survives `MADV_DONTNEED`), and their pages `madvise(DONTNEED)`-ed only after a grace window, so a
+      CPU reader that latched a blob before the trim never reads zeroed weights (open question 4);
+      the registered PCIe prefix and a `cudaHostAlloc` arena are never trimmed, and
      `exchange_storage_` (SAGUARO_EXCHANGE_ROTATE) turns the give-way off. The relief handler syncs every
      device first; if giving way did not help, the existing `ram_reclaim` (park an idle conversation,
      drop the conversation cache) still runs unchanged. The tier takes the room back naturally: freed
@@ -161,9 +163,13 @@ warning. Elastic positions (YaRN) were per-conversation; the memory was not.
 3. **The trim floor is one step** (~0.4 GiB per parked conversation, both modes) - chosen for parity
    with the pieces mode's keep-one-piece rule and to make re-admission cheap; trivially lowerable to
    zero if Ken wants parked chats to cost literally nothing.
-4. **`relieve_ram` trims while other threads may prefetch**: reads of a trimmed expert go back to the
-   file (page-cache re-fault, slower, correct); `blob()`/`resident_blob()` re-read `complement_offsets_`
-   per call and the relief handler syncs every device first, but an I/O prefetch thread may re-read a
+4. **`relieve_ram` trims while other threads may read the complement** - FIXED on review (it did NOT
+   hold: `MADV_DONTNEED` would zero pages a CPU reader had just latched). The give-way is two-phase now:
+   trim the offsets (release store; later readers see `kNoComplement` and read the files) and undo the
+   working-set lock first, then after a grace window (`SAGUARO_KV_RELIEF_GRACE_MS`, default 250 ms, one
+   wait per give-way on the already-slow relief path) discard the pages - so a reader that latched a
+   blob's address before the trim finishes over whole bytes (unlocking keeps them). The relief handler
+   still syncs every device, so the GPU lane is quiet anyway. What remains is a reader that re-reads a
    file it was about to serve from RAM - wasted work, never wrong data.
 5. `docs/BENCHMARKING.md` (the plan's interleaved-comparison protocol) does not exist in this tree; the
    script keeps the same *spirit* (same-config, both contexts, printed side by side) but old-vs-new

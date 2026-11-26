@@ -218,7 +218,9 @@ public:
     virtual uint64_t release(int64_t layer, int64_t expert) { (void) layer; (void) expert; return 0; }
     /// P124e: the resident RAM tier gives way to a growing conversation's K/V - at least `bytes` of its coldest
     /// resident experts handed back (their reads fall back to the files; no result depends on them).  Returns the
-    /// bytes given back, 0 when the tier cannot shrink (nothing resident, pinned whole, or no handler).
+    /// bytes given back, 0 when the tier cannot shrink (nothing resident, pinned whole, or no handler).  May wait
+    /// a grace window for CPU readers that latched a trimmed blob before its offset was trimmed; the caller must
+    /// have the devices quiet, and the engine holds it as a slow path (a K/V pin that RAM refused).
     virtual uint64_t relieve_ram(uint64_t bytes) { (void) bytes; return 0; }
     /// Whether the verify window may give the GPU a PCIe share of this layer's misses at all (each expert is still
     /// checked with `pinned`).  The arena answers per layer through its expert 0; the resident RAM mode's compact

@@ -3458,10 +3458,15 @@ uint64_t FileExpertSource::release(int64_t layer, int64_t expert) {
 
 // P124e: a growing conversation's K/V has run out of RAM: the resident complement gives way from its coldest end
 // (the copy is laid out hottest-first, so walking its slots by descending arena offset IS coldest-first, as
-// DS4's take-from-experts does in VRAM).  A trimmed slot goes back to `kNoCacheComplement`, so its reads fall
-// through to the mapped files; its pages are madvised away and its working-set lock undone.  The registered
-// prefix (the PCIe-read share) is never trimmed; neither can a cudaHostAlloc arena be.  The caller has left the
-// device quiet and the engine asks only when a K/V pin failed, so no window is mid-copy out of these bytes.
+// DS4's take-from-experts does in VRAM).  A trimmed slot goes back to `kNoCacheComplement`, so its later reads fall
+// through to the mapped files; its working-set lock is undone and its pages are madvised away.  The registered
+// prefix (the PCIe-read share) is never trimmed; neither can a cudaHostAlloc arena be.  The relief handler synced
+// every device, so the card reads none of these bytes; the CPU lanes are not stopped, so this gives way in two
+// phases: trim the offsets and unlock first (a reader that latched a blob's address before the offset flip keeps
+// reading whole bytes - unlocking does not drop them), wait out the grace window, and only then discard the pages
+// with MADV_DONTNEED, so no CPU reader can ever see zero-filled expert weights.  The bytes `gave` counts are the
+// bytes discarded.  Relief runs serialized under layer.cpp's g_host_mu (qsa_host_grow) and only when a pin failed,
+// so the one wait per give-way costs nothing on any serving path.
 uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
     if (bytes == 0 || !complement_ready_ || complement_host_ == nullptr || exchange_storage_.active()) return 0;
     if (complement_pinned_ && !complement_registered_) return 0;   // cudaHostAlloc: the driver holds it whole
@@ -3481,6 +3486,8 @@ uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
         slots.push_back({i, complement_offsets_[i], len});
     }
     std::sort(slots.begin(), slots.end(), [](const Slot& a, const Slot& b) { return a.off > b.off; });
+    // phase 1: trim the offsets (readers from here route to the files) and undo the locks; the page-runs wait
+    std::vector<std::pair<uint64_t, uint64_t>> runs;   // [lo, hi) page-runs to discard after the grace window
     uint64_t gave = 0;
     for (const Slot& s : slots) {
         if (gave >= bytes) break;
@@ -3488,30 +3495,50 @@ uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
         // page-run [lo, hi) of this slot's bytes (a shared boundary page stays for the neighbour)
         const uint64_t lo = (s.off + page - 1) / page * page;
         const uint64_t hi = (s.off + s.len) / page * page;
-        complement_offsets_[s.index] = kNoComplement;
+        // the offset flip is a release store the lock-free readers race with: each sees the old offset (and the
+        // grace window below covers its read) or kNoComplement (and reads the files) - never a torn middle
+        std::atomic_ref<uint64_t>(complement_offsets_[s.index]).store(kNoComplement, std::memory_order_release);
         if (hi > lo) {
             // its working-set lock first, in EVERY backing mode: the lock covers [lock_off, lock_off + locked)
             // whatever the registration state, and the paced/CS-T complement is BOTH a registered prefix AND an
             // mlock'ed tail above it (lock_off = the registered share) - exactly the bytes the trims sit on
             // (keep_below = the pin limit).  Registered pages the kernels must not lose are the prefix, and slots
             // inside it are skipped above; a locked page survives MADV_DONTNEED (the kernel's zap skips it, the
-            // call still answers 0), so without this unlock the bytes below are claimed but never given back.
+            // call still answers 0), so without this unlock the runs below are claimed but never given back.
             const uint64_t a = (uint64_t) (uintptr_t) (complement_host_ + lo);
             const uint64_t lock_lo = (uint64_t) (uintptr_t) complement_host_ + complement_lock_off_;
             const uint64_t lock_hi = lock_lo + complement_locked_;
             const uint64_t u0 = std::max(a, lock_lo), u1 = std::min(a + (hi - lo), lock_hi);
             if (complement_locked_ > 0 && u1 > u0) {
                 strata::platform::unlock_resident((void*) u0, u1 - u0);
-                complement_locked_ -= u1 - u0;
+                // the only writer of the counter once serving runs (pin sets it, close() frees the arena): the
+                // atomic_ref only makes the load-time/teardown reads of locked_bytes() race-free
+                std::atomic_ref<uint64_t>(complement_locked_).store(complement_locked_ - (u1 - u0),
+                                                                    std::memory_order_relaxed);
             }
-            (void) madvise((void*) ((uintptr_t) complement_host_ + lo), (size_t) (hi - lo), MADV_DONTNEED);
+            runs.push_back({lo, hi});
         }
         gave += s.len;
     }
-    if (gave > 0)
-        std::fprintf(stderr, "FileExpertSource: the resident expert tier gave way to a growing conversation's K/V: "
-                             "%.2f GiB of its coldest experts handed back (%.2f GiB were resident); their reads go "
-                             "back to the files\n", (double) gave / 1073741824.0, (double) complement_bytes_ / 1073741824.0);
+    if (gave == 0) return 0;
+    if (!runs.empty()) {
+        // phase 2, after the grace window: what remains are CPU-lane readers that latched a blob pointer before
+        // phase 1 flipped its offset - a blob copy into staging or the expert compute of the tokens routed through
+        // it, milliseconds each (the card is synced by the relief handler).  Past the window none can still touch
+        // these bytes, so discarding them gives the RAM back without ever zeroing a live read.
+        static const long grace_ms = [] {
+            const char* v = std::getenv("SAGUARO_KV_RELIEF_GRACE_MS");
+            const long long n = v != nullptr ? std::atoll(v) : 250;
+            return n > 0 ? (long) n : 0L;   // =0: discard without waiting (test rigs; not for serving)
+        }();
+        if (grace_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(grace_ms));
+        for (const std::pair<uint64_t, uint64_t>& r : runs)
+            (void) madvise((void*) ((uintptr_t) complement_host_ + r.first), (size_t) (r.second - r.first),
+                           MADV_DONTNEED);
+    }
+    std::fprintf(stderr, "FileExpertSource: the resident expert tier gave way to a growing conversation's K/V: "
+                         "%.2f GiB of its coldest experts handed back (%.2f GiB were resident); their reads go "
+                         "back to the files\n", (double) gave / 1073741824.0, (double) complement_bytes_ / 1073741824.0);
     return gave;
 #endif
 }
