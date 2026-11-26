@@ -817,7 +817,13 @@ void host_apply(HostPool& p, uint8_t* const* a) {
 }
 // Re-registers every array's prefix to cover `pages` pages: all or nothing (a refusal leaves the old prefixes
 // standing as far as they re-register).  Returns the bytes the new state holds registered; `ok` says it came out
-// whole.  The device must be quiet (its kernels read the old device bases until this returns).
+// whole.  The device must be quiet (its kernels read the old device bases until this returns) - AND the CPU must
+// be quiet BY OWNERSHIP: this rewrites the live owner's `host` pointers, so the caller must be the thread that
+// launches this state's copies (its session's admit thread, via session_slot_fit/session_host_fit - the serve
+// paths guarantee it) and no other thread may launch a copy for this state while grow/trim runs: the device
+// sync drains queued GPU work, but a CPU thread that latched an old base just before host_apply would copy
+// through a dead device mapping (prefix mode: d != a).  Nothing here enforces the rule, and the mistake is
+// silent - keep any new caller on the owning session's thread.
 uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok) {
     const auto t0 = std::chrono::steady_clock::now();
     const uint64_t had = host_prefix_bytes(p, p.backed);
@@ -903,7 +909,9 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
     std::lock_guard<std::mutex> lk(g_host_mu);
     HostPool& p = *g_host_pools[(size_t) st.host_elastic];
     const int64_t pages = kv_host_pages_for(cells, p.page_size);
-    if (p.prefix) {   // P124e: one registration per array - grow the prefixes, remap, done (the device must be quiet)
+    if (p.prefix) {   // P124e: one registration per array - grow the prefixes, remap, done (the device must be
+                      // quiet, and the caller must OWN this state's copy launches: the remap rewrites st.host -
+                      // see host_prefix_reregister_locked; serve grows on the session's own admit thread)
         const int64_t target = kv_host_grow_pages(p.backed, std::min(pages, p.pages), p.pages, p.unit);
         if (target <= p.backed) { g_host_failed = false; return true; }
         const uint64_t want = host_prefix_bytes(p, target);
@@ -994,7 +1002,8 @@ uint64_t qsa_host_trim(const QsaState& st, int64_t cells) {
     std::lock_guard<std::mutex> lk(g_host_mu);
     HostPool& p = *g_host_pools[(size_t) st.host_elastic];
     const int64_t pages = kv_host_pages_for(cells, p.page_size);
-    if (p.prefix) {   // give the prefixes back to the step the conversation still needs (P124e)
+    if (p.prefix) {   // give the prefixes back to the step the conversation still needs (P124e); same ownership
+                      // rule as the grow above: park/reset/end run on the thread that launches this state's copies
         const int64_t keep = kv_host_trim_pages(p.backed, std::min(pages, p.pages), p.unit, p.unit);
         if (keep >= p.backed) return 0;
         {   // nothing on the card may still read or write the bytes given back
