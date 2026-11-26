@@ -37,7 +37,8 @@ be read, rather than printing zeros and PASSing on nothing; macOS and Windows ha
 
 ### 2. `tools/test_mem_vs_ctx.py` (new) — the tests
 
-22 tests, no GPU: the `/proc` parsing on fixed inputs (status KiB->MiB and absent keys; the tree through a
+27 tests, no GPU (the 22 first delivered, plus the five the review round added - see `FIX-REPORT.md`):
+the `/proc` parsing on fixed inputs (status KiB->MiB and absent keys; the tree through a
 fake `/proc` whose comm carries spaces and parens; the tree's sums; the port's owner found by inode in a fake
 `/proc/net/tcp{,6}`, an ESTABLISHED line is not a listener); the GPU reader on canned `nvidia-smi` /
 `rocm-smi` output (nvidia first, rocm when nvidia is absent, all cards when the config names none, a card the
@@ -68,7 +69,8 @@ person".
 ## Tests run
 
 - `python -m unittest tools.test_mem_vs_ctx -v` (the only module the plan names; venv python 3.13.5):
-  **22 tests, OK** - run twice, once after the two fixes below and once against the final commits. No GPU,
+  **27 tests, OK** (22 as delivered, 27 with the review fixes; the module was re-run after every fix) - run
+  twice, once after the two fixes below and once against the final commits. No GPU,
   no model: the only real process it starts is the mock engine.
 - By hand while developing (not tests): the tool's own cycle against a live mock server on a free port
   (`/health` ok in 1.0 s, the port's owner was the server pid, the tree read RSS 87 MiB, the stop freed the
