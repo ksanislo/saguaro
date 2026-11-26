@@ -1004,10 +1004,13 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
             }
         }
         if (!failed) {
-            if (round > 0 || p.pinned != had)
-                std::fprintf(stderr, "saguaro: KV streaming: the host copy backs %lld cells now (%.2f GiB pinned for K/V "
-                                     "in all)\n", (long long) (std::min(pages, p.pages) * p.page_size),
-                             (double) g_kv_host_bytes.load() / 1073741824.0);
+            if (round > 0 || p.pinned != had)   // (P124e nit: the pieces line carries the grow call's time too - the
+                                                // card script's "(..., N ms)" criteria quote it for BOTH modes now)
+                std::fprintf(stderr, "saguaro: KV streaming: the host copy backs %lld cells now (%.2f GiB pinned for "
+                                     "K/V in all, %lld ms)\n", (long long) (std::min(pages, p.pages) * p.page_size),
+                             (double) g_kv_host_bytes.load() / 1073741824.0,
+                             (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - t0).count());
             g_host_failed = false;
             return true;
         }
