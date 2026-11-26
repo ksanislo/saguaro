@@ -368,7 +368,8 @@ class BenchStandard(unittest.TestCase):
 class BenchParallel(unittest.TestCase):
     """The several-at-once section: the N selection from the config / what the engine reported, the table text,
     and a measured round against a scripted mock engine speaking each family's protocol (rid for the line
-    engines, BGEN / BT / BDONE for QFN).  No GPU, no network."""
+    engines, BGEN / BT / BDONE for QFN - once with a slot the engine kills, BRE, which ends that answer with
+    its error in the table instead of hanging the round).  No GPU, no network."""
 
     # a mock several-conversation engine (READY ... multi=2): answers every GEN rid=<id> with rid-tagged
     # T / DONE lines; the rid 1 answer finishes later than the rid 0 one beside it (its own time differs)
@@ -413,6 +414,34 @@ class BenchParallel(unittest.TestCase):
         "        if slot == 0:\n"
         "            time.sleep(0.3)\n"
         "            print(f'BADM {slot} 0', flush=True)\n"
+        "            continue\n"
+        "        print(f'BADM {slot} 1', flush=True)\n"
+        "        for _ in range(min(n_new, 8) - 1):\n"
+        "            print(f'BT {slot} 7', flush=True)\n"
+        "        print(f'BDONE {slot} 8 length 300.0', flush=True)\n")
+
+    # a mock QFN batch engine where one slot dies: after its admission's control DONE it answers the slot
+    # with BRE <slot> <why> instead of BT / BDONE lines - the terminal line the real engine prints for a slot
+    # that ran out of RAM; the round must end with the failure in the table, not hang on the missing BDONE
+    MOCK_QFN_BRE = (
+        "import sys\n"
+        "print('INFO engine=0 batch_slots=4 slot_cache=1', flush=True)\n"
+        "print('READY 4096 stop', flush=True)\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line or line.strip() == 'QUIT':\n"
+        "        break\n"
+        "    f = line.split()\n"
+        "    if f[0] == 'GEN':\n"
+        "        for _ in range(min(int(f[1]), 8)):\n"
+        "            print('T 7', flush=True)\n"
+        "        print(f'DONE 8 {len(f[-1].split(\",\"))} 100.0 400.0 length 0 0 0', flush=True)\n"
+        "    elif f[0] == 'BGEN':\n"
+        "        slot, n_new = int(f[1]), int(f[2])\n"
+        "        print('T 7', flush=True)\n"
+        "        print(f'DONE 1 {len(f[-1].split(\",\"))} 100.0 1.0 length 0 0 0', flush=True)\n"
+        "        if slot == 1:\n"
+        "            print(f'BRE {slot} no RAM is left', flush=True)\n"
         "            continue\n"
         "        print(f'BADM {slot} 1', flush=True)\n"
         "        for _ in range(min(n_new, 8) - 1):\n"
@@ -535,6 +564,27 @@ class BenchParallel(unittest.TestCase):
         # slot 0 ended at its admission (its answer is the single token its DONE said: lowest own tok/s);
         # the mock's late BADM 0 holds every slot's clock, so what separates them is the token count
         self.assertLess(four[0] * 3, four[1])
+
+    def test_several_at_once_a_slot_dies_with_bre(self):
+        # (a QFN slot that died: BRE <slot> <why>, and no BDONE for it ever - the round ends with the failure
+        #  noted in the table instead of hanging, the other answers of every round still measured)
+        plan = MB.plan_parallel(list(range(20000)), 32768)
+        with tempfile.TemporaryDirectory() as td:
+            s = self.session(self.MOCK_QFN_BRE, td)
+            out = MB.run_parallel(s, plan, 256, 1, lambda *a: None)   # (hangs if BRE is not terminal)
+        self.assertEqual([n for n, _, _ in out["runs"]], [1, 2, 4])   # (the N = 1 round: plain GEN, no BRE)
+        runs = dict((n, (t, e)) for n, t, e in out["runs"])
+        self.assertIsInstance(runs[1][1][0], float)                   # (the solo answer is unaffected)
+        for n in (2, 4):
+            total, each = runs[n]
+            self.assertGreater(total, 0.0)                           # (the answered slots still give a total)
+            self.assertEqual(len(each), n)                           # (one figure a request, in sent order)
+            self.assertIsInstance(each[1], str)
+            self.assertEqual(each[1], "failed: no RAM is left")      # (the BRE line's own words)
+            self.assertEqual(sum(isinstance(x, float) for x in each), n - 1)
+        lines = MB.parallel_section(out)
+        self.assertEqual(sum(any(f"{n} at once" in x and "failed: no RAM is left" in x for x in lines)
+                             for n in (2, 4)), 2)                    # (both rounds name the failure)
 
     def test_several_at_once_one_at_a_time_engine(self):
         # (an engine that runs one answer at a time: N = 1 measured on the plain GEN line, 2 and 4 skipped;

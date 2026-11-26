@@ -669,12 +669,16 @@ def _par_line(s) -> tuple:
 
 def parallel_phase(s, slices, n_new: int) -> tuple:
     """ref/parallel.py's method on the engine's own lines: every request written before the first answer is read
-    (all sent together), then read until every one of them is DONE.  Returns (total tok/s over the whole round,
-    each request's own tok/s - its time from its own GEN line to its DONE, prompt read and turn waiting
-    included).  The two several-conversation protocols: rid (READY multi=<n>: GEN rid=<id> in, T / DONE <rid>
-    out) and QFN's slots (INFO batch_slots=<n>: BGEN <slot> in, BT / BDONE <slot> out, the answer that ends at
-    its admission named by that admission's control DONE and BADM <slot> 0).  One request alone goes on the
-    plain GEN line every engine knows."""
+    (all sent together), then read until every one of them has ended: its DONE / BDONE, an answer ending at its
+    admission (BADM <slot> 0), or a slot the engine says died (BRE <slot> <why> - "no RAM is left" - the
+    protocol's own terminal line for a slot: its part of the round ends there, "failed: <why>" in place of its
+    tok/s, and the round never hangs waiting for a BDONE that will not come).  Returns (total tok/s over the
+    whole round - a failed slot's tokens are unknown and count for nothing - and every request's own figure in
+    the order they were sent: its tok/s, its time from its own GEN line to its end, prompt read and turn
+    waiting included, or its "failed:" line).  The two several-conversation protocols: rid (READY multi=<n>:
+    GEN rid=<id> in, T / DONE <rid> out) and QFN's slots (INFO batch_slots=<n>: BGEN <slot> in, BT / BDONE
+    <slot> out, the answer that ends at its admission named by that admission's control DONE and BADM
+    <slot> 0).  One request alone goes on the plain GEN line every engine knows."""
     n = len(slices)
     ids_of = lambda ids: ",".join(map(str, ids))                        # noqa: E731
     slots = bool(s.batch) and n > 1                                     # QFN: one request per batch slot
@@ -690,9 +694,10 @@ def parallel_phase(s, slices, n_new: int) -> tuple:
         s.p.stdin.write(rq + "\n")
     s.p.stdin.flush()
     got, waiting = {}, set(range(n))
-    admitted = 0                                  # (QFN: what the admission's control DONE emitted: BADM slot 0
-    while waiting:                                #  means the answer ends there and no BDONE will come)
-        line, f = _par_line(s)
+    failed = {}                                   # (BRE <slot> <why>: the engine's own end of a slot that died;
+    admitted = 0                                  #  its reason goes to the table in place of that answer's tok/s)
+    while waiting:                                # (QFN: BADM slot 0 means the answer ends at its admission and
+        line, f = _par_line(s)                    #  no BDONE will come for it)
         i = None
         if slots:
             if f and f[0] == "BDONE" and len(f) > 2 and f[1].isdigit():
@@ -702,7 +707,13 @@ def parallel_phase(s, slices, n_new: int) -> tuple:
             elif f and f[0] == "DONE" and len(f) > 1 and f[1].isdigit():
                 admitted = int(f[1])              # (an admission's first token: its slot says BADM next)
                 continue
-            elif f and f[0] not in ("T", "PP", "STAT", "BSTAT", "PSTAT", "BT", "BADM", "BDONE", "BQ"):
+            elif f and f[0] == "BRE" and len(f) > 1 and f[1].isdigit():
+                j = int(f[1])
+                if j in waiting:                  # (terminal for that slot: no BT / BDONE follows - ending it
+                    waiting.discard(j)            #  here is what keeps the round from hanging on a dead slot)
+                    failed[j] = " ".join(f[2:]) or "the engine said the slot died"
+                continue
+            elif f and f[0] not in ("T", "PP", "STAT", "BSTAT", "PSTAT", "BT", "BADM", "BDONE", "BQ", "BRE"):
                 s.lines.append(line.rstrip())
                 continue
         elif s.multi:                             # rid-tagged lines, rids 0 .. n-1
@@ -724,8 +735,9 @@ def parallel_phase(s, slices, n_new: int) -> tuple:
             waiting.discard(i)
             got[i] = (produced, time.time() - t_w[i])
     wall = time.time() - t0
-    total = sum(p for p, _ in got.values()) / wall if wall > 0 else 0.0
-    return total, [p / w if w > 0 else 0.0 for p, w in (got[i] for i in sorted(got))]
+    total = sum(p for p, _ in got.values()) / wall if wall > 0 else 0.0   # (a failed slot's tokens: unknown, 0)
+    return total, ["failed: " + failed[i] if i in failed else (got[i][0] / got[i][1] if got[i][1] > 0 else 0.0)
+                   for i in range(n)]
 
 
 def run_parallel(s, plan, n_new: int, cfg_places: int, say, label: str = "") -> dict:
@@ -741,7 +753,8 @@ def run_parallel(s, plan, n_new: int, cfg_places: int, say, label: str = "") -> 
     run_ns, out["skipped"] = parallel_ns(places)
     for n in run_ns:
         total, each = parallel_phase(s, plan[size][:n], n_new)
-        say(f"  {label}{n} at once: total {total:6.1f} tok/s, each " + ", ".join(f"{x:.1f}" for x in each))
+        say(f"  {label}{n} at once: total {total:6.1f} tok/s, each "
+            + ", ".join(x if isinstance(x, str) else f"{x:.1f}" for x in each))
         out["runs"].append((n, total, each))
     return out
 
@@ -755,8 +768,9 @@ def parallel_section(par) -> list:
         return ["several at once: " + (par.get("note") or "not measured")]
     out = [f"several at once ({par['size'] // 1024}K-token prompts sent together, {DECODE_TOKENS} tokens each, "
            "greedy, thinking off; each answer's own time includes its prompt read and queueing):"]
-    for n, total, each in par["runs"]:
-        out.append(f"  {n} at once: total {total:.1f} tok/s (" + ", ".join(f"{x:.1f}" for x in each) + ")")
+    for n, total, each in par["runs"]:      # (an answer whose slot the engine died on (BRE) prints its error)
+        out.append(f"  {n} at once: total {total:.1f} tok/s ("
+                   + ", ".join(x if isinstance(x, str) else f"{x:.1f}" for x in each) + ")")
     if par["skipped"]:
         out.append(f"  ({', '.join(map(str, par['skipped']))} not measured: this engine runs {par['places']} "
                    f"{'answers' if par['places'] > 1 else 'answer'} at once)")
