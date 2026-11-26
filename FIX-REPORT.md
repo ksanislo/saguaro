@@ -1,106 +1,97 @@
-# FIX-REPORT: R122 review (REVIEW-RESULT.md) — finding by finding
+# FIX-REPORT: R122 review, second pass (REVIEW-RESULT.md) — finding by finding
 
-Every HIGH and MEDIUM finding and every nit was fixed, one commit per finding (`f001ece39..9c72c9e89`, on top of
-the reviewed `ab685ff98`). One MEDIUM is a question for Ken and was left as the behaviour the plan's step 3b text
-literally asks for — finding 5 says so itself. Nothing touched `engines/`, `saguaro.py` or the generated
-`serve/qfn_engine.py`; no re-extraction was needed or run. The plan's five modules were run again after all
-fixes, one at a time: serve.test_priority 42 OK, serve.test_fair 14 OK, serve.test_server 179 OK,
-serve.test_dashboard 85 OK, serve.test_new_engines_ui 38 OK.
+The one FIX-FIRST blocker - the stepping-aside rules (finding 1) - is fixed, as are the cheap nits (4-7). The
+two MEDIUMs are what the review itself says they are: a bigger change that belongs to Ken (2) and a behaviour
+question Ken has not answered (3); both are answered below with why they stand. Commits `080fc24e0..8e778619e`
+on top of the reviewed `0fc09a5c0`. `engines/`, `serve/qfn_engine.py` and `tools/` are untouched by all five
+commits (`git diff --stat 0fc09a5c0..HEAD`: serve/server.py, serve/test_priority.py, docs/SETTINGS.md only); no
+re-extraction was needed. The plan's five modules were run again after all fixes, one at a time:
+serve.test_priority 46 OK, serve.test_fair 14 OK, serve.test_server 179 OK, serve.test_dashboard 85 OK,
+serve.test_new_engines_ui 38 OK.
 
 ## HIGH — must fix
 
-**1. The "names and the idle rule" and "ONE name" blocks; the report's wrong claim. — Fixed.**
-- `f001ece39` (ONE name): `priority_level` accepts exactly `"high" | "normal" | "low"`; the 400 names the three
-  (`priority: "high", "normal" or "low"`); `"background"` and `"idle"` fall through to the same 400 as any wrong
-  value (a test loop now names both). `PRIORITY_BACKGROUND` → `PRIORITY_LOW`, `PRIORITY_NAMES` says `low`, and
-  it is renamed end to end: the pause/paused/continues log lines, `/metrics` (live state, the "Right now" rows,
-  the finished rows — they carry `PRIORITY_NAMES[prio]`), the Monitor tag (`serve/web/monitor.js` `PriorityTag`),
-  `docs/SETTINGS.md`, and every name, string and comment in `serve/test_priority.py`. `grep -i background` over
-  the feature: only the doc line explaining the refusal, the unrelated Responses `background` field, and the
-  history in the plan/report files.
-- `75847ab9b` (idle rule): `SAGUARO_PRIORITY_IDLE_S` (default 30, 0 = no grace) exists — accessor
-  `priority_idle_seconds()`, in `SERVER_ENV`, documented (its settings-table row and the prose). `FairLock`
-  tracks its holders (`_held`, one entry per grant) and stamps `_last_finish` when a request releases with its
-  priority (`release(..., priority=)`, passed by `_turn`, which `run()` now always hands its level); `_idle_wait`
-  gates every low grant — the fast path and `wait_turn` (the wait is capped by what is left of the grace, so a
-  time-only block still wakes; keep-alive pings go on; a release notifies) — and `yield_place` counts the
-  paused request as waiting, so a resumed low request is subject to the rule exactly like a fresh one. The three
-  required tests exist (`IdleRule`: low starts after the grace; a normal arriving inside the grace keeps it
-  waiting; grace 0), plus one through `run()`/`_turn` and one that a *running* normal holds the low off.
-  `Env` pins the setting to 0 for the other classes so preemption races keep cutting at once.
-- `4da93b48e`: the report — see finding 1's third item in the report itself: the two blocks are listed as
-  applied *in this pass*, with the commits, and the "applied as written" sentence is gone, named as wrong.
-- `9c72c9e89`: the bad-value test names `background`/`idle`.
-
-**2. MANAGER — the llama-swap example was a second model entry. — Fixed (`655dc7aed`).**
-`docs/SETTINGS.md` now shows ONE entry: `- id: glm` with `aliases: [glm-agent]` and
-`filters: setParamsByID: glm-agent: priority: low` on that same entry, the one-line "why" (an alias is another
-name of the same model, `setParamsByID` applies last — no swap, no second process; a second entry would swap to
-its own process), and the version claim is what was checked: **v260** (re-checked: `llama-swap --version` →
-`v260 (fcefa7b)` here). The example's `priority:` is `low` (finding 1).
-
-**3. QFN batch reads drop a stopped read. — Fixed (`2a5881ed5`).**
-The read preemption in `_sliced` fires for a `keeps_stopped_read` engine only with `not engine.batch` (the
-decoder gate the review suggested); the decode-tick cut is untouched (a batch slot keeps a stopped *answer*).
-The `QfnEngine.keeps_stopped_read` comment on the serve/server.py adapter now says solo-only with the corrected
-provenance (#1620 is the solo GEN path; the batch `BRA 0 cancel` / BSTOP branches keep none and free the slot —
-described, not line-numbered, since the generated driver moves). The test that repeated the batch claim became
-`test_a_batch_read_runs_to_its_end_even_for_a_high_request` (engine with `batch = 4`: no "prompt read paused",
-the read finishes, the high one goes after), the property test's comment says solo, and `ReadEngine`'s and the
-module's docstrings no longer say "solo and batch alike".
+**1. The stepping-aside rules are not the plan's last CHANGED block. — Fixed (`080fc24e0`).**
+- `FairLock.step_aside(p)` is now the runner's one tick decision, and both `_sliced` gates (decode token, read
+  tick) ask it instead of `waiting(above=p) and claim_yield(0.0, above=p)`: a **low** runner gives its place up
+  whenever `_idle_wait(LOW) != 0` (a normal or high holds a place) or any waiter is above it - **regardless of
+  free places**, the review's fix as written; a **normal** one only for a waiting high that does not fit
+  (`claim_yield`'s counting, the rules that worked, unchanged); a **high** one never. Equal priorities still cut
+  nothing (`_idle_wait` ignores the runner's own LOW grant, `waiting(above=LOW)` ignores low waiters), and the
+  read gates keep their engine-capability clause (solo QFN cut, multi can_pause PAUSE, batch/other reads run on).
+- The low step-aside **claims** like a fair slice does (`_yields += 1`, symmetric `yield_place`/
+  `unclaim_yield` - the test asserts `_yields` back to 0): a waiting high's counting (`need - free - _yields`)
+  then sees the low place already on its way out, which is also what makes "low ones first" real rather than
+  a tick race (finding 2 below).
+- The line names who it steps aside for: `highest_active()` (running or waiting) replaces `highest_waiting()`
+  at both sites - a low answer cut beside a RUNNING normal has no waiter to name, and said "for a low-priority
+  request"; it now says "for a normal-priority request" (the `or prio` fallback for a vanished waiter stays).
+- `docs/SETTINGS.md`: the paragraph the review quoted ("...arrives and no place is free") now teaches the
+  plan's rule: low whenever a normal or high runs or waits, free place or not, every running low at once;
+  normal only for a waiting high with every place taken, only as many as needed; high never.
+- Tests: `test_a_free_place_nobody_yields` (the one that asserted the opposite rule) is flipped into
+  `test_a_free_place_makes_the_low_one_step_aside_anyway` (free place: step_aside says no for normal, yes for
+  low); `test_parallel_two_two_lows_and_a_high_both_lows_pause` replaces `test_parallel_two_cuts_only_as_many_
+  as_needed` and asserts **both** lows pause and continue (2 cuts, 2 resumes, `_yields` 0); and the plan's
+  four scenarios are all there: `test_a_normal_and_a_high_run_side_by_side_untouched`,
+  `test_a_low_answer_steps_aside_for_a_normal_taking_the_free_place` (the fast-path normal the old gates never
+  saw, the one that could keep a low company forever), `test_a_high_request_cuts_a_running_normal`, and the
+  flipped both-lows test. Nothing else changed in the suite's behaviour: the old races (cap 1, waiter in the
+  line) cut exactly where they cut before, and `serve.test_fair` passes unchanged (14 OK).
 
 ## MEDIUM
 
-**4. `_collect_wait` caught only `(ValueError, EngineDied)`. — Fixed (`8394767ca`).**
-The worker catches `Exception` and records it; before the headers the caller re-raises it (the client gets its
-truthful failure), after them it rides the body as the error JSON — no more thread traceback, no more
-`KeyError: 'body'` reaching `do_POST` as a bogus "malformed request". New test:
-`test_an_error_of_the_gpu_busy_kind_rides_the_body_after_the_headers` (a plain `RuntimeError` from `generate`,
-raised after the early headers went out: 200 + the real error in the body).
+**2. The yielder choice ("low ones first, then the normal one that started last"). — Partly fixed, the rest waits for Ken.**
+"The low ones first" is now structural, not a tick race: a running low steps aside unconditionally and counts
+its claim while any normal or high runs or waits, so a waiting high's `claim_yield` sees its place covered and
+a running normal is cut only when there is no low one left to give (and never more runners than the waiter
+needs, as before - `test_only_the_waiters_above_cut_and_only_as_many_as_needed` still passes). "then the normal
+one that started last" is **not** implemented: the FIFO does not know in what order the running requests
+started - naming that victim means the FIFO nominates it or the tick consults the held-priority stack, a real
+change to FairLock's contract. The review's own fix for finding 1 says "the normal/high rules stay as
+implemented", so it stays as implemented; if Ken wants last-started-wins among normals, that is the follow-up.
 
-**5. Byte-identity of the two step-3b default paths. — Not changed; open question for Ken.**
-The finding is a behaviour question ("confirm with Ken"), and the current trigger is the literal step-3b text.
-It is recorded in `REPORT-r122-priority.md` ("Decisions and open questions") with the exact one-line change
-(gate the non-stream padding and the empty events on "was queued once or paused") ready for when he answers.
-
-**6. `PRIORITY_NAMES[self.fifo.highest_waiting()]` race. — Fixed (`5bda4ef04`).**
-Both sites (decode and read) use `self.fifo.highest_waiting() or prio` — the waiter's name if it is still there,
-this request's own level if it slipped out; no `PRIORITY_NAMES[None]`, no dead answer thread.
+**3. The step-3b padding/empty-event trigger. — Not changed; still the open question for Ken.**
+This pass changed neither `_collect_wait`'s padding clock nor `wait_events`' empty-event gate, so the answer is
+exactly what the review says it is: the literal step-3b text, tested and logged, with the one-line gate ("was
+queued once or paused") recorded in `REPORT-r122-priority.md` waiting for Ken's word. Until he answers, the
+"byte-identical when the feature is not used" caveat stands for those two paths and for nothing new: finding
+1's fix touches no wire - the resumed stream, the keep-alives and the events are the same as before this pass.
 
 ## LOW / nits
 
-**7. `preempt`/`pos` not reset per engine call. — Fixed (`80562911b`).** Reset with `claimed` at the top of each
-`_sliced` engine call: a later plain fair slice logs "fair slice", not a priority pause.
+**4. Aging vs the idle rule in `wait_turn`. — Said, not used (`9583f7ce0`).** The comment now spells the edge
+out (an aged low waiter grants and cuts as a normal one but waits out the grace - the grace is the model's rest
+after a person, not a queue position). "use `_eff`" is not the free option it looks: the grant appends its
+level to `_held` and the request's `release(priority=)` hands back its RAW level, so granting at the aged level
+would leak a NORMAL entry into `_held` for every aged low grant - and Ken's grace sentence covers waits, not
+just starts, so waiting it out is the defensible reading.
 
-**8. Read PAUSE fired for any `can_pause` engine. — Fixed (`3b2b2317c`).** Gated `can_pause and multi`, exactly
-how the fair reads gate theirs; a solo can_pause engine's read runs on. Tests both ways: `PausingRead` now
-carries `multi = 1` (like GLM's READY line), and a new test drops it to 0 and asserts no "prompt read paused".
+**5. The queue watchdog vs Ken's no-aging rule. — Fixed (`b1db562ed`).** `FairLock.all_low_waiting()` (under
+the lock, `_eff`: with aging on, an aged waiter counts as normal again) and the watchdog skips its "wedged
+FIFO" WARNING while the line is all low requests; one normal or high waiter in it prints the line as before.
 
-**9. The read log asserted a precision the engine cannot guarantee. — Fixed (`de6246cea`).** The resume line for
-a read says "the low prompt read continues **from where the engine kept it**" instead of promising the tick's
-N; the tick position stays only in the paused-at line (what the server actually saw).
+**6. `waiting(above=)` / `highest_waiting()` read `_queue` without `_cv`. — Fixed (`82e0b2220`).** Both take
+the lock now, like `oldest_wait`/`held_by`; every caller was checked to hold nothing (the gates call them from
+handler threads, `step_aside` from outside its own lock). Same values, same advisory semantics.
 
-**10. HTTP/1.1 chunked answer to a 1.0 client. — Fixed (`12d3e601d`).** `_collect_wait` answers the
-early-200-with-padding only for clients whose `request_version` is not HTTP/1.0; a 1.0 request waits with its
-status still free (the pre-R122 behaviour — padding spaces cannot be framed without chunked transfer). Tested
-with a raw HTTP/1.0 request against a blocked engine: `HTTP/1.0 200`, no `Transfer-Encoding`, no leading space.
+**7. No dedicated Turbo + priority test. — Added (`8e778619e`).** `test_turbo_one_at_a_time_respects_the_
+priorities`: a two-place FIFO with `set_one(True)` (the Turbo flag the config actually sets) - a running low
+answer is cut for a waiting high AND for a fresh normal request; the free second place is no shield in either
+direction (`_fits` keeps one holder, `claim_yield`'s `free = 0 if self._one and self._used`), the cut answers
+resume intact and the bookkeeping (`_yields`, queued, locked) ends at zero.
 
-**11. Misindented `live` continuation lines. — Fixed (`3e87495ab`).** Three lines to 16 spaces, the dict's own
-indentation.
+**8. `wait_event_seconds` duplicated. — Not done.** The copy exists because `serve/server.py` imports
+`serve/responses.py` and not the other way round, and serve/ has no settings module a helper could live in
+(`SERVER_ENV` is a tuple in server.py itself); creating a new module and re-homing one 8-line env read - or,
+to do it properly, all the `SAGUARO_*` accessors - is a structural choice bigger than this pass and better
+made with every sibling than for this one line. The duplication is documented at both copies; cheap says no.
 
-**12. `priority_age_seconds()` re-parsed the env under `_cv`. — Fixed (`dba8cc316`).** `_env_seconds(name,
-default)` parses once per change of the raw string and caches `(raw, value)`; `priority_age_seconds` and the new
-`priority_idle_seconds` use it. Same values as before (unset/empty/unparseable → default, floor 0).
+## After the fixes
 
-## The brief's questions, after the fixes
-
-- FIFO byte-for-byte with no priority used: unchanged — the idle rule consults `_idle_wait` (0 for p > low) and
-  test_fair still passes 14; the wire-bytes question is finding 5, open.
-- Deadlock/starvation/tokens: unchanged reasoning, plus the idle rule's own wait (capped sleeps, never dropped);
-  tokens: the batch read is no longer cut at all (finding 3), the solo one still resumes from the kept token.
-- QFN read keeps the stopped read also in batch? No — and the code no longer claims or assumes it.
-- Generated file: `serve/qfn_engine.py` is still untouched by every commit of this pass; the property and its
-  corrected provenance live on the adapter in `serve/server.py` and survive `extract_qfn_engine.py`.
-- Test gaps the review named are covered: the `low` naming and the idle rule (renamed suite + `IdleRule`), the
-  batch/solo QFN read distinction (new batch test, solo-pause test), and `_collect_wait` with a GpuBusy-class
-  error. The Turbo-priority test the review called "worth adding" is not added (the review did not block on it).
+- The plan's LAST CHANGED block ("who steps aside, exactly") is what the code and the docs now do, and all
+  four of its test scenarios run against real threads and a real `Service.run`.
+- With equal priorities everything is still the plain FIFO (`step_aside` for a normal runner is the old
+  two-call expression, `test_fair` unchanged); the wire question of the queued/padded paths is finding 3,
+  open with Ken; the FIFO never drops a waiting or paused request, and the tokens of a cut one are exactly
+  what the engine kept, as before this pass.
