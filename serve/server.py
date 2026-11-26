@@ -5572,6 +5572,8 @@ class Service:
             gen = self.engine.generate(cur, n_call, smp_call, cancel, embeddings=emb) if emb else \
                 self.engine.generate(cur, n_call, smp_call, cancel)
             slice_s, t0, cut, pausing, claimed = fair_slice_seconds(), None, False, False, False
+            preempt, pos = None, None                   # (R122: the pause and its read position belong to THIS
+            #  engine call: left over from an earlier one, a plain fair slice would be logged as a priority pause)
             act, got, closed = None, 0, False           # the loop guard's action; this call's tokens; a soft close
             t_read, paused_for = None, set()            # fair reads: the first chunk report's time, who it paused for
             try:
