@@ -15,6 +15,7 @@ import io
 import json
 import os
 import random
+import socket
 import string
 import sys
 import threading
@@ -790,6 +791,32 @@ class WaitKeepAlive(Env):
                          plain["choices"][0]["message"]["content"])
         self.assertIn("the status and headers go out now", log.getvalue())
         self.assertIn("an error after this cannot change the status", log.getvalue())
+
+    def test_an_http_1_0_client_is_not_answered_with_chunked_padding(self):
+        # an HTTP/1.0 client parses no chunked body: it waits quietly (as before R122) and the answer arrives
+        # whole - no Transfer-Encoding, no space before the JSON, the status line its own version
+        body = {"model": "m", "stream": False, "messages": [{"role": "user", "content": "wait one"}]}
+        plain = json.loads(self.post("/v1/chat/completions", body)[1])
+        wire = json.dumps(body)
+        port = self.httpd.server_address[1]
+
+        def raw():
+            with socket.create_connection(("127.0.0.1", port), timeout=60) as s:
+                s.sendall(("POST /v1/chat/completions HTTP/1.0\r\nContent-Type: application/json\r\n"
+                           f"Content-Length: {len(wire)}\r\nConnection: close\r\n\r\n{wire}").encode())
+                data = b""
+                while True:
+                    chunk = s.recv(1 << 16)
+                    if not chunk:
+                        return data
+                    data += chunk
+
+        raw_out = self.blocked(raw)
+        head, _, out = raw_out.partition(b"\r\n\r\n")
+        self.assertIn(b"HTTP/1.0 200", head.split(b"\r\n")[0])
+        self.assertNotIn(b"chunked", head.lower())
+        self.assertEqual(json.loads(out)["choices"][0]["message"]["content"],
+                         plain["choices"][0]["message"]["content"])   # the same answer, no space before it
 
     def test_an_error_of_the_gpu_busy_kind_rides_the_body_after_the_headers(self):
         class Busy(ResumingEngine):                       # a GpuBusy or QueueWaitExpired is a plain RuntimeError:

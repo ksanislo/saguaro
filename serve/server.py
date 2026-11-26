@@ -7096,6 +7096,12 @@ def make_handler(svc: Service):
                     #  error can only ride in the body; before them the caller re-raises it as its own status
             t = threading.Thread(target=work, daemon=True)
             t.start()
+            if self.request_version == "HTTP/1.0":   # (an HTTP/1.0 client parses no chunked body: the padding
+                t.join()                             #  spaces could not be framed for it - wait for the JSON
+                if "error" in box:                   #  with the status still free, as this did before R122)
+                    raise box["error"]
+                self._json(code_of(box["body"]), box["body"])
+                return
             deadline = time.monotonic() + wait_space_seconds()
             while t.is_alive() and time.monotonic() < deadline and not (paused and paused()):
                 t.join(0.05)
