@@ -17,6 +17,7 @@ using maya::ds4::mark_plan;
 using maya::ds4::mark_victim;
 using maya::ds4::MarkAt;
 using maya::ds4::MarkUse;
+using maya::ds4::read_stop_landing;
 using maya::ds4::TailCost;
 
 namespace {
@@ -61,6 +62,11 @@ struct Conv {
         for (MarkUse& m : mk)
             if (m.pos == p) m.used = ++clock;
         return true;
+    }
+    int64_t restorable(int64_t limit) const {   // (Model::restorable: the deepest point it can go back to)
+        const std::vector<int64_t> at = points();
+        const int b = latest_point(at, limit, pos());
+        return b < 0 ? -1 : at[(size_t) b];
     }
     // a request's prompt -> the tokens it reused (prompt_in's `from`)
     int64_t prompt(const std::vector<int>& ids, const std::vector<int64_t>& marks = {}, int64_t shared = -1) {
@@ -177,6 +183,39 @@ int main() {
     assert(mark_victim({{10, false, 1}, {20, false, 2}, {30, false, 3}}, 2) == 2);
     assert(mark_victim({{5, true, 0}, {10, false, 1}, {20, false, 2}, {30, false, 9}, {40, false, 4}}, 2) == 4);
     assert(mark_victim({{10, false, 1}, {20, false, 2}}, 2) == 0);   // (only early ones: the LRU of them)
+
+    // read_stop_landing (P124k): where a read a STOP ends keeps its conversation - the live piece end between two runs,
+    // the deepest point stored inside one, never what a stopped run had consumed; pictures are not cut in their span
+    assert(read_stop_landing(false, 24576, 16384, 0) == 24576);   // (a Stop between two runs: the state is live at done)
+    assert(read_stop_landing(true, 24576, 16384, 0) == 16384);    // (inside a run: what it consumed is never asked for)
+    assert(read_stop_landing(true, 24576, -1, 0) == 0);           // (nothing stored at or before the stopped run's start)
+    assert(read_stop_landing(true, 24576, -1, 5000) == 5000);     // (a run stopped at the very start of a continued read)
+    assert(read_stop_landing(false, 0, -1, 0) == 0);              // (stopped before its first run: nothing was read)
+    assert(read_stop_landing(false, 10, -1, 10) == 10);           // (between runs with nothing read: the base itself)
+    {   // a picture's span is stored whole or not at all: a landing inside it goes back, and to nothing
+        const std::vector<std::pair<int64_t, int64_t>> pic = {{14000, 2000}};
+        assert(read_stop_landing(false, 15000, 12000, 9000, pic) == 12000);   // (the deepest point before the span)
+        assert(read_stop_landing(true, 15000, 14500, 9000, pic) == 9000);     // (its stop point inside it too)
+        assert(read_stop_landing(true, 15000, 15000, 14500, pic) == 0);       // (even the base lies inside: nothing)
+        assert(read_stop_landing(false, 14000, -1, 0, pic) == 14000);         // (its start: the span was not touched)
+        assert(read_stop_landing(false, 16000, -1, 0, pic) == 16000);         // (its end: the span was read whole)
+        assert(read_stop_landing(false, 15000, 14000, 0, pic) == 14000);
+    }
+    {   // the shape of the stopped branch in the engine: back to the keep point of a run stopped inside, the next
+        // request of the same prompt shares it and reads only the rest (prompt_begin's in-place continuation)
+        const std::vector<int> ids = run(1000, 30000);
+        Conv cv;
+        cv.toks = run(1000, 16384);   // (the pieces the read took whole before its third run was STOPped inside)
+        cv.ck[0] = 16384;             // (the checkpoint the second piece's end left: the keep point)
+        const int64_t stored = cv.restorable(20000);   // (the stopped run began at 16384; the model stands there)
+        assert(stored == 16384);
+        const int64_t land = read_stop_landing(true, 20000, stored, 0, {});   // (20000: what that run had consumed)
+        assert(land == 16384);
+        assert(cv.restore(land));
+        assert(cv.pos() == 16384 && cv.toks.size() == 16384);
+        assert(cv.prompt(ids) == 16384);               // (the same prompt again: it continues where the read left it)
+        assert(cv.pieces.back() == (int64_t) ids.size());
+    }
 
     // ---- the cases, as the serve loop runs them
     const std::vector<int> sys = run(1000, 3000);   // a system prompt and its tools: 3,000 tokens

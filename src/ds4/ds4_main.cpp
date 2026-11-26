@@ -1857,7 +1857,8 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
                     std::fprintf(stderr,
                                  "saguaro ds4 serve: stopped while reading the prompt of %zu tokens, after %.0f ms: the "
                                  "conversation is kept live at %zu tokens%s\n",
-                                 total, now_ms() - P.t0, keep, keep > from ? " (its read of the prompt included)" : "");
+                                 total, now_ms() - P.t0, keep,
+                                 keep > from ? " (its read of the prompt included)" : "; the conversation before it");
                     end_note();
                     std::printf("DONE%s 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", tag.c_str(), total, P.read_ms, keep);
                     std::fflush(stdout);
