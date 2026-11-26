@@ -305,7 +305,8 @@ def response_usage(data, prompt_tokens):
 
 def wait_event_seconds() -> float:
     """SAGUARO_WAIT_EVENT_S (15): the same setting serve.server's wait_events() uses - read here because the server
-    imports this module, not the other way round: a queued or priority-paused responses stream adds an empty
+    imports this module, not the other way round: a responses stream whose request was queued at least once, or
+    priority-paused (the `waited` gate of response_events, Ken's trigger decision), adds an empty
     response.in_progress once this long goes by without a real event (R122)."""
     try:
         return max(0.01, float(os.environ.get("SAGUARO_WAIT_EVENT_S", "") or 15))
@@ -313,8 +314,12 @@ def wait_event_seconds() -> float:
         return 15.0
 
 
-def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=None, validation=None, cancel=None):
-    """Serialize engine events directly, with one item lifecycle and one terminal response event."""
+def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=None, validation=None, cancel=None,
+                    waited=None):
+    """Serialize engine events directly, with one item lifecycle and one terminal response event.  `waited`
+    (R122, Ken's decision on the trigger): a callable saying whether this request was queued at least once, or
+    paused - only then does a ping's gap add the empty response.in_progress; a request that never waited is
+    framed as before R122, a long prompt read (whose ticks arrive as pings too) included."""
     response = new_response(model, req, response_id)
     if validation is not None:
         run = validation.events(run, cancel)
@@ -388,7 +393,7 @@ def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=
         for kind, data in run:
             if kind == "ping":
                 yield None
-                if time.monotonic() - last[0] >= wait_event_seconds():
+                if (waited is None or waited()) and time.monotonic() - last[0] >= wait_event_seconds():
                     yield event("response.in_progress", response=response)   # for clients that count only events
             elif kind == "event":
                 ev = data

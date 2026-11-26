@@ -950,6 +950,74 @@ class WaitKeepAlive(Env):
         self.assertFalse(hi[1].startswith(b" "))                  # the one that ran needs none of it
         self.assertIn("the status and headers go out now", log.getvalue())
 
+    def post_h(self, path, body):
+        """post() with the response's headers too (a padded answer arrives chunked; a plain one does not)."""
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, dict(r.headers), r.read()
+
+    def test_an_unqueued_slow_answer_keeps_the_plain_framing(self):
+        # (finding 1, Ken's decision on the trigger): the padding is for requests that wait for the model. This
+        # one answers alone on an idle server, slower than SAGUARO_WAIT_SPACE_S: the gate never opens, so the
+        # 200 and headers go with the JSON, not before it, and the wire is the pre-R122 one.
+        self.svc.engine = ResumingEngine(self.tok, {"wait": WaitKeepAlive.WAIT, "block": LONG}, delay_s=0.006)
+        body = {"model": "m", "stream": False, "messages": [{"role": "user", "content": "block one"}]}
+        s, head, out = self.post_h("/v1/chat/completions", body)          # ~2.4 s at this pace: over the 0.3 s
+        self.assertEqual(s, 200)
+        self.assertFalse(out.startswith(b" "))         # no padding spaces before the JSON ...
+        self.assertIsNone(head.get("Transfer-Encoding"))    # ... and no chunked framing: the plain Content-Length
+        self.assertEqual(int(head["Content-Length"]), len(out))           # the answer whole, in one framed body
+        again = self.post("/v1/chat/completions", body)[1]                # the undisturbed answer itself:
+        content = lambda b: json.loads(b)["choices"][0]["message"]["content"]
+        self.assertEqual(content(out), content(again))               #  same text, framing changed nothing
+
+    def test_an_unqueued_error_keeps_its_status(self):
+        # (finding 1, the same gate's other half): the old trigger started padding at the deadline of ANY slow
+        # answer, so a failure after it rode a 200 with the error in the body. A request that never waited has
+        # no padding, so its status is still free when the answer fails: the client gets the real 400.
+        class SlowFail(ResumingEngine):
+            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+                if "wait" in self.tok.decode(ids):
+                    time.sleep(0.6)                    # past SAGUARO_WAIT_SPACE_S (0.3 here) - nothing queued
+                    raise ValueError("the prompt is too long for the context")
+                return super().generate(ids, max_new, sampling, cancel, embeddings)
+        self.svc.engine = SlowFail(self.tok, {"wait": WaitKeepAlive.WAIT, "block": LONG}, delay_s=0.004)
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            s, out = self.post("/v1/chat/completions",
+                               {"model": "m", "stream": False,
+                                "messages": [{"role": "user", "content": "wait one"}]})
+        self.assertEqual(s, 400)                       # the error's own status, not a 200 carrying it
+        self.assertIn("too long", json.loads(out)["error"]["message"])
+        self.assertNotIn("the status and headers go out now", log.getvalue())   # nothing ever padded
+
+    def test_an_unqueued_long_read_gets_no_empty_events(self):
+        # (finding 1, the streams): a prompt read's PP ticks arrive as the same None items the queue's pings do,
+        # so the old gate put an empty event into ANY >SAGUARO_WAIT_EVENT_S read - of a stream that never
+        # queued and never paused. With the gate the read keeps its plain keep-alive comments and nothing else,
+        # on the three APIs that have an empty event at all.
+        class QuickRead(ReadEngine):
+            CHUNKS = 3                                 # ~0.45 s of read at this delay, over the 0.3 s gap
+        self.svc.engine = QuickRead(self.tok, {"wait": SHORT}, delay_s=0.15)
+        events, comments = self.sse(self.stream("/v1/chat/completions", {
+            "model": "m", "stream": True, "messages": [{"role": "user", "content": "wait one"}]}))
+        empty = [p for _n, p in events
+                 if p["choices"][0]["delta"] == {} and p["choices"][0]["finish_reason"] is None]
+        self.assertEqual(empty, [])                    # no empty chunk: a read is not a wait ...
+        self.assertGreater(comments, 0)                # ... and the plain keep-alive comments still came
+        text = "".join(p["choices"][0]["delta"].get("content", "") for _n, p in events)
+        plain = json.loads(self.post("/v1/chat/completions", {            # the same request not streamed:
+            "model": "m", "stream": False,
+            "messages": [{"role": "user", "content": "wait one"}]})[1])   #  the same answer, nothing changed
+        self.assertEqual(text, plain["choices"][0]["message"]["content"])
+        evs, _ = self.sse(self.stream("/v1/messages", {
+            "model": "m", "max_tokens": 256, "stream": True,
+            "messages": [{"role": "user", "content": "wait one"}]}))
+        self.assertNotIn("ping", [n for n, _p in evs])                       # no Anthropic ping either
+        evs, _ = self.sse(self.stream("/v1/responses", {"model": "m", "input": "wait one", "stream": True}))
+        self.assertEqual([n for n, _p in evs].count("response.in_progress"), 1)   # the start's, alone
+
 
 class RequestFields(Env):
     @classmethod

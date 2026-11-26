@@ -730,10 +730,11 @@ def queue_ping_seconds() -> float:
 
 
 def wait_event_seconds() -> float:
-    """SAGUARO_WAIT_EVENT_S (15): R122 - a stream whose request is queued or paused for a higher priority keeps its
-    ": keep-alive" comments, but once this long goes by without a real event one empty event goes out too (an empty
-    chat.completion.chunk, an Anthropic ping, a response.in_progress): clients that count only events stay. Never
-    text in the answer."""
+    """SAGUARO_WAIT_EVENT_S (15): R122 - a stream whose request was queued at least once, or paused for a higher
+    priority (Ken's trigger: wait_events' `waited` gate), keeps its ": keep-alive" comments, and once this long goes
+    by without a real event one empty event goes out too (an empty chat.completion.chunk, an Anthropic ping, a
+    response.in_progress): clients that count only events stay. Never text in the answer; a request that never
+    waited sends nothing extra, however long it takes."""
     try:
         return max(0.01, float(os.environ.get("SAGUARO_WAIT_EVENT_S", "") or 15))
     except ValueError:
@@ -750,16 +751,19 @@ def wait_space_seconds() -> float:
         return 20.0
 
 
-def wait_events(items, empty):
+def wait_events(items, empty, waited=None):
     """R122: a stream's keep-alive comments (the None items) stay as they are; once SAGUARO_WAIT_EVENT_S goes by
     without a real event, one empty event follows them - `empty()` builds it, and the answer text is never touched.
-    Closing this closes what it wraps."""
+    `waited` (Ken's decision on the trigger): a callable saying whether THIS request is one that waits - queued at
+    least once, or paused; while it says no, the None items stay plain comments and the stream is framed exactly as
+    before R122, a long prompt read (whose PP ticks are None items too) included. `waited=None`: every gap counts,
+    as the queued case does anyway. Closing this closes what it wraps."""
     last, every = time.monotonic(), wait_event_seconds()
     try:
         for c in items:
             if c is None:
                 yield None
-                if time.monotonic() - last >= every:
+                if (waited is None or waited()) and time.monotonic() - last >= every:
                     yield empty()
                     last = time.monotonic()
             else:
@@ -3088,6 +3092,9 @@ class RequestStat:
         # R122: its queue priority's name (the Monitor's small tag: high / low, normal shows nothing) and
         # whether it gave its place up for a request of a higher priority and waits for the engine again
         self.priority, self.paused_for_priority = None, False
+        self.had_to_wait = False                          # (R122, Ken's trigger decision: this request waited in
+        #  the FIFO at least once, or gave its place up - set where each happens below; the padding and the
+        #  stream's empty events fire only once it is True, so a request that never waited is framed as in 1.2.1)
         self.started, self.progress, self.prefill_tok_s = None, None, None
         # the prompt read (the drivers' PP lines / the batch slots' read counters): tokens read so far - what the
         # conversation cache held stays out - the span the server saw them arrive over, and whether another chat
@@ -5413,12 +5420,14 @@ class Service:
                 self.fifo.release(units=units, priority=priority)   # (R122: its level - a normal or high request
                 #  that ends here is a finished answer: the idle rule's grace for the low queue starts with it)
 
-    def _queue_wait(self, hold, cancel, units=1, priority=None) -> Iterator[tuple[str, object]]:
+    def _queue_wait(self, hold, cancel, units=1, priority=None, stat=None) -> Iterator[tuple[str, object]]:
         """A request's wait in the FIFO for its first turn, as ("ping", None) every QUEUE_PING_S - the streams write
         them as SSE comments (": keep-alive"), which every client's parser ignores (#483: a request queued behind a
         long answer sent nothing at all, and a client with a stream-idle timeout gave up on a turn that was only
         waiting).  hold[0] is True once the turn is this request's (_turn then holds it and gives it back); a client
-        that goes away meanwhile - the GeneratorExit at a ping - gives its place back here."""
+        that goes away meanwhile - the GeneratorExit at a ping - gives its place back here.  `stat` (R122, Ken's
+        trigger decision): a turn that does not come on the first look marks the request as one that had to wait -
+        from there on its client may get the padding / empty events; one granted straight off never does."""
         if cancel is None:                              # (no way to leave the line: _turn waits as before)
             return
         every = queue_ping_seconds()
@@ -5429,6 +5438,8 @@ class Service:
                 if self.fifo.wait_turn(place, timeout=0.05):
                     hold[0] = True
                     return
+                if stat is not None:
+                    stat.had_to_wait = True             # (it waited: the engine was somebody else's)
                 if time.monotonic() - last >= every:
                     last = time.monotonic()
                     yield "ping", None
@@ -5796,6 +5807,9 @@ class Service:
             place = self.fifo.yield_place(units=1, priority=prio)   # in line, and the place free, in one step:
             #                                     behind whoever waits now - at its own priority, so the resumed
             #                                     answer keeps its claim against the queue behind it
+            stat.had_to_wait = True                     # (R122, Ken's trigger decision: back in line - a pause or
+            #                                     a slice's wait counts as queued once: its client may get the
+            #                                     padding / empty events from here)
             hold[0] = False
             if preempt:
                 stat.paused_for_priority = True
@@ -5965,8 +5979,9 @@ class Service:
         hold = [False, False]                           # holds the FIFO (fair slices let go of it); counts as active
         asked = time.monotonic()
         try:
-            yield from self._queue_wait(hold, cancel, priority=prio)   # (#483: keep-alives while queued; the turn
-            with self._turn(hold, cancel, priority=prio):              #  taken there; R122: at its own priority)
+            yield from self._queue_wait(hold, cancel, priority=prio,   # (#483: keep-alives while queued; the turn
+                                        stat=stat)                     #  taken there; R122: at its own priority)
+            with self._turn(hold, cancel, priority=prio):              #  (stat: the had_to_wait mark of a real wait)
                 with self.status_lock:
                     self.status["queued"] -= 1
                     queued = False
@@ -7145,13 +7160,27 @@ def make_handler(svc: Service):
             return bool(cid) and any(getattr(s, "paused_for_priority", False) and getattr(s, "cid", None) == cid
                                      for s in list(svc.running))
 
-        def _collect_wait(self, make, name: str, cancel, paused=None, code_of=lambda out: 200):
-            """A non-streaming answer collected on a side thread. R122: while it waits for its turn or pauses for a
-            higher priority its client sees nothing at all - once SAGUARO_WAIT_SPACE_S has gone by, or as soon as
-            this request is paused (`paused()`), the 200 and headers go out and a space follows every
-            SAGUARO_WAIT_EVENT_S until the JSON body: spaces before a JSON body are valid, so the client keeps
-            waiting instead of dropping a request that is only waiting. From the headers out an error cannot change
-            the status any more - the log says so once, and the error's JSON then follows as the body."""
+        def _cid_waited(self, req):
+            """R122 (Ken's decision on the trigger): is this request one that had to wait - queued in the FIFO at
+            least once, or paused for a higher priority? Only those get the padding spaces and the streams' empty
+            events; one that never waited is framed byte for byte as before R122, a slow answer and a long prompt
+            read included. The state rides on the request's own live row: `had_to_wait` (set where it first waits
+            for a turn or gives a place back) and `paused_for_priority`."""
+            cid = (req or {}).get("_cid")
+            return bool(cid) and any(getattr(s, "cid", None) == cid and
+                                     (s.had_to_wait or s.paused_for_priority)
+                                     for s in list(svc.running) + list(svc.waiting))
+
+        def _collect_wait(self, make, name: str, cancel, paused, waited, code_of=lambda out: 200):
+            """A non-streaming answer collected on a side thread. R122 (Ken's decision on the trigger): a client
+            whose request waits for the model sees nothing of it - and only such a request changes its framing: the
+            200 and headers go out as soon as this request is PAUSED (`paused()`) - a priority pause starts the
+            padding at once - or `SAGUARO_WAIT_SPACE_S` has gone by since it first WAITED (`waited()`: queued at
+            least once, or paused), and a space follows every SAGUARO_WAIT_EVENT_S until the JSON body: spaces
+            before a JSON body are valid, so the client keeps waiting instead of dropping a request that is only
+            waiting. A request that never waits answers whole exactly as before R122: no early 200, no chunked
+            spaces, and an error keeps its real status however long the answer took. From the headers out an error
+            cannot change the status any more - the log says so once, and the error's JSON rides as the body."""
             box = {}
 
             def work():
@@ -7169,8 +7198,19 @@ def make_handler(svc: Service):
                     raise box["error"]
                 self._json(code_of(box["body"]), box["body"])
                 return
-            deadline = time.monotonic() + wait_space_seconds()
-            while t.is_alive() and time.monotonic() < deadline and not (paused and paused()):
+            # (R122, Ken's decision on the trigger): the padding is for a request that waits for the model -
+            # SAGUARO_WAIT_SPACE_S counts from the first moment `waited()` says it queued or paused, and a
+            # PAUSE starts it at once. A request that never waited answers whole exactly as before R122,
+            # however slow it is: no early 200, and its error keeps its real status until the JSON is sent.)
+            started = None
+            while t.is_alive():
+                if started is None:
+                    if paused():
+                        break                              # paused for a higher priority: the headers go now
+                    if waited():
+                        started = time.monotonic()         # queued at least once: the space counts from here
+                if started is not None and time.monotonic() - started >= wait_space_seconds():
+                    break
                 t.join(0.05)
             if not t.is_alive():
                 if "error" in box:
@@ -7541,7 +7581,8 @@ def make_handler(svc: Service):
                         else:
                             last["response"] = "".join(p["response"] for p in pieces)
                         return last
-                    return self._collect_wait(make, f"ollama {kind}", cancel, lambda: self._cid_paused(oreq))
+                    return self._collect_wait(make, f"ollama {kind}", cancel, lambda: self._cid_paused(oreq),
+                                              waited=lambda: self._cid_waited(oreq))
                 else:
                     self._ndjson_start()
                     for c in chunks:
@@ -8334,6 +8375,7 @@ def make_handler(svc: Service):
                 if not req.get("stream"):
                     return self._collect_wait(lambda: response_collect(events), "responses", cancel,
                                               lambda: self._cid_paused(sampling),
+                                              waited=lambda: self._cid_waited(sampling),
                                               code_of=lambda out: 500 if out["status"] == "failed" else 200)
                 first = next(events)
                 self._sse()
@@ -8376,7 +8418,8 @@ def make_handler(svc: Service):
                 run = svc.run(ids, thinking, tools, max_new, sampling, cancel)
                 save = (lambda out: svc.responses.put(owner, out, history)) if req.get("store") and persist else None
                 events = response_events(svc.model, config, run, len(ids), persist=save, response_id=response_id,
-                                         validation=validation, cancel=cancel)
+                                         validation=validation, cancel=cancel,
+                                         waited=lambda: self._cid_waited(sampling))
                 yield from events
             finally:
                 if events is not None:
@@ -8419,7 +8462,8 @@ def make_handler(svc: Service):
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
             if not req.get("stream"):
                 return self._collect_wait(lambda: openai_collect(chunks, logprobs=logprobs_asked(req) is not None),
-                                          "openai", cancel, lambda: self._cid_paused(req))
+                                          "openai", cancel, lambda: self._cid_paused(req),
+                                          waited=lambda: self._cid_waited(req))
             if req.get("strata_resume") is True:
                 # the web app: the answer runs on if the connection drops; the page reconnects to it by id
                 first = next(chunks)
@@ -8434,7 +8478,7 @@ def make_handler(svc: Service):
                                         "choices": [{"index": 0, "delta": {}, "finish_reason": None}]}
             self._sse()
             try:
-                for c in wait_events(chunks, empty_chat_chunk):
+                for c in wait_events(chunks, empty_chat_chunk, lambda: self._cid_waited(req)):
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
                     else:
@@ -8520,10 +8564,11 @@ def make_handler(svc: Service):
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel)
             if not req.get("stream"):
                 return self._collect_wait(lambda: anthropic_collect(events), "anthropic", cancel,
-                                          lambda: self._cid_paused(req))
+                                          lambda: self._cid_paused(req), waited=lambda: self._cid_waited(req))
             self._sse()
             try:
-                for item in wait_events(events, lambda: ("ping", {"type": "ping"})):
+                for item in wait_events(events, lambda: ("ping", {"type": "ping"}),
+                                        lambda: self._cid_waited(req)):
                     if item is None:
                         self.wfile.write(b": keep-alive\n\n")
                     else:
