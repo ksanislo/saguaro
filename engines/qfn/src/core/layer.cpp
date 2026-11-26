@@ -712,8 +712,19 @@ bool host_elastic_on() {
                 same = false;
             }
         }
-        if (same && probe_registered_page_address()) return true;   // pieces: the light mode
-        if (!same)
+        // the attribute is a promise, the probe the proof - and on EVERY device (P124e nit): pieces mode would
+        // fail every grow on a second card that answers the probe differently, where prefix mode still works
+        bool proved = same;
+        for (int d = 0; d < n && proved; ++d) {
+            const strata::core::OnDevice on_dev(d);
+            proved = probe_registered_page_address();
+        }
+        if (proved) return true;   // pieces: the light mode
+        if (same)
+            std::fprintf(stderr, "saguaro: KV streaming: a card answers the host-address attribute but registering a "
+                                 "piece did not come back with its own address: the host copies grow as one "
+                                 "registered prefix per array (P124e)\n");
+        else
             std::fprintf(stderr, "saguaro: KV streaming: a card cannot use a registered page's host address: the host "
                                  "copies grow as one registered prefix per array (P124e)\n");
         g_host_prefix = true;
