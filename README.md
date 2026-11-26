@@ -295,10 +295,12 @@ the slowest while the caches fill with what you use.
   what fills each GPU's memory), a context size and port you can change in Settings, and **Models**: every model
   set up on this machine, switching to another (Saguaro starts again with it) and each one's engine settings
   (context, GPUs, drafting, images, memory), saved into its `saguaro-<model>.json`.
-- **Saved:** the sidebar's Saved line adds up what the model's own API (DeepSeek's, Z.ai's, MiniMax's or
-  Tencent's) would have charged for the same tokens - the prompt Saguaro reuses from its cache at the API's
-  cached price, DeepSeek's peak hours at its peak price - kept per model in `token-savings.json`; its prices can
-  be changed in **Settings › Savings**.
+- **Saved:** the sidebar's Saved line adds up what the model's own API (Qwen's, Thinking Machines', DeepSeek's,
+  Z.ai's, MiniMax's or Tencent's) would have charged for the same tokens - the prompt Saguaro reuses from its cache
+  at the API's cached price, DeepSeek's peak hours at its peak price - kept per model in `token-savings.json`. The
+  prices ride with Saguaro (no network at default), and **Settings › Savings** can refresh them once a day from
+  OpenRouter's public list - that sends nothing about you - or set any price of your own
+  ([docs/SETTINGS.md](docs/SETTINGS.md#live-api-prices-live_prices-saguaro_live_prices--off-by-default)).
 - **Your apps and coding agents:** an OpenAI-compatible API at `http://127.0.0.1:8080/v1`, and Anthropic's at
   `http://127.0.0.1:8080/v1/messages` (Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`). Tool calls are
   streamed as the model writes them, and a long prompt's reading progress too when a request asks for it

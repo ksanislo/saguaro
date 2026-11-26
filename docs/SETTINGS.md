@@ -2248,3 +2248,18 @@ for `saguaro-qfn` once, by the setup or the next start, keeping its context, por
   model's mmproj (0.9 GB, pinned and sha256-checked) and writes the elastic `"vision"` entry above - `vision-qfn`
   reads it, on every quant of this family.
 * **Defaults from the model card**: temperature 1.0, top-p 0.95, top-k 20 (the GGUF's `general.sampling`).
+
+## Live API prices (`live_prices`, `SAGUARO_LIVE_PRICES`) - off by default
+
+The web page's Saved line counts what the same tokens would have cost on each model's own API. **Off by default, and
+nothing leaves the box for prices while it is off**: the figures then come from the table shipped with Saguaro
+(`data/api-prices.json`, refilled from OpenRouter's public list by `tools/refresh_prices.py` at each release;
+Settings > Savings says "built-in prices"). Turning it on - the switch in Settings > Savings (it saves
+`"live_prices": true` in the run config), or `SAGUARO_LIVE_PRICES=1` in the environment before a start - makes Saguaro
+fetch OpenRouter's public model list (GET `https://openrouter.ai/api/v1/models`, no key) at most once a day, and at a
+start whose cache has aged past a day, on a background thread that never delays a request or the start. The request
+asks for nothing but the public list: it carries nothing about the user, the chats, the model or the machine, and
+OpenRouter learns only that a Saguaro asked. The result is cached beside the token count with its fetch time; a fetch
+that fails keeps yesterday's cache or the shipped table, with one log line, and tries again an hour later.
+`SAGUARO_LIVE_PRICES=0` says no whatever the config holds (the env beats the run config); the switch off - the
+default - is the same no.

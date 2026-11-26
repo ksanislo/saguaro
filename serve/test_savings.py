@@ -31,6 +31,14 @@ from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 UTC = lambda *a: calendar.timegm((*a, 0, 0, 0))   # noqa: E731  (year, month, day, hour, minute, second)
 TUE_OFF, TUE_PEAK, SAT = UTC(2026, 10, 27, 12, 0, 0), UTC(2026, 10, 27, 2, 30, 0), UTC(2026, 10, 31, 2, 30, 0)
+SAMPLE_TEXT = (ROOT / "ref" / "openrouter-models-sample.json").read_text(encoding="utf-8")   # a real OpenRouter answer
+REAL_OPEN = urllib.request.urlopen    # (the test's own client, kept out of the way of tests that patch urlopen)
+
+
+def answered(text=None):
+    r = mock.MagicMock()
+    r.__enter__.return_value.read.return_value = (SAMPLE_TEXT if text is None else text).encode()
+    return r
 
 
 class Prices(unittest.TestCase):
@@ -204,7 +212,7 @@ class Page(unittest.TestCase):
         r = urllib.request.Request(self.base + path, method=method, headers=h,
                                    data=json.dumps(body).encode() if body is not None else None)
         try:
-            with urllib.request.urlopen(r, timeout=30) as resp:
+            with REAL_OPEN(r, timeout=30) as resp:      # (REAL_OPEN: a test may patch urlopen to fake OpenRouter)
                 return resp.status, json.loads(resp.read())
         except urllib.error.HTTPError as e:
             with e:
@@ -242,6 +250,22 @@ class Page(unittest.TestCase):
         self.assertEqual(s, 403)
         s, r = self.req("POST", "/api/savings/reset", {})
         self.assertEqual((s, r["usd"]), (200, 0.0))
+
+    def test_the_live_switch_from_the_page(self):
+        """POST /api/savings/live: the Settings switch (its own page only); the report answers with the new state;
+        on starts the daily path - a mock answer here, never the network."""
+        self.assertFalse(self.req("GET", "/api/savings")[1]["live"])            # (off by default)
+        with mock.patch.object(SV.urllib.request, "urlopen", return_value=answered()) as net:
+            s, r = self.req("POST", "/api/savings/live", {"live": True})
+            self.assertEqual((s, r["live"]), (200, True))
+            self.svc.savings.book.thread.join(10)
+            net.assert_called_once()
+            s, r = self.req("POST", "/api/savings/live", {"live": False})
+            self.assertEqual((s, r["live"]), (200, False))
+        s, _ = self.req("POST", "/api/savings/live", {"live": "yes"})
+        self.assertEqual(s, 400)
+        s, _ = self.req("POST", "/api/savings/live", {"live": True}, {"Origin": "http://elsewhere.example"})
+        self.assertEqual(s, 403)
 
 
 class PriceFiles(unittest.TestCase):
@@ -301,7 +325,7 @@ class OpenRouterPrices(unittest.TestCase):
     nothing, ever.  The cache lies beside the count, with its fetch time; on any failure the cache or the shipped
     table counts, with one log line.  The answer here is the sample, never the network."""
 
-    SAMPLE = json.loads((ROOT / "ref" / "openrouter-models-sample.json").read_text(encoding="utf-8"))
+    SAMPLE = json.loads(SAMPLE_TEXT)
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -323,12 +347,6 @@ class OpenRouterPrices(unittest.TestCase):
     def ledger(self, live=False, config=None):
         return SV.Ledger(self.save / SV.FILE, "maya-maya-m.json", "glm-5.3-flash",
                          prices=SV.PriceBook(self.save, self.repo_file, live=live), config=config, live=live)
-
-    @staticmethod
-    def answered(text):
-        r = mock.MagicMock()
-        r.__enter__.return_value.read.return_value = text.encode()
-        return r
 
     def write_cache(self, doc, fetched):
         (self.save / SV.LIVE_FILE).write_text(json.dumps({"fetched": fetched, "as_of": doc["as_of"],
@@ -386,7 +404,7 @@ class OpenRouterPrices(unittest.TestCase):
     def test_on_fetches_once_a_day_on_a_thread_and_caches_with_its_time(self):
         self.repo_file.write_text(self.text("2026-10", 0.10))
         with mock.patch.object(SV.urllib.request, "urlopen",
-                               return_value=self.answered(json.dumps(self.SAMPLE))) as net:
+                               return_value=answered(json.dumps(self.SAMPLE))) as net:
             led = self.ledger(live=True)                               # (the start: the cache is older, so fetch)
             self.assertIsNotNone(led.book.thread)                      # ... on a thread: the start did not wait
             led.book.thread.join(10)
@@ -415,7 +433,7 @@ class OpenRouterPrices(unittest.TestCase):
         self.write_cache(doc, old)
         self.repo_file.write_text(self.text())
         with mock.patch.object(SV.urllib.request, "urlopen",
-                               return_value=self.answered(json.dumps(self.SAMPLE))) as net:
+                               return_value=answered(json.dumps(self.SAMPLE))) as net:
             led = self.ledger(live=True)
             self.assertIsNotNone(led.book.thread)
             led.book.thread.join(10)
@@ -456,7 +474,7 @@ class OpenRouterPrices(unittest.TestCase):
         self.repo_file.write_text(self.text())
         out = io.StringIO()
         with mock.patch.object(SV.urllib.request, "urlopen",
-                               return_value=self.answered("<html>not the model list</html>")), redirect_stdout(out):
+                               return_value=answered("<html>not the model list</html>")), redirect_stdout(out):
             led = self.ledger(live=True)
             led.book.thread.join(10)
             rep = led.report()
@@ -489,7 +507,7 @@ class OpenRouterPrices(unittest.TestCase):
         led = self.ledger(config=cfg)
         self.assertFalse(led.book.live)
         with mock.patch.object(SV.urllib.request, "urlopen",
-                               return_value=self.answered(json.dumps(self.SAMPLE))) as net:
+                               return_value=answered(json.dumps(self.SAMPLE))) as net:
             led.set_live(True)                                                 # (the Settings switch)
             self.assertTrue(led.book.live)
             self.assertEqual(json.loads(cfg.read_text())["live_prices"], True) # (saved: the next start keeps it)
@@ -507,7 +525,7 @@ class OpenRouterPrices(unittest.TestCase):
         led = self.ledger(config=cfg)
         self.assertFalse(led.report()["live"])
         with mock.patch.object(SV.urllib.request, "urlopen",
-                               return_value=self.answered(json.dumps(self.SAMPLE))):
+                               return_value=answered(json.dumps(self.SAMPLE))):
             led.set_live(True)
             led.book.thread.join(10)
             rep = led.report()

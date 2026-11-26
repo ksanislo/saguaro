@@ -279,12 +279,14 @@ function Data() {
 }
 
 // ------------------------------------------------------------------ Savings: the API prices the sidebar's Saved counts with
-// (serve/savings.py: the prices from data/api-prices.json - or its newer copy fetched from GitHub - or the built-ins,
-// or the ones set here; the file keeps tokens, so a change counts every total again)
+// (serve/savings.py: OpenRouter's own list fetched once a day when the switch below is on, else the shipped table
+// of data/api-prices.json, else the built-ins - and over all of them the ones set here; the file keeps tokens,
+// so a change counts every total again)
 const PRICE_FIELDS = [["input", "Input"], ["cached", "Cached input"], ["output", "Output"]];
-const PRICES_FROM = {github: "the newest api-prices.json from GitHub", file: "the api-prices.json in this Saguaro", "built-in": "Saguaro's built-in prices"};
+const PRICES_FROM = {openrouter: "OpenRouter's prices", "built-in": "Saguaro's built-in prices"};
 const priceMonth = (a) => (/^\d{4}-\d{2}$/.test(a || "") ? new Date(`${a}-01T00:00:00`).toLocaleDateString([], {month: "short", year: "numeric"}) : "");
-const pricesNote = (s) => `Prices: ${PRICES_FROM[s.from] || s.from}${s.as_of ? `, the APIs' own as of ${priceMonth(s.as_of)}` : ""}.`;
+const pricesNote = (s) => (s.from === "openrouter" ? `Prices: OpenRouter, ${s.date}.`
+  : `Prices: built-in prices${s.release ? `, Saguaro ${s.release}` : ""}${s.as_of ? ` (the shipped table as of ${priceMonth(s.as_of)})` : ""}.`);
 const priceShow = (k, v) => (v == null ? "" : k !== "peak" && Number.isInteger(Math.round(v * 1e6) / 1e4) ? v.toFixed(2) : String(v));   // ($0.50)
 const priceText = (x) => Object.fromEntries(["input", "cached", "output", "peak"].map((k) => [k, priceShow(k, x[k])]));
 const priceNum = (v) => (/^\s*(\d+\.?\d*|\.\d+)\s*$/.test(v) ? Number(v) : NaN);
@@ -330,6 +332,14 @@ function Savings() {
   const [r, setR] = useState(null), [err, setErr] = useState("");
   const ask = () => { if (unloaded()) return; api("api/savings").then(setR).catch((e) => setErr(e.message)); };   // (off the card it would load the model)
   useEffect(() => { ask(); return unloaded() ? whenHealth(ask) : undefined; }, []);
+  const setLive = async (on) => {
+    try {
+      setR(await api("api/savings/live", {method: "POST", body: {live: !!on}}));
+      toast("success", on ? "Live prices on" : "Live prices off",
+            on ? "Saguaro reads OpenRouter's public model list once a day; the request carries nothing about you."
+               : "The built-in prices count; nothing leaves this box for prices.");
+    } catch (e) { toast("error", "Not saved", e.message, 6000); }
+  };
   const reset = async () => {
     if (!await confirmDialog("Start over from $0?", "<p>Every model's count of tokens and what they would have cost goes back to zero. The prices stay. This cannot be undone.</p>", "Start over", true)) return;
     try { setR(await api("api/savings/reset", {method: "POST", body: {}})); toast("success", "Started over", "Saguaro counts from $0 again."); }
@@ -339,6 +349,9 @@ function Savings() {
   return html`<h3>Savings</h3>
     <p class="set-intro">The sidebar's Saved line: what each model's own API would have charged for the same tokens. Change a price when the API's changes, or give one to a model without it. Saguaro keeps the tokens, so every total is counted again with the new prices.</p>
     ${r && r.prices_source ? html`<p class="set-note">${pricesNote(r.prices_source)}</p>` : null}
+    ${r && r.prices_source ? html`<${Row} label="Update API prices once a day from OpenRouter"
+      sub="Sends no data about you: Saguaro reads openrouter.ai's public model list (no key) on a background thread, at most once a day, so the Saved line keeps up with what the APIs themselves charge. Off by default - with it off the built-in prices count and nothing leaves this box for prices.">
+      <${Switch} on=${!!r.live} onChange=${setLive} label="Update API prices once a day from OpenRouter"/><//>` : null}
     ${err ? html`<p class="set-note">${err}</p>` : !r ? html`<p class="set-note">${unloaded() ? UNLOADED : "Reading the prices…"}</p>`
       : !(r.price_list || []).length ? html`<p class="set-note">Nothing is counted on this server: it runs without a model config.</p>`
       : html`<div class="prices">${r.price_list.map((p) => html`<${PriceCard} key=${p.model} p=${p} src=${r.prices_source} onSaved=${setR}/>`)}</div>
