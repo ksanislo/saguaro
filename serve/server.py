@@ -6769,54 +6769,56 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
             c["choices"][0]["logprobs"] = lp
         return c
 
-    for kind, x in run if run is not None else svc.run(ids, thinking, tools, max_new, req, cancel):
-        # ^ kind "ping": x carries the prompt's progress (total, cache, processed, time_ms) while the engine reads,
-        #   or None while this request just waits (queued again, an MCP round's engine work)
-        if kind == "ping":
-            if req.get("return_progress") and req.get("stream") and isinstance(x, dict):
+    with contextlib.closing(run if run is not None else svc.run(ids, thinking, tools, max_new, req, cancel)) as _inner:
+        # (closed on any exit: Python 3.12 ran the inner STOP + drain only when the outer one was freed)
+        for kind, x in _inner:
+            # ^ kind "ping": x carries the prompt's progress (total, cache, processed, time_ms) while the engine reads,
+            #   or None while this request just waits (queued again, an MCP round's engine work)
+            if kind == "ping":
+                if req.get("return_progress") and req.get("stream") and isinstance(x, dict):
+                    c = chunk({})
+                    c["prompt_progress"] = x          # llama.cpp's field: the prompt read's progress, for a client's bar
+                    yield c
+                else:
+                    yield None
+            elif kind == "mcp":
                 c = chunk({})
-                c["prompt_progress"] = x          # llama.cpp's field: the prompt read's progress, for a client's bar
+                c["strata_mcp"] = x
                 yield c
-            else:
-                yield None
-        elif kind == "mcp":
-            c = chunk({})
-            c["strata_mcp"] = x
-            yield c
-        elif kind == "event":
-            ev: Event = x
-            if ev.kind == "reasoning" and ev.text:
-                yield text_chunk({"reasoning_content": ev.text}, ev.logprobs, "reasoning_content")
-            elif ev.kind == "content" and ev.text:
-                if json_mode:
-                    held.append(ev.text)
-                    held_lp += ev.logprobs or []
+            elif kind == "event":
+                ev: Event = x
+                if ev.kind == "reasoning" and ev.text:
+                    yield text_chunk({"reasoning_content": ev.text}, ev.logprobs, "reasoning_content")
+                elif ev.kind == "content" and ev.text:
+                    if json_mode:
+                        held.append(ev.text)
+                        held_lp += ev.logprobs or []
+                        continue
+                    yield text_chunk({"content": ev.text}, ev.logprobs)
+                elif ev.kind == "tool_start":
+                    streamed[ev.call.id] = calls
+                    calls += 1
+                    yield chunk({"tool_calls": [{"index": streamed[ev.call.id], **ev.call.to_openai(arguments="")}]})
+                elif ev.kind == "tool_args":
+                    yield chunk({"tool_calls": [{"index": streamed[ev.call.id], "function": {"arguments": ev.text}}]})
+                elif ev.kind == "tool_call" and ev.call.id in streamed:
                     continue
-                yield text_chunk({"content": ev.text}, ev.logprobs)
-            elif ev.kind == "tool_start":
-                streamed[ev.call.id] = calls
-                calls += 1
-                yield chunk({"tool_calls": [{"index": streamed[ev.call.id], **ev.call.to_openai(arguments="")}]})
-            elif ev.kind == "tool_args":
-                yield chunk({"tool_calls": [{"index": streamed[ev.call.id], "function": {"arguments": ev.text}}]})
-            elif ev.kind == "tool_call" and ev.call.id in streamed:
-                continue
-            elif ev.kind == "tool_call":
-                yield chunk({"tool_calls": [{"index": calls, **ev.call.to_openai()}]})
-                calls += 1
-        else:
-            if held:
-                yield text_chunk({"content": json_from_text("".join(held))}, held_lp)
-            finish = "tool_calls" if calls and x["finish"] == "stop" else {"cancel": "stop"}.get(x["finish"], x["finish"])
-            last = chunk({}, finish)
-            pt = x.get("prompt_tokens", len(ids))     # after MCP rounds: the last round's prompt
-            last["usage"] = {"prompt_tokens": pt, "completion_tokens": x["completion_tokens"],
-                             "total_tokens": pt + x["completion_tokens"],
-                             # the part of the prompt the conversation cache already held (OpenAI's field)
-                             "prompt_tokens_details": {"cached_tokens": x.get("reused") or 0}}
-            if x.get("timings"):
-                last["timings"] = x["timings"]          # llama.cpp's field: the speed its clients show
-            yield last
+                elif ev.kind == "tool_call":
+                    yield chunk({"tool_calls": [{"index": calls, **ev.call.to_openai()}]})
+                    calls += 1
+            else:
+                if held:
+                    yield text_chunk({"content": json_from_text("".join(held))}, held_lp)
+                finish = "tool_calls" if calls and x["finish"] == "stop" else {"cancel": "stop"}.get(x["finish"], x["finish"])
+                last = chunk({}, finish)
+                pt = x.get("prompt_tokens", len(ids))     # after MCP rounds: the last round's prompt
+                last["usage"] = {"prompt_tokens": pt, "completion_tokens": x["completion_tokens"],
+                                 "total_tokens": pt + x["completion_tokens"],
+                                 # the part of the prompt the conversation cache already held (OpenAI's field)
+                                 "prompt_tokens_details": {"cached_tokens": x.get("reused") or 0}}
+                if x.get("timings"):
+                    last["timings"] = x["timings"]          # llama.cpp's field: the speed its clients show
+                yield last
 
 
 def carry_embeddings(local, path, chunks):
