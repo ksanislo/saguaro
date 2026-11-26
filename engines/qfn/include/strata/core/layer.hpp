@@ -337,6 +337,11 @@ void qsa_set_vram_elastic_main(bool on);
 bool qsa_slots_grow_fresh(const QsaState& st, int64_t cells);
 /// The last qsa_host_grow found no RAM to pin (what a "no room" after a failed slot growth means: RAM, not VRAM).
 bool qsa_host_pin_failed();
+/// P124e round 2: the elastic host copies register ONE prefix per array, so an elastic state's `host` pointers are
+/// the DEVICE bases cudaHostGetDevicePointer answered with - not the arrays' CPU addresses (a card that cannot use
+/// a registered page's host address; flat-VA cards answer with the host address and pick the pieces mode instead).
+/// A CPU memcpy through such a pointer is a GPU-alias access: only driver copies may touch those bytes.
+bool qsa_host_elastic_prefix();
 /// SAGUARO_KV_HOST_ELASTIC: an elastic state's host copy pinned for its first `cells` cells (whole steps of
 /// SAGUARO_KV_HOST_STEP cells); false: RAM or the driver refused (nothing of the failed step stays pinned).
 bool qsa_host_grow(const QsaState& st, int64_t cells);

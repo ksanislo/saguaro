@@ -1089,6 +1089,13 @@ uint64_t qsa_host_backed_bytes(const QsaState& st) {
     return 0;
 #endif
 }
+bool qsa_host_elastic_prefix() {
+#ifndef _WIN32
+    return host_prefix_mode();   // (makes the mode decision on first use, as every other elastic entry does)
+#else
+    return false;   // (elastic host copies are not made on Windows: its states pin whole)
+#endif
+}
 
 namespace {
 // ---- the elastic K/V (--kv-grow): one VMM range per state, each pool array at a chunk boundary in it

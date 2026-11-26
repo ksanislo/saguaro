@@ -134,6 +134,14 @@ bool host_both(const void* dst, const void* src) {
     };
     return host(a) && host(b);
 }
+// P124e round 2 finding 5: host_both cannot tell a CPU address from a GPU alias for memory it does not know, and
+// in prefix mode an elastic state's `host` pointers are the DEVICE bases cudaHostGetDevicePointer answered with
+// (that is what the mode means).  The threaded memcpy must never run through one: the driver copy (transfer's
+// default) maps those bytes from both sides.  An unknown pointer still counts as host for everything else - the
+// parked image's own buffers are plain memory, and their threaded copy is the 11-19 park-stall fix.
+bool host_end_is_cpu(const QsaState& st) {
+    return st.host_elastic < 0 || !qsa_host_elastic_prefix();
+}
 struct CopyJob { void* dst; const void* src; size_t n; };
 using conversation_detail::park_fast;
 // jobs whose both ends are host memory, together 64 MiB or more, on N threads (default 8; 0 / 1: off).  The parked
@@ -192,29 +200,30 @@ bool host_copy_threaded(const std::vector<CopyJob>& jobs) {
 bool host_copy_threaded(void* dst, const void* src, size_t n) {
     return host_copy_threaded(std::vector<CopyJob>{{dst, src, n}});
 }
-bool transfer(void* dst, const void* src, size_t n, std::string& error) {
+bool transfer(void* dst, const void* src, size_t n, std::string& error, bool cpu_ends = true) {
     if (!n) return true;
     if (!src || !dst) { error = "conversation snapshot: missing state buffer"; return false; }
-    if (host_copy_threaded(dst, src, n)) return true;
+    if (cpu_ends && host_copy_threaded(dst, src, n)) return true;   // (cpu_ends: no end is a known GPU alias)
     // Default handles both device allocations and device-mapped host pool aliases.
     const cudaError_t e = conversation_detail::copy_nonblocking(dst, src, n);
     if (e == cudaSuccess) return true;
     error = std::string("conversation snapshot copy: ") + cudaGetErrorString(e);
     return false;
 }
-// the jobs together on threads when they can be (host_copy_threaded), else one by one as transfer()
-bool transfer_jobs(const std::vector<CopyJob>& jobs, std::string& error) {
+// the jobs together on threads when they can be (host_copy_threaded), else one by one as transfer();
+// `cpu_ends` false (a prefix-mode elastic host copy: its pool end is a device base) keeps every thread off
+bool transfer_jobs(const std::vector<CopyJob>& jobs, std::string& error, bool cpu_ends = true) {
     const auto t0 = std::chrono::steady_clock::now();   // (the park/restore split: output only)
     size_t total = 0;
     for (const CopyJob& j : jobs) total += j.n;
-    if (host_copy_threaded(jobs)) {
+    if (cpu_ends && host_copy_threaded(jobs)) {
         conversation_detail::snapshot_split().copy_ms += conversation_detail::split_ms(t0, std::chrono::steady_clock::now());
         conversation_detail::snapshot_split().copy_bytes += total;
         ++conversation_detail::snapshot_split().threaded;
         return true;
     }
     for (const CopyJob& j : jobs)
-        if (!transfer(j.dst, j.src, j.n, error)) return false;
+        if (!transfer(j.dst, j.src, j.n, error, cpu_ends)) return false;
     conversation_detail::snapshot_split().copy_ms += conversation_detail::split_ms(t0, std::chrono::steady_clock::now());
     conversation_detail::snapshot_split().copy_bytes += total;
     ++conversation_detail::snapshot_split().plain;
@@ -268,6 +277,7 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
     image.pooled_rows = l.pooled_rows;
     image.idx_dim = g.idx_key_dim;
     const auto src = pools(st);
+    const bool pool_cpu = host_end_is_cpu(st);   // (prefix mode: `src` ends are device bases, no CPU memcpy - finding 5)
     const std::array<size_t,5> sizes = {l.data, l.value_data, l.scales, l.value_scales, l.pooled};
     const std::array<ConversationBuffer*,5> dst = {&image.k, &image.v, &image.k_scale, &image.v_scale, &image.pooled};
     for (size_t i = 0; i < dst.size(); ++i) {
@@ -288,7 +298,7 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
                 if (!src[i]) { error = "conversation snapshot: missing state buffer"; return false; }
                 jobs.push_back({p, static_cast<const uint8_t*>(src[i]) + at, n});
                 return true;
-            }) || !transfer_jobs(jobs, error)) return false;
+            }) || !transfer_jobs(jobs, error, pool_cpu)) return false;
         if (reused_bytes) *reused_bytes += keep;
     }
     return true;
@@ -370,13 +380,14 @@ bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, co
     if (!conversation_kv_validate(image, st, g, upto, index, error)) return false;
     const std::array<const ConversationBuffer*,5> src = {&image.k, &image.v, &image.k_scale, &image.v_scale, &image.pooled};
     const auto dst = pools(st);
+    const bool pool_cpu = host_end_is_cpu(st);   // (prefix mode: `dst` ends are device bases, no CPU memcpy - finding 5)
     for (size_t i = 0; i < src.size(); ++i)
     {
         std::vector<CopyJob> jobs;
         if (!src[i]->visit(0, src[i]->size(), [&](const uint8_t* p, size_t n, size_t at) {
                 jobs.push_back({static_cast<uint8_t*>(dst[i]) + at, p, n});
                 return true;
-            }) || !transfer_jobs(jobs, error)) return false;
+            }) || !transfer_jobs(jobs, error, pool_cpu)) return false;
     }
     return refresh_residency(st, g, upto, error);
 }
@@ -395,13 +406,14 @@ bool conversation_kv_restore_prefix(const ConversationKv& image, const QsaState&
     for (size_t i = 0; i < src.size(); ++i)
         if (sizes[i] > src[i]->size()) { error = "conversation snapshot: prefix beyond the K/V payload"; return false; }
     const auto dst = pools(st);
+    const bool pool_cpu = host_end_is_cpu(st);   // (prefix mode: `dst` ends are device bases, no CPU memcpy - finding 5)
     for (size_t i = 0; i < src.size(); ++i)
     {
         std::vector<CopyJob> jobs;
         if (!src[i]->visit(0, sizes[i], [&](const uint8_t* p, size_t n, size_t at) {
                 jobs.push_back({static_cast<uint8_t*>(dst[i]) + at, p, n});
                 return true;
-            }) || !transfer_jobs(jobs, error)) return false;
+            }) || !transfer_jobs(jobs, error, pool_cpu)) return false;
     }
     return refresh_residency(st, g, upto, error);
 }
@@ -424,10 +436,11 @@ bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const Mode
     s.sizes = {l.data, l.value_data, l.scales, l.value_scales, l.pooled};
     const auto src = pools(st);
     const auto sizes = s.sizes;
+    const bool pool_cpu = host_end_is_cpu(st);   // (prefix mode: `src` ends are device bases, no CPU memcpy - finding 5)
     auto why = std::make_shared<std::string>();
-    s.read = [src, sizes, why](size_t part, size_t offset, void* dst, size_t n) {
+    s.read = [src, sizes, why, pool_cpu](size_t part, size_t offset, void* dst, size_t n) {
         if (part >= 5 || offset > sizes[part] || n > sizes[part] - offset) { *why = "K/V read out of range"; return false; }
-        return transfer(dst, src[part] ? static_cast<const uint8_t*>(src[part]) + offset : nullptr, n, *why);
+        return transfer(dst, src[part] ? static_cast<const uint8_t*>(src[part]) + offset : nullptr, n, *why, pool_cpu);
     };
     s.error = [why] { return *why; };
     out = std::move(s);
@@ -437,12 +450,13 @@ bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const Mode
 bool conversation_kv_verify(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                             int64_t upto, bool index, uint64_t& fingerprint, std::string& error) {
     if (!conversation_kv_validate(image, st, g, upto, index, error)) return false;
+    const bool pool_cpu = host_end_is_cpu(st);   // (prefix mode: authoritative host ends are device bases - finding 5)
     std::array<uint8_t, 65536> buffer;
     uint64_t hash = 1469598103934665603ull;
     auto compare = [&](const void* device, const uint8_t* expected, size_t bytes, bool include_hash) {
         for (size_t offset = 0; offset < bytes;) {
             const size_t n = std::min(buffer.size(), bytes - offset);
-            if (!transfer(buffer.data(), static_cast<const uint8_t*>(device) + offset, n, error)) return false;
+            if (!transfer(buffer.data(), static_cast<const uint8_t*>(device) + offset, n, error, pool_cpu)) return false;
             if (std::memcmp(buffer.data(), expected + offset, n) != 0) {
                 error = "conversation snapshot: restored K/V bytes differ";
                 return false;
