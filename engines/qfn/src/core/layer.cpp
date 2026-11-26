@@ -1,6 +1,7 @@
 
 // src/core/layer.cpp - the GDN layer, composed.  See the header for the operation order and its traps.
 #include "strata/core/capture_lock.hpp"
+#include "strata/core/kv_host_growth.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/slot_sizing.hpp"
@@ -40,6 +41,7 @@
 #include "strata/kernels/fused_gdn.hpp"
 #include "strata/kernels/qsa_select.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -640,20 +642,34 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
 #endif
 }
 
-// ---- SAGUARO_KV_HOST_ELASTIC (default on with elastic slots; =0: off): an elastic slot state's host copy is one
-// address range for the whole context (MAP_NORESERVE: no RAM until pinned), each array pinned in steps of
-// SAGUARO_KV_HOST_STEP cells (8192) as the slot's cells grow (qsa_host_grow, from session_slot_fit) and unpinned past
-// what it keeps when it is trimmed.  The kernels keep the one pointer per array: a registered page's device address
-// is its host address on every card here (cudaDevAttrCanUseHostPointerForRegisteredMem, checked at the first state).
+// ---- SAGUARO_KV_HOST_ELASTIC (default on with elastic slots and --serve; =0: off): a streamed state's host copy is one
+// address range for the whole context (MAP_NORESERVE: no RAM until pinned), backed and pinned as the conversation's
+// cells grow (qsa_host_grow, from session_slot_fit / session_host_fit) and given back when it is trimmed (P124e: the
+// memory follows USE, not --max-context - a 1M setting costs the start step, about 32768 cells, like 262144 does).
+// Two backing modes, chosen once at the first state (host_elastic_on):
+//  - pieces: each array pinned in steps of SAGUARO_KV_HOST_STEP cells, one kHostPiece-byte registration per piece.
+//    The kernels keep the one pointer per array, so this needs a registered page's device address to BE its host
+//    address: the attribute (cudaDevAttrCanUseHostPointerForRegisteredMem) says so on NVIDIA, and when it does not
+//    (HIP reports it unsupported although ROCm's flat VA keeps the address) one real piece decides it empirically.
+//  - prefix (P124e): a card whose registered pages the kernels must reach through cudaHostGetDevicePointer cannot
+//    share one pointer across separate registrations - so each array is ONE registered prefix and every grow/trim
+//    re-registers it whole and rewrites the state's host pointers (the chunked pinned allocations step 3 asks for:
+//    the arrays are the chunks, no copy is ever mid-prefix).  Growth works in this mode too.
 #ifndef _WIN32
 struct HostPool {
     uint8_t* base = nullptr;
     uint64_t total = 0;
     std::vector<uint64_t> off, per;   // each array's offset in the range, its bytes per page
-    std::vector<int64_t> pinned;      // each array's pinned pieces (a prefix, kHostPiece bytes each)
+    std::vector<int64_t> pinned;      // pieces mode: each array's pinned pieces (a prefix, kHostPiece bytes each)
     int64_t pages = 0, unit = 0;      // logical pages; pages per growth step
     int64_t page_size = 4;            // cells per page
     int dev = -1;
+    // P124e prefix mode: every array registered as ONE prefix [off, off + backed*per), its device base in d
+    bool prefix = false;
+    int64_t backed = 0;               // pages every array's prefix covers
+    std::vector<uint8_t*> d;          // each array's device base (null: nothing registered)
+    QsaState* owner = nullptr;        // the state whose `host` follows the prefixes (rewrite on every remap)
+    bool fmt_hybrid = false, fmt_q4 = false, fmt_int8 = false;   // kv_per_slot's order for the owner
 };
 // pinned in pieces of kHostPiece bytes at kHostPiece-aligned addresses: the bulk copies split at the same boundaries
 // (kernels::memcpy_async_split), so no copy spans two registrations (one cudaMemcpyAsync across two is refused)
@@ -662,26 +678,50 @@ std::mutex g_host_mu;
 std::vector<std::unique_ptr<HostPool>> g_host_pools;
 bool g_host_main = false;   // qsa_set_host_elastic_main: the solo sessions' streamed states too
 bool g_vram_main = false;   // qsa_set_vram_elastic_main: their VRAM pools and pooled keys in slot pools too
+bool g_host_prefix = false;   // host_elastic_on's decision: prefix mode instead of pieces (see above)
 std::atomic<bool> g_host_failed{false};   // qsa_host_pin_failed: the last qsa_host_grow ran out of RAM
+// Does registering one step's piece answer cudaHostGetDevicePointer with the piece's own address?  That is what the
+// kernels' one-pointer-per-array arithmetic needs; the attribute is a promise, this is the proof (HIP: unsupported
+// attribute, flat VA nonetheless, P124e on mortar's RX 9070 XT).
+bool probe_registered_page_address() {
+    void* m = mmap(nullptr, (size_t) (2 * kHostPiece), PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (m == MAP_FAILED) { (void) cudaGetLastError(); return false; }
+    uint8_t* a = (uint8_t*) (((uintptr_t) m + kHostPiece - 1) / kHostPiece * kHostPiece);
+    bool ok = false;
+    if (cudaHostRegister(a, (size_t) kHostPiece, cudaHostRegisterPortable | cudaHostRegisterMapped) == cudaSuccess) {
+        void* d = nullptr;
+        ok = cudaHostGetDevicePointer(&d, a, 0) == cudaSuccess && d == (void*) a;
+        (void) cudaHostUnregister(a);
+    }
+    (void) cudaGetLastError();
+    munmap(m, (size_t) (2 * kHostPiece));
+    return ok;
+}
 bool host_elastic_on() {
     static const bool on = [] {
         const char* v = std::getenv("SAGUARO_KV_HOST_ELASTIC");
         if (v != nullptr && v[0] == '0') return false;
         int n = 0;
         if (cudaGetDeviceCount(&n) != cudaSuccess || n < 1) { (void) cudaGetLastError(); return false; }
-        for (int d = 0; d < n; ++d) {
-            int same = 0;
-            if (cudaDeviceGetAttribute(&same, cudaDevAttrCanUseHostPointerForRegisteredMem, d) != cudaSuccess || !same) {
+        bool same = true;
+        for (int d = 0; d < n && same; ++d) {
+            int attr = 0;
+            if (cudaDeviceGetAttribute(&attr, cudaDevAttrCanUseHostPointerForRegisteredMem, d) != cudaSuccess || !attr) {
                 (void) cudaGetLastError();
-                std::fprintf(stderr, "saguaro: KV streaming: CUDA%d cannot use a registered page's host address: the slots' "
-                                     "host copies are pinned whole\n", d);
-                return false;
+                same = false;
             }
         }
-        return true;
+        if (same && probe_registered_page_address()) return true;   // pieces: the light mode
+        if (!same)
+            std::fprintf(stderr, "saguaro: KV streaming: a card cannot use a registered page's host address: the host "
+                                 "copies grow as one registered prefix per array (P124e)\n");
+        g_host_prefix = true;
+        return true;   // prefix mode: chunked pinned allocations, remapped as the conversation grows
     }();
     return on;
 }
+bool host_prefix_mode() { (void) host_elastic_on(); return g_host_prefix; }
 // SAGUARO_KV_HOST_MIB=N: the K/V host copies pin at most N MiB in all (0: what the OS gives); past it a step fails as
 // when the RAM is out
 uint64_t host_cap() {
@@ -692,24 +732,35 @@ uint64_t host_cap() {
     }();
     return cap;
 }
+// The step, and the arithmetic of pieces/prefixes for `pages` pages, live in kv_host_growth.hpp (P124e: unit-tested).
 int64_t host_step_pages(int64_t page_size) {
     static const int64_t cells = [] {
         const char* v = std::getenv("SAGUARO_KV_HOST_STEP");
         const long long n = v != nullptr ? std::atoll(v) : 0;
-        return n > 0 ? (int64_t) n : (int64_t) 8192;
+        // P124e: the start and the step are one VRAM resident's worth (32768 cells): at load a conversation holds about
+        // that many positions and nothing more, whatever --max-context says.
+        return n > 0 ? (int64_t) n : (int64_t) 32768;
     }();
     return std::max<int64_t>(1, (cells + page_size - 1) / page_size);
 }
-// A state's host copy as addresses only; `arr` gets the arrays' bases.  -1: not made (the caller pins it whole).
-int32_t host_pool_make(const std::vector<uint64_t>& per, int64_t pages, int64_t page_size, uint8_t** arr) {
+// A state's host copy as addresses only; `arr` gets the arrays' bases (null in prefix mode until the first grow).
+// -1: not made (the caller pins it whole).
+int32_t host_pool_make(const std::vector<uint64_t>& per, int64_t pages, int64_t page_size, uint8_t** arr,
+                       QsaState& st) {
     auto pool = std::make_unique<HostPool>();
     pool->pages = pages;
     pool->page_size = page_size;
     pool->unit = host_step_pages(page_size);
+    pool->prefix = host_prefix_mode();
+    pool->owner = &st;
+    pool->fmt_hybrid = st.kv_hybrid;
+    pool->fmt_q4 = st.kv_q4;
+    pool->fmt_int8 = st.kv_int8;
     for (const uint64_t b : per) {
         pool->off.push_back(pool->total);
         pool->per.push_back(b);
         pool->pinned.push_back(0);
+        pool->d.push_back(nullptr);
         pool->total += ((uint64_t) pages * b + kHostPiece - 1) / kHostPiece * kHostPiece;
     }
     // (an extra piece to align the base: mmap gives page alignment only)
@@ -720,7 +771,10 @@ int32_t host_pool_make(const std::vector<uint64_t>& per, int64_t pages, int64_t 
     if (const int node = strata::core::numa_place_current_node(); node >= 0)   // SAGUARO_NUMA_PLACE: the stage's node
         (void) strata::platform::numa_bind(pool->base, (size_t) pool->total, node, strata::platform::numa_place_mode() == 2);
     (void) cudaGetDevice(&pool->dev);
-    for (size_t i = 0; i < per.size(); ++i) arr[i] = pool->base + pool->off[i];
+    if (!pool->prefix)
+        for (size_t i = 0; i < per.size(); ++i) arr[i] = pool->base + pool->off[i];
+    // (prefix mode: nothing is registered yet - the first qsa_host_grow backs and pins the start step, and the
+    // state's `host` pointers arrive with it; the arrays' addresses stay the owner's business)
     g_kv_host_reserved += (uint64_t) pages * std::accumulate(per.begin(), per.end(), (uint64_t) 0);
     std::lock_guard<std::mutex> lk(g_host_mu);
     g_host_pools.push_back(std::move(pool));
@@ -728,8 +782,7 @@ int32_t host_pool_make(const std::vector<uint64_t>& per, int64_t pages, int64_t 
 }
 // array i's pieces for the first `pages` pages, rounded up to whole growth steps
 int64_t host_pieces(const HostPool& p, size_t i, int64_t pages) {
-    const int64_t pg = std::min<int64_t>(p.pages, (pages + p.unit - 1) / p.unit * p.unit);
-    return (int64_t) (((uint64_t) pg * p.per[i] + kHostPiece - 1) / kHostPiece);
+    return kv_host_pieces(pages, p.unit, p.pages, p.per[i], kHostPiece);
 }
 void host_unpin_locked(HostPool& p, int64_t pages) {
     for (size_t i = 0; i < p.per.size(); ++i) {
@@ -743,6 +796,105 @@ void host_unpin_locked(HostPool& p, int64_t pages) {
         }
     }
 }
+// ---- the prefix mode's one registration per array (P124e) ----
+uint64_t host_prefix_bytes(const HostPool& p, int64_t pages) {   // bytes its arrays hold registered
+    uint64_t n = 0;
+    for (size_t i = 0; i < p.per.size(); ++i) n += kv_host_prefix_bytes(pages, p.per[i], 4096);
+    return n;
+}
+// points the owner's `host` at `a` (kv_per_slot's order); nulls are the copy being unbacked between steps.
+void host_apply(HostPool& p, uint8_t* const* a) {
+    if (p.owner == nullptr) return;
+    QsaState& st = *p.owner;
+    if (p.fmt_hybrid) { st.host.k_q = (int8_t*) a[0]; st.host.k_scale = (uint16_t*) a[1]; st.host.v_q4 = a[2]; }
+    else if (p.fmt_q4) { st.host.k_q4 = a[0]; st.host.v_q4 = a[1]; }
+    else if (p.fmt_int8) {
+        st.host.k_q = (int8_t*) a[0];
+        st.host.v_q = (int8_t*) a[1];
+        st.host.k_scale = (uint16_t*) a[2];
+        st.host.v_scale = (uint16_t*) a[3];
+    } else { st.host.k_pool = (uint16_t*) a[0]; st.host.v_pool = (uint16_t*) a[1]; }
+}
+// Re-registers every array's prefix to cover `pages` pages: all or nothing (a refusal leaves the old prefixes
+// standing as far as they re-register).  Returns the bytes the new state holds registered; `ok` says it came out
+// whole.  The device must be quiet (its kernels read the old device bases until this returns).
+uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint64_t had = host_prefix_bytes(p, p.backed);
+    g_kv_host_bytes -= had;
+    for (size_t i = 0; i < p.d.size(); ++i) {
+        if (p.d[i] == nullptr) continue;
+        (void) cudaHostUnregister(p.base + p.off[i]);
+        (void) cudaGetLastError();
+        p.d[i] = nullptr;
+    }
+    if (pages <= 0) { host_apply(p, p.d.data()); ok = true; return 0; }
+    std::vector<uint8_t*> nd(p.per.size(), nullptr);
+    uint64_t got = 0;
+    bool whole = true;
+    for (size_t i = 0; i < p.per.size(); ++i) {
+        uint8_t* at = p.base + p.off[i];
+        const uint64_t bytes = kv_host_prefix_bytes(pages, p.per[i], 4096);
+        void* d = nullptr;
+        if (cudaHostRegister(at, (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped) == cudaSuccess &&
+            cudaHostGetDevicePointer(&d, at, 0) == cudaSuccess && d != nullptr) {
+            nd[i] = (uint8_t*) d;
+            got += bytes;
+        } else {
+            whole = false;
+            break;
+        }
+    }
+    if (!whole) {   // give the attempt back and take what the old prefixes were (the RAM left may be less)
+        for (size_t i = 0; i < nd.size(); ++i) {
+            if (nd[i] == nullptr) continue;
+            (void) cudaHostUnregister(p.base + p.off[i]);
+            (void) cudaGetLastError();
+        }
+        int64_t kept = p.backed;
+        for (int64_t pg = kept; pg > 0; pg = pg > p.unit ? pg - p.unit : 0) {   // step by step back down
+            bool fits = true;
+            std::vector<uint8_t*> rd(p.per.size(), nullptr);
+            uint64_t rb = 0;
+            for (size_t i = 0; i < p.per.size() && fits; ++i) {
+                void* d = nullptr;
+                const uint64_t bytes = kv_host_prefix_bytes(pg, p.per[i], 4096);
+                if (cudaHostRegister(p.base + p.off[i], (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped) ==
+                        cudaSuccess && cudaHostGetDevicePointer(&d, p.base + p.off[i], 0) == cudaSuccess && d != nullptr) {
+                    rd[i] = (uint8_t*) d;
+                    rb += bytes;
+                } else fits = false;
+            }
+            if (fits) {
+                p.d = rd;
+                p.backed = pg;
+                g_kv_host_bytes += rb;
+                host_apply(p, p.d.data());
+                ok = false;
+                return rb;
+            }
+            for (size_t i = 0; i < rd.size(); ++i) {
+                if (rd[i] == nullptr) continue;
+                (void) cudaHostUnregister(p.base + p.off[i]);
+                (void) cudaGetLastError();
+            }
+        }
+        p.backed = 0;
+        host_apply(p, p.d.data());
+        ok = false;
+        return 0;
+    }
+    p.d = nd;
+    p.backed = pages;
+    g_kv_host_bytes += got;
+    host_apply(p, p.d.data());
+    ok = true;
+    std::fprintf(stderr, "saguaro: KV streaming: the host copy backs %lld cells now (%.2f GiB pinned for K/V in all, "
+                         "%lld ms)\n", (long long) (pages * p.page_size), (double) g_kv_host_bytes.load() / 1073741824.0,
+                 (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+                     .count());
+    return got;
+}
 #endif
 }  // namespace
 bool qsa_host_grow(const QsaState& st, int64_t cells) {
@@ -750,39 +902,87 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
     if (st.host_elastic < 0) return true;
     std::lock_guard<std::mutex> lk(g_host_mu);
     HostPool& p = *g_host_pools[(size_t) st.host_elastic];
-    const int64_t pages = (std::max<int64_t>(cells, 1) + p.page_size - 1) / p.page_size;
-    const std::vector<int64_t> had = p.pinned;   // (a failed step gives back what it pinned, every array)
-    for (size_t i = 0; i < p.per.size(); ++i) {
-        const int64_t want = host_pieces(p, i, pages);
-        while (p.pinned[i] < want) {
-            uint8_t* a = p.base + p.off[i] + (uint64_t) p.pinned[i] * kHostPiece;
-            void* d = nullptr;
-            const bool capped = host_cap() > 0 && g_kv_host_bytes.load() + kHostPiece > host_cap();
-            const cudaError_t e = capped ? cudaErrorMemoryAllocation
-                                         : cudaHostRegister(a, (size_t) kHostPiece, cudaHostRegisterPortable | cudaHostRegisterMapped);
-            if (e != cudaSuccess || cudaHostGetDevicePointer(&d, a, 0) != cudaSuccess || d != (void*) a) {
-                if (e == cudaSuccess) (void) cudaHostUnregister(a);   // (the device address is not the host's)
-                (void) cudaGetLastError();
-                g_host_failed = true;
-                std::fprintf(stderr, "saguaro: KV streaming: pinning more of a slot's host copy failed (%s; %.2f GiB pinned "
-                                     "for K/V in all)\n", capped ? "SAGUARO_KV_HOST_MIB reached" : cudaGetErrorString(e),
-                             (double) g_kv_host_bytes.load() / 1073741824.0);
-                for (size_t j = 0; j < p.per.size(); ++j)
-                    for (; p.pinned[j] > had[j]; --p.pinned[j]) {
-                        uint8_t* q = p.base + p.off[j] + (uint64_t) (p.pinned[j] - 1) * kHostPiece;
-                        (void) cudaHostUnregister(q);
-                        (void) madvise(q, (size_t) kHostPiece, MADV_DONTNEED);
-                        g_kv_host_bytes -= kHostPiece;
-                    }
-                (void) cudaGetLastError();
-                return false;
-            }
-            ++p.pinned[i];
-            g_kv_host_bytes += kHostPiece;
+    const int64_t pages = kv_host_pages_for(cells, p.page_size);
+    if (p.prefix) {   // P124e: one registration per array - grow the prefixes, remap, done (the device must be quiet)
+        const int64_t target = kv_host_grow_pages(p.backed, std::min(pages, p.pages), p.pages, p.unit);
+        if (target <= p.backed) { g_host_failed = false; return true; }
+        const uint64_t want = host_prefix_bytes(p, target);
+        const uint64_t have = host_prefix_bytes(p, p.backed);
+        const bool capped = host_cap() > 0 && g_kv_host_bytes.load() + (want - have) > host_cap();
+        if (!capped) {   // (the card may be reading the current prefixes: stop it before the remap)
+            const strata::core::OnDevice on(p.dev);
+            (void) cudaDeviceSynchronize();
+            (void) cudaGetLastError();
         }
+        bool ok = false;
+        if (!capped) (void) host_prefix_reregister_locked(p, target, ok);
+        if (!ok && !capped) {   // the expert RAM tier gives way, then one try more
+            if (host_relief(want - have) > 0) {
+                const strata::core::OnDevice on(p.dev);
+                (void) cudaDeviceSynchronize();
+                (void) cudaGetLastError();
+                (void) host_prefix_reregister_locked(p, target, ok);
+            }
+        }
+        if (!ok) {
+            g_host_failed = true;
+            std::fprintf(stderr, "saguaro: KV streaming: backing more of a host copy failed (%s; %.2f GiB pinned for "
+                                 "K/V in all)\n", capped ? "SAGUARO_KV_HOST_MIB reached" : "RAM or the driver refused",
+                         (double) g_kv_host_bytes.load() / 1073741824.0);
+            return false;
+        }
+        g_host_failed = false;
+        return true;
     }
-    g_host_failed = false;
-    return true;
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<int64_t> had = p.pinned;   // (a failed step gives back what it pinned, every array)
+    for (int round = 0;; ++round) {
+        bool failed = false;
+        for (size_t i = 0; i < p.per.size() && !failed; ++i) {
+            const int64_t want = host_pieces(p, i, pages);
+            while (p.pinned[i] < want) {
+                uint8_t* a = p.base + p.off[i] + (uint64_t) p.pinned[i] * kHostPiece;
+                void* d = nullptr;
+                const bool capped = host_cap() > 0 && g_kv_host_bytes.load() + kHostPiece > host_cap();
+                const cudaError_t e = capped ? cudaErrorMemoryAllocation
+                                             : cudaHostRegister(a, (size_t) kHostPiece, cudaHostRegisterPortable | cudaHostRegisterMapped);
+                if (e != cudaSuccess || cudaHostGetDevicePointer(&d, a, 0) != cudaSuccess || d != (void*) a) {
+                    if (e == cudaSuccess) (void) cudaHostUnregister(a);   // (the device address is not the host's)
+                    (void) cudaGetLastError();
+                    failed = true;
+                    break;
+                }
+                ++p.pinned[i];
+                g_kv_host_bytes += kHostPiece;
+            }
+        }
+        if (!failed) {
+            if (round > 0 || p.pinned != had)
+                std::fprintf(stderr, "saguaro: KV streaming: the host copy backs %lld cells now (%.2f GiB pinned for K/V "
+                                     "in all)\n", (long long) (std::min(pages, p.pages) * p.page_size),
+                             (double) g_kv_host_bytes.load() / 1073741824.0);
+            g_host_failed = false;
+            return true;
+        }
+        uint64_t need = 0;   // the bytes this grow still wants (what a give-way must free at least)
+        for (size_t i = 0; i < p.per.size(); ++i)
+            need += (uint64_t) std::max<int64_t>(0, host_pieces(p, i, pages) - p.pinned[i]) * kHostPiece;
+        for (size_t j = 0; j < p.per.size(); ++j)
+            for (; p.pinned[j] > had[j]; --p.pinned[j]) {
+                uint8_t* q = p.base + p.off[j] + (uint64_t) (p.pinned[j] - 1) * kHostPiece;
+                (void) cudaHostUnregister(q);
+                (void) madvise(q, (size_t) kHostPiece, MADV_DONTNEED);
+                g_kv_host_bytes -= kHostPiece;
+            }
+        (void) cudaGetLastError();
+        if (round == 0 && host_relief(need) > 0) continue;   // the expert tier gave way: try the whole step once more
+        const bool capped = host_cap() > 0 && g_kv_host_bytes.load() + kHostPiece > host_cap();
+        g_host_failed = true;
+        std::fprintf(stderr, "saguaro: KV streaming: pinning more of a slot's host copy failed (%s; %.2f GiB pinned "
+                             "for K/V in all)\n", capped ? "SAGUARO_KV_HOST_MIB reached" : "RAM or the driver refused",
+                     (double) g_kv_host_bytes.load() / 1073741824.0);
+        return false;
+    }
 #else
     (void) st; (void) cells;
     return true;
@@ -793,7 +993,20 @@ uint64_t qsa_host_trim(const QsaState& st, int64_t cells) {
     if (st.host_elastic < 0) return 0;
     std::lock_guard<std::mutex> lk(g_host_mu);
     HostPool& p = *g_host_pools[(size_t) st.host_elastic];
-    const int64_t pages = (std::max<int64_t>(cells, 1) + p.page_size - 1) / p.page_size;
+    const int64_t pages = kv_host_pages_for(cells, p.page_size);
+    if (p.prefix) {   // give the prefixes back to the step the conversation still needs (P124e)
+        const int64_t keep = kv_host_trim_pages(p.backed, std::min(pages, p.pages), p.unit, p.unit);
+        if (keep >= p.backed) return 0;
+        {   // nothing on the card may still read or write the bytes given back
+            const strata::core::OnDevice on(p.dev);
+            (void) cudaDeviceSynchronize();
+            (void) cudaGetLastError();
+        }
+        const uint64_t before = g_kv_host_bytes.load();
+        bool ok = false;
+        (void) host_prefix_reregister_locked(p, keep, ok);
+        return before - g_kv_host_bytes.load();
+    }
     bool more = false;
     for (size_t i = 0; i < p.per.size(); ++i) more = more || p.pinned[i] > std::max<int64_t>(1, host_pieces(p, i, pages));
     if (!more) return 0;
@@ -814,6 +1027,7 @@ uint64_t qsa_host_backed_bytes(const QsaState& st) {
     if (st.host_elastic < 0) return 0;
     std::lock_guard<std::mutex> lk(g_host_mu);
     const HostPool& p = *g_host_pools[(size_t) st.host_elastic];
+    if (p.prefix) return host_prefix_bytes(p, p.backed);
     uint64_t n = 0;
     for (const int64_t k : p.pinned) n += (uint64_t) k * kHostPiece;
     return n;
@@ -1076,6 +1290,8 @@ int64_t qsa_slot_budget_release(int dev, int64_t n) {
 namespace {
 std::mutex g_relief_mu;
 VramRelief g_relief;
+std::mutex g_host_relief_mu;
+HostRelief g_host_relief;
 }  // namespace
 void set_vram_relief(VramRelief f) {
     std::lock_guard<std::mutex> lk(g_relief_mu);
@@ -1088,6 +1304,20 @@ uint64_t vram_relief(int dev, uint64_t bytes) {
         f = g_relief;
     }
     return f ? f(dev, bytes) : 0;
+}
+// P124e: the same idea for the host's RAM - a K/V grow that RAM refuses asks the resident expert tier, which gives
+// way from its coldest experts (set_host_relief in generate.cpp); returns the bytes it handed back, 0 when none.
+void set_host_relief(HostRelief f) {
+    std::lock_guard<std::mutex> lk(g_host_relief_mu);
+    g_host_relief = std::move(f);
+}
+uint64_t host_relief(uint64_t bytes) {
+    HostRelief f;
+    {
+        std::lock_guard<std::mutex> lk(g_host_relief_mu);
+        f = g_host_relief;
+    }
+    return f ? f(bytes) : 0;
 }
 int64_t qsa_slot_budget_chunks(int dev, int64_t* free, int64_t* made) {
     std::lock_guard<std::mutex> lk(g_slot_mu);
@@ -1698,7 +1928,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     uint8_t* hel[4] = {};   // SAGUARO_KV_HOST_ELASTIC: an elastic slot's host arrays, addresses only until pinned
 #ifndef _WIN32
     if (((p.mode == 1 && (slot_G > 0 || g_host_main)) || (p.mode == 2 && host_elastic)) && host_elastic_on())
-        st.host_elastic = host_pool_make(kv_per_slot(s, st.kv_hybrid, st.kv_q4, st.kv_int8), pages, s.page_size, hel);
+        st.host_elastic = host_pool_make(kv_per_slot(s, st.kv_hybrid, st.kv_q4, st.kv_int8), pages, s.page_size, hel, st);
 #endif
     if (st.host_elastic >= 0) {   // (kv_per_slot's order, as the carve below)
         if (st.kv_hybrid) { st.host.k_q = (int8_t*) hel[0]; st.host.k_scale = (uint16_t*) hel[1]; st.host.v_q4 = hel[2]; }

@@ -3456,6 +3456,61 @@ uint64_t FileExpertSource::release(int64_t layer, int64_t expert) {
 #endif
 }
 
+// P124e: a growing conversation's K/V has run out of RAM: the resident complement gives way from its coldest end
+// (the copy is laid out hottest-first, so walking its slots by descending arena offset IS coldest-first, as
+// DS4's take-from-experts does in VRAM).  A trimmed slot goes back to `kNoCacheComplement`, so its reads fall
+// through to the mapped files; its pages are madvised away and its working-set lock undone.  The registered
+// prefix (the PCIe-read share) is never trimmed; neither can a cudaHostAlloc arena be.  The caller has left the
+// device quiet and the engine asks only when a K/V pin failed, so no window is mid-copy out of these bytes.
+uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
+    if (bytes == 0 || !complement_ready_ || complement_host_ == nullptr || exchange_storage_.active()) return 0;
+    if (complement_pinned_ && !complement_registered_) return 0;   // cudaHostAlloc: the driver holds it whole
+#if defined(_WIN32)
+    return 0;   // (the complement's pages are VirtualLock'ed whole: giving a slice back waits for a Windows rig)
+#else
+    const uint64_t page = 4096;
+    const uint64_t keep_below = complement_registered_ ? complement_pin_limit_ : 0;   // the registered prefix stays
+    struct Slot {
+        size_t index;
+        uint64_t off, len;
+    };
+    std::vector<Slot> slots;
+    for (size_t i = 0; i < complement_offsets_.size(); ++i) {
+        if (complement_offsets_[i] == kNoComplement) continue;
+        const uint64_t len = layer_blob_bytes_[(size_t) (i / (size_t) n_expert_)];
+        slots.push_back({i, complement_offsets_[i], len});
+    }
+    std::sort(slots.begin(), slots.end(), [](const Slot& a, const Slot& b) { return a.off > b.off; });
+    uint64_t gave = 0;
+    for (const Slot& s : slots) {
+        if (gave >= bytes) break;
+        if (s.off < keep_below) continue;   // (straddling or inside the registered prefix: stays)
+        // page-run [lo, hi) of this slot's bytes (a shared boundary page stays for the neighbour)
+        const uint64_t lo = (s.off + page - 1) / page * page;
+        const uint64_t hi = (s.off + s.len) / page * page;
+        complement_offsets_[s.index] = kNoComplement;
+        if (hi > lo) {
+            // its working-set lock first (lock_resident covered [lock_off, lock_off + locked) when not registered)
+            const uint64_t a = (uint64_t) (uintptr_t) (complement_host_ + lo);
+            const uint64_t lock_lo = (uint64_t) (uintptr_t) complement_host_ + complement_lock_off_;
+            const uint64_t lock_hi = lock_lo + complement_locked_;
+            const uint64_t u0 = std::max(a, lock_lo), u1 = std::min(a + (hi - lo), lock_hi);
+            if (!complement_registered_ && complement_locked_ > 0 && u1 > u0) {
+                strata::platform::unlock_resident((void*) u0, u1 - u0);
+                complement_locked_ -= u1 - u0;
+            }
+            (void) madvise((void*) ((uintptr_t) complement_host_ + lo), (size_t) (hi - lo), MADV_DONTNEED);
+        }
+        gave += s.len;
+    }
+    if (gave > 0)
+        std::fprintf(stderr, "FileExpertSource: the resident expert tier gave way to a growing conversation's K/V: "
+                             "%.2f GiB of its coldest experts handed back (%.2f GiB were resident); their reads go "
+                             "back to the files\n", (double) gave / 1073741824.0, (double) complement_bytes_ / 1073741824.0);
+    return gave;
+#endif
+}
+
 bool FileExpertSource::pin_cache_complement(
     const ExpertCache& cache, std::string& err, bool pin,
     const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs, int64_t lend_from_slot,

@@ -5741,11 +5741,20 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "saguaro generate: session_init failed\n");
             return 1;
         }
-        if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1)
+        if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1) {
+            // P124e: with an elastic host copy this counts only the backed start (~32768 cells), whatever
+            // --max-context says - the copy grows with the conversation, not with the setting.
+            const uint64_t pin = strata::core::qsa_kv_host_bytes(), res = strata::core::qsa_kv_host_reserved_bytes();
+            char grow_note[160] = "";
+            if (pin < res)
+                std::snprintf(grow_note, sizeof grow_note,
+                              "; it grows with the conversation (%.2f GiB if one filled --max-context)",
+                              (double) res / 1073741824.0);
             std::fprintf(stderr, "saguaro generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
-                                 "%.2f GiB of pinned RAM\n",
+                                 "%.2f GiB of pinned RAM%s\n",
                          (long long) (ss.qsa_states[ss.qsa_primary()].n_slots * 4),
-                         (long long) o.max_context, (double) strata::core::qsa_kv_host_bytes() / 1073741824.0);
+                         (long long) o.max_context, (double) pin / 1073741824.0, grow_note);
+        }
         // the PLE block above built everything but the history, which session_init has just carved
         ss.ple.hist = ss.ple_hist;
         // (#167) generate mode starts from an empty sequence, and nothing else zeroes this state before the prompt
@@ -6194,20 +6203,11 @@ int main(int argc, char** argv) {
             }
         }
     }
-    if (const uint64_t all = strata::core::qsa_kv_host_reserved_bytes(); all > 0) {   // (the line after the main session counts its first stage only)
-        const uint64_t now = strata::core::qsa_kv_host_bytes();
-        std::fprintf(stderr, "saguaro generate: KV streaming: %.2f GiB of pinned RAM for the K/V of every session at "
-                             "--max-context %lld (the solo session %.2f GiB, the batch slots and the drafters %.2f GiB)",
-                     (double) now / 1073741824.0, (long long) o.max_context, (double) kv_host_solo / 1073741824.0,
-                     (double) (now - kv_host_solo) / 1073741824.0);
-        if (now < all)   // SAGUARO_KV_HOST_ELASTIC
-            std::fprintf(stderr, "; the slots' copies grow with their conversations, %.2f GiB if every one were full",
-                         (double) all / 1073741824.0);
-        std::fprintf(stderr, "\n");
-    }
     // SAGUARO_KV_HOST_ELASTIC: the solo session's host copies (every stage, its drafter) pinned for `cells` before anything
     // writes them: a request's prompt and max_new, a restored conversation.  They only grow (the conversation they hold
-    // is parked from them after a new request has started)
+    // is parked from them after a new request has started).  P124e: `cells` 1 pins one growth step (about 32768 cells) -
+    // the start every conversation pays at load, the same at --max-context 262144 and 1048576 - done BEFORE the line
+    // below, which is the manager's load-time number.
     auto solo_host_fit = [&](int64_t cells) -> bool {
         if (!strata::core::session_host_fit(ss, cells)) return false;
         for (auto& st : stages)
@@ -6217,6 +6217,22 @@ int main(int argc, char** argv) {
     if (!solo_host_fit(1)) {
         std::fprintf(stderr, "saguaro generate: no RAM to pin the first cells of the solo session's K/V copy\n");
         return 1;
+    }
+    if (const uint64_t all = strata::core::qsa_kv_host_reserved_bytes(); all > 0) {   // (the line after the main session counts its first stage only)
+        const uint64_t now = strata::core::qsa_kv_host_bytes();
+        uint64_t solo_now = kv_host_solo;
+        if (now < all) {   // elastic: the solo line is what it holds BACKED now, not what the whole context would take
+            solo_now = strata::core::session_host_backed(ss);
+            for (auto& st : stages) solo_now += strata::core::session_host_backed(st->ss);
+        }
+        std::fprintf(stderr, "saguaro generate: KV streaming: %.2f GiB of pinned RAM for the K/V of every session at "
+                             "--max-context %lld (the solo session %.2f GiB, the batch slots and the drafters %.2f GiB)",
+                     (double) now / 1073741824.0, (long long) o.max_context, (double) solo_now / 1073741824.0,
+                     (double) (now > solo_now ? now - solo_now : 0) / 1073741824.0);
+        if (now < all)   // SAGUARO_KV_HOST_ELASTIC
+            std::fprintf(stderr, "; the sessions' copies grow with their conversations, %.2f GiB if every one were full",
+                         (double) all / 1073741824.0);
+        std::fprintf(stderr, "\n");
     }
     // SAGUARO_KV_VRAM_ELASTIC needs the elastic slots' budget to grow from; when the batch ended up without them (off,
     // or no slot fitted), the solo session's VRAM pools are backed whole now, as when they were carved
@@ -6706,6 +6722,23 @@ int main(int argc, char** argv) {
     if (srcp == &arena_src && strata::kernels::cpu::active_numa_split().on && !strata::kernels::cpu::active_numa_split().test)
         std::fprintf(stderr, "saguaro generate: NUMA split on, but this model's experts come from the arena path: memory is "
                              "not placed per node (known limitation)\n");
+    // P124e: a K/V host copy that cannot pin for lack of RAM asks HERE first - the resident expert tier gives way from
+    // its coldest end (as DS4's take-from-experts does in VRAM), and a conversation is only parked when that is not
+    // enough.  The card must be quiet: a trimmed expert must not be mid-DMA out of the complement.
+    strata::core::set_host_relief([srcp](uint64_t bytes) -> uint64_t {
+        if (srcp == nullptr || bytes == 0) return 0;
+        int ndev = 0;
+        if (cudaGetDeviceCount(&ndev) == cudaSuccess)
+            for (int d = 0; d < ndev; ++d) {
+                const strata::core::OnDevice on(d);
+                (void) strata::core::device_sync();
+                (void) cudaGetLastError();
+            }
+        return srcp->relieve_ram(bytes);
+    });
+    struct HostReliefScope {
+        ~HostReliefScope() { strata::core::set_host_relief(nullptr); }
+    } host_relief_scope;
     if (pool.is_hybrid() && pool.affinity() != strata::kernels::cpu::PoolAffinity::All) {
         const char* aff_str = pool.affinity() == strata::kernels::cpu::PoolAffinity::PCores ? "p-cores" :
                               pool.affinity() == strata::kernels::cpu::PoolAffinity::All ? "all" : "auto";

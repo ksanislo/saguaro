@@ -402,6 +402,11 @@ int64_t qsa_slot_budget_release(int dev, int64_t n);
 using VramRelief = std::function<uint64_t(int dev, uint64_t bytes)>;
 void set_vram_relief(VramRelief f);
 uint64_t vram_relief(int dev, uint64_t bytes);
+/// P124e host relief: a K/V host-copy grow (qsa_host_grow) that the RAM refuses asks for `bytes`; the server's handler
+/// gives the resident expert tier's coldest bytes back; returns the bytes freed, 0 when none.
+using HostRelief = std::function<uint64_t(uint64_t bytes)>;
+void set_host_relief(HostRelief f);
+uint64_t host_relief(uint64_t bytes);
 /// Chunks the states still lack to hold `cells` cells.
 int64_t qsa_slots_need(const std::vector<const QsaState*>& states, int64_t cells);
 /// Backs `cells` cells in every state (all on one device): all or nothing, false when the budget is short.  New chunks
