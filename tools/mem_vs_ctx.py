@@ -325,14 +325,18 @@ def wait_health(port: int, timeout: float = HEALTH_S, host: str = "127.0.0.1",
 
 def stop_server(port: int, proc: subprocess.Popen | None = None, wait_s: float = STOP_S,
                 proc_dir="/proc") -> bool:
-    """Stop the run: SIGTERM the port's owner (the server ends the engine on its way out), wait for the port
-    to fall free, SIGKILL whatever of the tree is still alive. True when the port is free again."""
+    """Stop OUR run: SIGTERM the server - the port's owner when that owner is part of our own tree (the
+    server ends the engine on its way out), our own server when nothing of ours holds the port yet; a
+    stranger that took the port after our server died is never signalled. Wait for the port to fall free,
+    SIGKILL whatever of our tree is still alive. True when the port is free again."""
     pid = port_owner(port, proc_dir)
-    if pid is None and proc is not None and proc.poll() is None:
-        pid = proc.pid
-    tree = process_tree(pid, proc_dir) if pid is not None else []
+    tree = process_tree(proc.pid, proc_dir) if proc is not None else []
     if proc is not None and proc.pid not in tree:
         tree.append(proc.pid)
+    if proc is not None and (pid is None or pid not in tree):
+        # (nothing of ours holds the port: the server had not bound it yet, or ours died and someone else
+        #  took it - in both cases the target is our own server, and a stranger never gets a signal)
+        pid = proc.pid if proc.poll() is None else None
     if pid is not None:
         try:
             os.kill(pid, signal.SIGTERM)

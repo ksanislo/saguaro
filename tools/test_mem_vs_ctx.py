@@ -11,6 +11,7 @@ start waits for /health ok, the port's owner is the server, and the stop frees t
 from __future__ import annotations
 
 import os
+import signal
 import socket
 import sys
 import tempfile
@@ -246,6 +247,28 @@ class TableAndVerdictTests(unittest.TestCase):
                                "budget": []}])
         self.assertFalse(ok)
         self.assertIn("nothing", why)
+
+
+class StopServerTests(unittest.TestCase):
+    def test_a_stranger_that_took_the_port_gets_no_signal(self):
+        # (the run's server (77) and engine (88) are ours; 500 holds the port instead - the pre-check passed,
+        #  the server died first, someone else bound it: stop_server must stop OUR tree and leave 500 alone)
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            fake_proc(tmp, [(77, 1, "server"), (88, 77, "engine"), (500, 1, "stranger")],
+                      "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  "
+                      "timeout inode\n" + tcp_line(8093, 555))
+            fd = tmp / "500" / "fd"
+            fd.mkdir()
+            os.symlink("socket:[555]", fd / "4")
+            proc = SimpleNamespace(pid=77, poll=lambda: None, wait=lambda **kw: None)
+            with mock.patch.object(os, "kill") as killed:
+                freed = MV.stop_server(8093, proc, wait_s=0.0, proc_dir=str(tmp))
+            self.assertFalse(freed)                                # (the port is still the stranger's)
+            targets = {c.args for c in killed.call_args_list}
+            self.assertNotIn(500, {p for p, _s in targets})
+            self.assertIn((77, signal.SIGTERM), targets)           # (our own server got the TERM)
+            self.assertIn((88, signal.SIGKILL), targets)           # (and our own leftover the KILL)
 
 
 class PlatformTests(unittest.TestCase):
