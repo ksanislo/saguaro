@@ -411,6 +411,28 @@ int main() {
         check(!held_by_slot(live, std::vector<int32_t>{1, 2, 9, 4, 5}), "another branch does not");
         check(!held_by_slot(std::vector<int32_t>{}, std::vector<int32_t>{1}), "an empty session has nothing to own");
     }
+    {   // P124b: where a read cancelled INSIDE a part lands - the deepest checkpoint of this prompt at or below the
+        // position the read reported; the session goes back there, the next switch parks it, the request coming back
+        // reuses the read part instead of re-reading the whole prompt (mortar, 11-25: 16,384 of 105,603 lost)
+        using strata::program::conv_cache::cut_read_landing;
+        const auto all_on = [](size_t) { return true; };
+        const int64_t grid[] = {16384, 32768, 49152};   // a 105,603-token read at the default --prompt-cache-every
+        check(cut_read_landing(grid, 3, 40000, all_on) == 1, "the deepest checkpoint at or below the position reached");
+        check(cut_read_landing(grid, 3, 16384, all_on) == 0, "the edge counts: a checkpoint AT the position lands");
+        check(cut_read_landing(grid, 3, 16383, all_on) < 0, "a stop before the first checkpoint has nothing to land on");
+        check(cut_read_landing(grid, 3, 0, all_on) < 0, "cancelled before the first chunk: nothing read, nothing to keep");
+        check(cut_read_landing(grid, 0, 99999, all_on) < 0, "no checkpoints: no landing");
+        check(cut_read_landing(grid, 3, 49152, all_on) == 2, "a checkpoint exactly at the reached position is the deepest");
+        const int64_t unsorted[] = {16384, 49152, 32768};
+        check(cut_read_landing(unsorted, 3, 40000, all_on) == 2, "a chain out of order still picks the deepest under it");
+        const bool off_path[] = {true, false, true};
+        check(cut_read_landing(grid, 3, 40000, [&](size_t i) { return off_path[i]; }) == 0,
+              "a deeper checkpoint that is not this prompt's is not a landing point");
+        check(cut_read_landing(grid, 3, 49152, [&](size_t i) { return off_path[i]; }) == 2,
+              "off the path above the position: the deepest ON it under the position still lands");
+        const int64_t zero[] = {0, 16384};
+        check(cut_read_landing(zero, 2, 40000, all_on) == 1, "an empty checkpoint is not a landing point");
+    }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;
 }

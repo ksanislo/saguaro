@@ -22604,6 +22604,48 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: %lld tokens live\n",
                              (long long) pp_reached);
             }
+            if (cancelled && !live_ok && !nf_hit && !read_vram && yielded_at < 0 && pp_reached > 0 && !pp_exact &&
+                o.prompt_cache > 0 && (req_ckpt || req_cont)) {
+                // P124b: the read was cut INSIDE a window or a batched/pipelined part (pp_exact false: the keep above
+                // needs the session to sit exactly at a reported position), so what it read would be thrown away: the
+                // next request's switch parks finished turns, a kept-but-nowhere-to-land read nothing, and the prompt
+                // came back read from 0 (mortar, 11-25: a low read paused at 16,384 of 105,603, everything lost).
+                // The checkpoints the read took hold the complete running state at their positions: the deepest one of
+                // this prompt at or below the position reached goes back into the session (conv_cache.hpp), which then
+                // stays the live conversation exactly like a finished turn's - the next request continues from it, or
+                // the switch to another conversation PARKS it with its K/V, its checkpoints and its tokens, park
+                // budget and disk spill as for any parked conversation, and the request coming back reuses it.
+                std::vector<int64_t> land_lens;
+                for (const ConvCheckpoint& c : checks) land_lens.push_back((int64_t) c.ids.size());
+                const int64_t land = strata::program::conv_cache::cut_read_landing(
+                    land_lens.data(), land_lens.size(), pp_reached, [&](size_t i) {
+                        const ConvCheckpoint& c = checks[i];
+                        return c.stage_parts.size() == stages.size() &&
+                               imgs_below(req_imgs, (int64_t) c.ids.size()) == c.imgs &&
+                               std::equal(c.ids.begin(), c.ids.end(), cur.begin(), cur.end(),
+                                          [](int32_t a, int64_t b) { return (int64_t) a == b; });
+                    });
+                if (land >= 0) {
+                    const ConvCheckpoint& c = checks[(size_t) land];
+                    (void) strata::core::device_sync();   // (nothing of the cut read may still be writing the session)
+                    bool back = checkpoint_restore(c, ss, g);
+                    for (size_t i = 0; back && i < stages.size(); ++i) {
+                        const strata::core::OnDevice on(stages[i]->dev);
+                        back = checkpoint_restore(c.stage_parts[i], stages[i]->ss, g);
+                    }
+                    if (back) {
+                        live.assign(c.ids.begin(), c.ids.end());
+                        live_imgs = c.imgs;
+                        live_ok = true;
+                        std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: %lld tokens "
+                                             "live (its checkpoint: the read stopped inside a part)\n",
+                                     (long long) c.ids.size());
+                    } else {
+                        std::fprintf(stderr, "saguaro serve: the cancelled read could not go back to its checkpoint "
+                                             "of %lld tokens: what it read is dropped\n", (long long) c.ids.size());
+                    }
+                }
+            }
             static const bool state_hash = std::getenv("SAGUARO_STATE_HASH") != nullptr;
             if (state_hash && !cancelled && o.prompt_cache > 0) {   // every finished request, ckpt=0 too (parity gates)
                 // DEBUG: a fingerprint of every part of the session over the positions it holds ([0, L)), and
