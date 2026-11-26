@@ -346,7 +346,7 @@ class Fit(unittest.TestCase):
 
 
 class Picker(unittest.TestCase):
-    def rows(self, cards, prev=None):
+    def rows(self, cards, prev=None, ram=251.0):
         got = {}
 
         def pick(title, intro, opts, default, yes, *x):
@@ -354,18 +354,27 @@ class Picker(unittest.TestCase):
             return default
         a = args(model=None)
         with patch.object(maya, "choose", pick), patch.object(maya.S, "gpus", return_value=cards), \
-                patch.object(maya, "mem_gb", return_value=(251.0, 200.0)), patch.object(maya, "WIN", False):
+                patch.object(maya, "mem_gb", return_value=(ram, ram - 51.0)), patch.object(maya, "WIN", False):
             fam = maya.choose_family(a, prev or {})
         return fam, got
 
-    def test_recommended_on_one_or_two_small_cards(self):
+    def test_qfn_wins_on_one_or_two_small_cards_now(self):
+        """P124o: on one or two T4s the setup now recommends Qwen3.8-Flash-Next (its UD-Q4_K_XL runs there -
+        the measured split); Inkling 2 Mini stays offered, unmarked."""
         for n in (1, 2):
             fam, got = self.rows([t4(i) for i in range(n)])
-            self.assertEqual(fam, "ik2", n)
-            label, note, about = got["rows"][maya.FAMILIES.index("ik2")]
-            self.assertEqual((label, note), ("Inkling 2 Mini", "recommended for this PC"))
-            for part in ("one or two", "16 GB", "8 GB", "AMD", "40 tok/s", "51 tok/s", "Apache 2.0"):
-                self.assertIn(part, about)
+            self.assertEqual(fam, "qfn", n)
+            self.assertEqual(got["rows"][maya.FAMILIES.index("ik2")][1], "new")
+            self.assertIn("recommended for this PC", got["rows"][maya.FAMILIES.index("qfn")][1])
+
+    def test_recommended_where_no_qfn_quant_runs(self):
+        """... and on a PC under every QFN quant's minimum it is the recommendation again (12 GB card, 13 GB RAM)."""
+        fam, got = self.rows([t4(0, 12.0)], ram=13.0)
+        self.assertEqual(fam, "ik2")
+        label, note, about = got["rows"][maya.FAMILIES.index("ik2")]
+        self.assertEqual((label, note), ("Inkling 2 Mini", "recommended for this PC"))
+        for part in ("one or two", "16 GB", "8 GB", "AMD", "40 tok/s", "51 tok/s", "Apache 2.0"):
+            self.assertIn(part, about)
 
     def test_four_t4s_get_hy4_and_a_setup_before_wins(self):
         fam, got = self.rows([t4(i) for i in range(4)])

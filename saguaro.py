@@ -723,6 +723,10 @@ QFN_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # (C18: past 25
 QFN_DEFAULT_CONTEXT = 65536                        # (measured: 64K, prompts up to 60K tokens)
 QFN_RAM_SPARE_GB = 20                              # (RAM left beside the RAM tier: the OS, the server, the page cache)
 QFN_DEFAULT_QUANT = "ud-q4_k_xl"
+# P124o: the order the setup recommends QFN's quants by - the largest that RUNS on the PC (qfn_quant_fit, its own fit
+# check) first, as Strata sizes the model to the memory (the smaller GSQ-RCO and Coder quants suit one 16-24 GB card,
+# README). Q8_0 and CYBER-FROST's own quant are accuracy picks, never a fit-based default, and stay out of this.
+QFN_RECOMMEND = (QFN_DEFAULT_QUANT, Q.GSQ_IQ3_S, Q.GSQ_CODER_IQ1_M)
 QFN_VBUILD = ROOT / "build-vision-qfn"             # QFN's picture reader's build folder (engines/qfn/tools/vision,
                                                    #  the llama.cpp tree at engines/qfn's pin): beside vision-glm's,
                                                    #  which is built from tools/vision at the GLM path's pin
@@ -2220,6 +2224,8 @@ def choose_family(a, prev: dict) -> str:
     except Exception:  # noqa: BLE001 - no GPU tools: no figure for this PC
         cards, have = [], None
     fit = family_fit(cards, mem_gb()[0] if cards else 0.0, backend) if not metal else None
+    # P124o: the QFN row's reason line names the quant of it this PC would get (its largest that runs).
+    qfn_q = qfn_recommended_quant(cards, mem_gb()[0], backend) if fit == "qfn" else None
     default = setup_family(prev) if prev else fit or "glm"
     if family_unavailable(default, backend):
         default = "glm"
@@ -2244,7 +2250,8 @@ def choose_family(a, prev: dict) -> str:
              "up to a 1M context" + ("; or Project Maya's own GGUF quants (MiniMax-M3.1-Flash-Maya-XS ~93 GB, -Maya-S ~122 "
                                      "GB: NVIDIA from V100 on and AMD)"
                                      if any(map(mm3_gguf_published, ("gguf-xs", "gguf-s"))) else "") + "."),
-            (QFN_SHOWN, "new", qfn_about()),
+            (QFN_SHOWN, (f"recommended for this PC ({Q.QFN_QUANTS[qfn_q]})" if qfn_q else None)
+             if fit == "qfn" else "new", qfn_about()),
             (HY4_SHOWN, "recommended for this PC" if fit == "hy4" else "new", hy4_about(here)),
             (IK2_SHOWN, "recommended for this PC" if fit == "ik2" else "new", ik2_about())]
     for i, f in enumerate(FAMILIES):   # (a model this PC's GPUs have no engine for: listed, with the reason)
@@ -7725,23 +7732,45 @@ def qfn_quant_fit(quant: str, gpus: list, ram: float) -> str | None:
     return None
 
 
+def qfn_recommended_quant(cards: list, ram: float, backend: str = "cuda") -> str | None:
+    """The quant the setup recommends Qwen3.8-Flash-Next in on these cards and this RAM (P124o): the largest of
+    QFN_RECOMMEND (UD-Q4_K_XL before GSQ IQ3_S before the Coder IQ1_M) its own fit check lets RUN
+    (qfn_quant_fit), or None where none of them runs at all.  Priced on the cards the QFN setup would take from
+    these: AMD its one RDNA GPU (the largest, no APU - set_up_qfn refuses one), NVIDIA the group qfn_fit's picker
+    takes, Pascal and newer.  A PC below every minimum still gets the model question - Inkling's rule or no
+    recommendation - only the quant's never a recommendation of its own."""
+    if backend == "hip":
+        gfx = [g for g in cards if str(g.get("arch") or "").startswith("gfx")
+               and not hip_unified_memory(g) and not g.get("unified_memory")]
+        gpus = [max(gfx, key=lambda g: float(g.get("vram_gb") or 0))] if gfx else []
+    else:
+        cc = [g for g in cards if QF._cc(g) >= QF.MIN_CC]
+        gpus = QF.best_gpus(cc)
+    if not gpus:
+        return None
+    return next((k for k in QFN_RECOMMEND if qfn_quant_fit(k, gpus, ram) is None), None)
+
+
 def choose_qfn_quant(a, prev: dict, gpus: list, ram: float) -> str:
-    """--model's quant, else asked among the ones that fit (UD-Q4_K_XL the default; a quant that does not fit is
-    listed with the reason and refused).  `gpus`: the chosen cards - the fit is every quant's per-card minimum
-    over the split this layout would use (qfn_quant_fit), not the smallest card priced alone."""
+    """--model's quant, else asked among the ones that fit (the largest of QFN_RECOMMEND that runs here the default
+    and the one marked recommended, P124o - UD-Q4_K_XL where the PC holds it, a smaller GSQ-RCO quant on a thin one;
+    a quant that does not fit is listed with the reason and refused).  `gpus`: the chosen cards - the fit is every
+    quant's per-card minimum over the split this layout would use (qfn_quant_fit), not the smallest card priced
+    alone."""
     keys = list(Q.QFN_QUANTS)
     want = getattr(a, "qfn_quant", None)
     if not want:
         before = (prev.get("installer") or {}).get("qwen_quant")
+        rec = next((k for k in QFN_RECOMMEND if qfn_quant_fit(k, gpus, ram) is None), QFN_DEFAULT_QUANT)
         rows = []
         for k in keys:
             m, why = qfn_entry(k), qfn_quant_fit(k, gpus, ram)
-            note = ("cannot run on this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
+            note = ("cannot run on this PC" if why else "recommended" if k == rec else
                     "not measured on AMD yet" if not m.get("measured") else None)
             rows.append((Q.shown("qfn", k, m["download_gb"]), note,
                          (why + ". " if why else "") + m["about"] + (f". Measured: {m['measured']}" if m.get("measured")
                                                                      else "")))
-        default = keys.index(before) if before in keys else keys.index(QFN_DEFAULT_QUANT)
+        default = keys.index(before) if before in keys else keys.index(rec)
         want = keys[choose("Which quant?", [f"{Q.QFN_SHOWN}'s files:"], rows, default, a.yes)]
     why = qfn_quant_fit(want, gpus, ram)
     if why:
@@ -8591,15 +8620,24 @@ def set_up_qfn(a, prev: dict) -> Path | None:
 
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
 def family_fit(cards: list, ram_gb: float, backend: str = "cuda") -> str | None:
-    """The model the setup recommends for a PC's cards when no model was set up before: Hy4-Flash where four equal
-    16 GB cards and the memory for its Maya-S are there (the layout measured), Inkling 2 Mini on one or two small
-    cards (under 24 GB each) - each only where the backend has its engine (family_unavailable); on AMD otherwise
-    GLM-5.3-Flash where its smallest quant fits in VRAM + RAM; None elsewhere - the model question keeps its usual
-    default."""
+    """The model the setup recommends for a PC's cards when no model was set up before: P124o - on lower-end
+    hardware (all cards 24 GB or less: the line GLM's own Maya-S24 note uses) Qwen3.8-Flash-Next first, its largest
+    quant that runs (qfn_recommended_quant, the setup's own fit check; the Strata ladder UD-Q4_K_XL > IQ3_S > Coder
+    IQ1_M) - on NVIDIA one or two cards, on AMD its one GPU, and only where the QFN engine exists for the backend;
+    Inkling 2 Mini (still offered) only where no QFN quant runs, on one or two small cards (under 24 GB each) - each
+    only where the backend has its engine (family_unavailable). Hy4-Flash where four equal 16 GB cards and the memory
+    for its Maya-S are there (the layout measured); on AMD otherwise GLM-5.3-Flash where its smallest quant fits in
+    VRAM + RAM; None elsewhere - the model question keeps its usual default (GLM, DS4 and MM3 for the bigger PCs as
+    before)."""
     if not cards:
         return None
     small = all(float(g.get("vram_gb") or 0) < 24 for g in cards)
     vram = sum(float(g.get("vram_gb") or 0) for g in cards)
+    if (not family_unavailable("qfn", backend)
+            and (len(cards) == 1 if backend == "hip" else len(cards) <= 2)   # (the cards each engine runs on)
+            and all(float(g.get("vram_gb") or 0) <= 24 for g in cards)       # (lower-end: a P40's 24 GB included)
+            and qfn_recommended_quant(cards, ram_gb, backend)):
+        return "qfn"
     if not family_unavailable("ik2", backend) and small and (
             IK2F.amd_unsupported(cards[:1]) is None and len(cards) == 1 if backend == "hip"
             else len(cards) <= 2 and IK2F.usable(cards)):
@@ -8644,7 +8682,8 @@ def ik2_about() -> str:
     return (f"thinkingmachines' Inkling-2-Mini (26B, a looped MoE: 8 of 128 experts a token) on its own engine, in "
             f"unsloth's UD-Q4_K_XL GGUF ({gb}); Linux, NVIDIA V100 / Tesla T4 / RTX 20 and newer with 8 GB or more "
             "(Pascal - a Tesla P40, GTX 10 - second-class; the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU with 12 GB or more. The "
-            "model for one or two 16 GB cards: one Tesla T4 writes about 40 tok/s (a 32K context, part of the experts "
+            "model for one or two 16 GB cards where Qwen3.8-Flash-Next does not run: one Tesla T4 writes about "
+            "40 tok/s (a 32K context, part of the experts "
             "in RAM), two write about 51 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
             "levels, pictures (its vision tower, 0.6 GB), one conversation at a time on two cards (several at once "
             "where one GPU holds every expert). Apache 2.0.")
