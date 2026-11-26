@@ -70,8 +70,19 @@ for _ in $(seq 1 240); do
     sleep 5
 done
 curl -fs -m 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 || fail "no /health after 20 min"
-grep -q "READY.*keepread" "$ELOG" 2>/dev/null || echo "NOTE: the engine's READY line does not say keepread:"
-grep -q "READY.*keepread" "$ELOG" 2>/dev/null || echo "      SAGUARO_DS4_KEEP_READ=0 on the engine? the keep is off and this test cannot pass"
+# READY goes to the engine's stdout, which the server pipes to itself: the engine log holds only its stderr, so no
+# log can show the keepread word here.  What this script can see is the keep's setting (the server hands the engine
+# its own environment plus the config's env, the config winning): 0 there means READY says no keepread and this test
+# cannot pass.  PASS/FAIL itself is decided by the behaviour greps below, which all read engine-stderr lines.
+if ! "$PYTHON" - "$CFG_T" <<'PY'
+import json, os, sys
+env = json.load(open(sys.argv[1])).get("env") or {}
+keep = str(env.get("SAGUARO_DS4_KEEP_READ", os.environ.get("SAGUARO_DS4_KEEP_READ", "1")))
+sys.exit(0 if keep != "0" else 1)
+PY
+then
+    echo "NOTE: SAGUARO_DS4_KEEP_READ=0 on the engine: READY says no keepread - the keep is off and this test cannot pass"
+fi
 MODEL=$("$PYTHON" - "$PORT" <<'PY'
 import json, sys, urllib.request
 print(json.load(urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/v1/models"))["data"][0]["id"])
