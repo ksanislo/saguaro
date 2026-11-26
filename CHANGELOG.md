@@ -19,6 +19,25 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
    see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### Saguaro 1.2.2 (2026-11-26)
+
+Based on Project Maya v1.1.78.
+
+- **Request priority:** a request can ask for `"priority": "high" | "normal" | "low"` (body field, or the
+  `X-Saguaro-Priority` header; a run config's `"priority"` sets the default, otherwise `normal`). High goes first; a normal
+  answer steps aside only when a high one is waiting and every place is taken (the last-started normal first). A low request
+  runs only while the server is idle: it steps aside, mid-answer or mid-prompt-read, as soon as any normal or high request
+  runs or waits, and resumes `SAGUARO_PRIORITY_IDLE_S` (30 s) after the last one ends. A paused request is never dropped or
+  timed out: a waiting stream keeps getting keep-alives, and a non-streaming request that waited starts its 200 early and
+  sends spaces until its JSON. A request that never waits is answered exactly as before. Behind llama-swap, give an agent its
+  own alias with `setParamsByID` (docs/SETTINGS.md).
+- **The page is up before the model:** the server answers from its first second; `/health` says `loading` (503) with the
+  load's progress, the page shows a loading screen and becomes the app when the model is ready, and a failed load leaves the
+  port up with the error and the last config that worked.
+- **Config names:** new setups write `saguaro-<model>.json`. Existing `maya-<model>.json` configs are still found and are
+  renamed once, with their sidecars and logs, at the next start; a path given by its old name (llama-swap, systemd, a run
+  script) keeps working.
+
 ### Saguaro 1.2.1 (2026-11-25)
 
 Based on Project Maya v1.1.78.
