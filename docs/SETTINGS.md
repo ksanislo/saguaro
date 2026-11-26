@@ -278,16 +278,19 @@ trigger is the waiting itself: a request that never queued and never paused is f
 before this feature, however long its answer or its prompt read takes, and an error of such a request keeps its
 real status.
 
-**An agent's alias at low** (checked on llama-swap v260): ONE entry for the model with the agent's alias on it, and
-the field set by `filters: setParamsByID:` keyed to that alias ON THE SAME ENTRY - an alias is another name this
-model configuration answers for, and `setParamsByID` applies last, so a request to `glm-agent` runs on the model
-that is already running, no swap and no second process (a SECOND model entry would swap to its own process, which
-is the opposite of one server one model, and is not how this is done):
+**An agent's alias at low** (the example below was validated with `llama-swap -validate` on llama-swap v260):
+ONE entry for the model with the agent's alias on it, and the field set by `filters: setParamsByID:` keyed to that
+alias ON THE SAME ENTRY - an alias is another name this model configuration answers for, and `setParamsByID`
+applies last, so a request to `glm-agent` runs on the model that is already running, no swap and no second process
+(a SECOND model entry would swap to its own process, which is the opposite of one server one model, and is not how
+this is done). v260's config file has `models` as a MAP keyed by the model id, every entry carrying its `cmd`:
 
 ```yaml
-  - id: glm
+models:
+  glm:                             # v260: models is a map keyed by the model id, and the entry needs its cmd
     aliases:
-      - glm-agent            # requests to glm-agent run on THIS model: no swap, no second process
+      - glm-agent                  # requests to glm-agent run on THIS model: no swap, no second process
+    cmd: llama-server --model glm.gguf --port ${PORT}
     filters:
       setParamsByID:
         glm-agent:
