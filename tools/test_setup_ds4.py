@@ -175,6 +175,17 @@ class Quant35(unittest.TestCase):
         models = Path("/models")
         self.assertEqual(maya.ds4_dir(args(), models, {}, "exl3-3.5"), models / "DeepSeek-V4.1-Flash-1017-3.5bpw")
         self.assertEqual(maya.ds4_dir(args(), models, {}, "exl3"), models / "DeepSeek-V4.1-Flash-1017")
+        # P124f: a setup again takes the folder of the setup before - its args' --pack parent, or the folder its
+        # installer recorded (model_dir) - when it holds the quant's files; only what is missing comes from the
+        # download (ds4_model_step)
+        d = Path(tempfile.mkdtemp())
+        (d / "config.json").write_text("{}")
+        prev = {"args": ["--pack", str(d / "maya-ds4")], "installer": {"ds4_quant": "exl3", "model_dir": str(d)}}
+        self.assertEqual(maya.ds4_dir(args(), models, prev, "exl3"), d)
+        prev["args"] = []                                                      # (no --pack in the args: the record)
+        self.assertEqual(maya.ds4_dir(args(), models, prev, "exl3"), d)
+        self.assertEqual(maya.ds4_dir(args(), models, prev, "exl3-3.5"),
+                         models / "DeepSeek-V4.1-Flash-1017-3.5bpw")          # (another quant: not its files)
         d = Path(tempfile.mkdtemp())
         quiet = [patch.object(maya, "ROOT", d), patch.object(maya, "say", lambda *a: None),
                  patch.object(maya, "ok", lambda *a: None), patch.object(maya, "step", lambda *a: None)]

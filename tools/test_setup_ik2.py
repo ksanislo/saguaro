@@ -686,6 +686,41 @@ class Steps(unittest.TestCase):
         with patch.object(maya, "offer_download", lambda *x, **k: False):       # (a short file, the download declined)
             self.assertIsNone(maya.ik2_model_step(a, d))
 
+    def test_a_setup_again_takes_the_recorded_folder_and_its_own_file(self):
+        """P124f: a setup again of an Inkling config that ran a GGUF of its own in a folder of its own (the
+        installer records model_dir and ik2_file): the recorded folder and file are found without --model-dir
+        named again, and taken as they are - no download."""
+        d = self.root / "the-9070-xt-card"
+        d.mkdir()
+        own = d / "Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf"
+        own.write_bytes(b"GGUF")
+        prev = {"installer": {"family": "ik2", "ik2_quant": Q.IK2_QUANT, "ik2_file": own.name, "model_dir": str(d),
+                              "models_dir": str(self.root / "models")}}
+        self.assertEqual(maya.ik2_dir(args(), self.root / "models", prev, Q.IK2_QUANT), d)
+        a = args(download_model=False)
+        a.ik2_prev_file = own.name                       # (what set_up_ik2 hands ik2_local_gguf from the installer)
+        self.assertEqual(maya.ik2_local_gguf(a, d), own)
+        with patch.object(maya, "offer_download", side_effect=AssertionError("nothing to download here")):
+            self.assertEqual(maya.ik2_model_step(a, d), own)
+
+    def test_a_setup_again_offers_only_the_file_that_is_missing(self):
+        """P124f the other half: the recorded folder, its published UD-Q4_K_XL gone: the download offered names
+        exactly that file."""
+        d, gguf = self.files()
+        gguf.unlink()
+        prev = {"installer": {"family": "ik2", "ik2_quant": Q.IK2_QUANT, "model_dir": str(d),
+                              "models_dir": str(self.root / "models")}}
+        d2 = maya.ik2_dir(args(), self.root / "models", prev, Q.IK2_QUANT)
+        self.assertEqual(d2, d)
+        asked = []
+
+        def offer(a, what, dd, files, m):
+            asked.append([f.name for f in files])
+            return False
+        with patch.object(maya, "offer_download", offer):
+            self.assertIsNone(maya.ik2_model_step(args(download_model=False), d2))
+        self.assertEqual(asked, [[maya.ik2_entry()["gguf"]]])
+
     def test_a_start_of_it(self):
         d, gguf = self.files()
         exe = self.root / "saguaro-ik2"
