@@ -4,7 +4,9 @@ higher-priority request and continuing from exactly where it was, the request's 
 the X-Saguaro-Priority header, the config's default, a bad value a 400) and the /metrics fields - against
 scripted engines that continue an answer or a half-read prompt from wherever the prompt says it got to, as the
 real ones do: QFN keeps a stopped read's conversation live at the token it reached - solo (generate.cpp #1620; a
-batch slot drops a cancelled read, so a batch read is never cut) - and GLM pauses by its PAUSE. Who steps aside
+batch slot drops a cancelled read, so a batch read is never cut) - and GLM pauses by its PAUSE. saguaro-hy4 keeps a
+stopped read solo too (hy4_main.cpp:1086, :1106-1110; P124i: the driver reports keeps_stopped_read for its INFO
+engine_kind=hy4, and a LOW read steps aside for a waiting NORMAL one as well). Who steps aside
 (Ken's 11-25 block): a LOW answer gives its place up whenever a normal or high request runs or waits - even when
 a place is free, all running lows at once; a NORMAL one only for a waiting high one that does not fit; a HIGH one
 never.
@@ -19,9 +21,11 @@ import json
 import os
 import random
 import re
+import shutil
 import socket
 import string
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -33,8 +37,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import model_api  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import (IM_END, PRIORITY_NAMES, ByteTokenizer, FairLock, MockEngine, Service, serve,  # noqa: E402
-                          PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL)
+from serve.server import (IM_END, PRIORITY_NAMES, ByteTokenizer, FairLock, MockEngine, Service, StrataEngine,  # noqa: E402
+                          serve, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL)
 from serve.test_fair import ROOT, ResumingEngine, PausingEngine  # noqa: E402
 
 LONG = "".join(random.Random(600).choices(string.ascii_letters, k=400))     # (no loop: the guard stays out)
@@ -177,6 +181,14 @@ class UnreportingRead(ReadEngine):
     have none): the continue line keeps its old numberless wording - it never invents a figure the engine did not
     tell it."""
     reports_reused = False
+class Hy4Read(ReadEngine):
+    """saguaro-hy4 as the line driver sets it up: SOLO (its READY says stop only - no PAUSE, never a multi=), with
+    keeps_stopped_read - serve/server.py gives it to the engine when its INFO line says engine_kind=hy4, for its
+    read keeping every chunk in the conversation (hy4_main.cpp:1086; the cancel path :1106-1110 clears nothing)."""
+    keeps_stopped_read = True
+    can_pause = False
+    multi = 0
+    info = {"engine_kind": "hy4"}
 
 
 class FairLockPriority(Env):
@@ -693,6 +705,23 @@ class ReadsPreempt(Env):
         self.assertIn("prompt tokens for a high-priority request", log)
         self.assertIn("priority: the low prompt read continued", log)     # ... with the engine's reused figure
 
+    def test_a_hy4_solo_read_is_cut_for_a_normal_request_and_resumed(self):
+        # P124i: a solo engine reporting keeps_stopped_read (the hy4 driver's: INFO engine_kind=hy4) - a low
+        # read steps aside for a waiting NORMAL one (not only a high), and continues at the chunk it kept
+        engine = Hy4Read(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        out, log = self.race_read(engine, second=PRIORITY_NORMAL)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])   # the normal one went first, the low after
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)   # read exactly once through:
+        #                                                    # what the engine kept was not read again
+        long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
+        self.assertEqual(len(long_calls), 2)
+        self.assertEqual(long_calls[1][0], long_calls[0][0])       # the same prompt: nothing written yet
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt tokens for a normal-priority request", log)
+        self.assertIn("priority: the low prompt read continue", log)   # (continued: N reused, or continues - P124b)
+
     def test_a_glm_read_pauses_by_its_pause(self):
         engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
         out, log = self.race_read(engine)
@@ -751,6 +780,57 @@ class ReadsPreempt(Env):
         cls = _qfn_engine_class()                      # conversation live at the token it reached - generate.cpp
         self.assertTrue(cls.keeps_stopped_read)        # #1620 (the GEN path) - a batch slot drops a cancelled
         self.assertFalse(cls.can_pause)                # read, so only a solo read may be cut by a STOP
+
+
+# a line engine that only says who it is (its INFO engine_kind=), answers nothing, and ends on QUIT: the driver's
+# own start-up parsing, for which engines the driver reports keeps_stopped_read
+INFO_KIND_ENGINE = r'''#!/usr/bin/env python3
+import os, sys, threading, time
+kind = sys.argv[-1]
+def out(s):
+    sys.stdout.write(s + "\n"); sys.stdout.flush()
+def reader():
+    for line in sys.stdin:
+        if line.strip() == "QUIT":
+            os._exit(0)
+threading.Thread(target=reader, daemon=True).start()
+out("INFO engine=%s engine_kind=%s model=Test ctx=4096" % (kind, kind))
+out("READY 4096 stop")
+while True:
+    time.sleep(0.05)
+'''
+
+
+class TheReadKeepDriver(Env):
+    """serve/server.py starts every line engine with StrataEngine; P124i gave the one whose INFO line says
+    engine_kind=hy4 (its own line: hy4_main.cpp:932) the keeps_stopped_read the read preemption gates on -
+    its stopped read keeps the conversation live at the chunk reached.  The others are not given it."""
+
+    def start(self, kind):
+        path = Path(tempfile.mkdtemp()) / "saguaro-x.py"
+        path.write_text(INFO_KIND_ENGINE)
+        path.chmod(0o755)
+        try:
+            return StrataEngine(str(path), [kind])
+        finally:
+            shutil.rmtree(path.parent, ignore_errors=True)
+
+    def test_the_hy4_driver_reports_keeps_stopped_read(self):
+        eng = self.start("hy4")
+        try:
+            self.assertEqual(eng.info.get("engine_kind"), "hy4")
+            self.assertTrue(eng.keeps_stopped_read)    # solo: READY ... stop - no PAUSE, no multi
+            self.assertFalse(eng.can_pause)
+            self.assertEqual(eng.multi, 0)
+        finally:
+            eng.close()
+
+    def test_another_line_engine_is_not_given_it(self):
+        eng = self.start("mm3")                        # MiniMax keeps a stopped read too but says engine_kind=mm3:
+        try:                                           #   P124i changes the HY4 driver only (audit §8.3 is MM3's
+            self.assertFalse(getattr(eng, "keeps_stopped_read", False))
+        finally:
+            eng.close()
 
 
 class AcrossThePause(Env):

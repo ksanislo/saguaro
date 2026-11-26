@@ -1550,6 +1550,8 @@ class StrataEngine:
             for k, v in ik2_log_facts("".join(head), self.max_context).items():
                 self.info.setdefault(k, v)                # (an engine that says it itself, INFO: its own figure)
             self._ik2_log(head)
+        if self.info.get("engine_kind") == "hy4":
+            self.keeps_stopped_read = True   # R122: a STOP between its prompt's chunks keeps the conversation live at the chunk reached (solo, hy4_main.cpp:1086, :1106-1110)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
         threading.Thread(target=self._pump, args=(self.proc, self.lines), daemon=True).start()
