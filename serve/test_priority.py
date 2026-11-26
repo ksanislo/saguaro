@@ -18,6 +18,7 @@ import io
 import json
 import os
 import random
+import re
 import socket
 import string
 import sys
@@ -84,6 +85,7 @@ class ReadEngine(ResumingEngine):
     CONTINUED, not one re-read from 0, finishes its base in exactly CHUNKS of them."""
     keeps_stopped_read = True
     CHUNKS = 6
+    reports_reused = True           # it says RESUME (the engine's own reused figure) like QFN's solo engine does
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -101,6 +103,8 @@ class ReadEngine(ResumingEngine):
         key, total = id(base), len(base)
         step = max(1, -(-total // self.CHUNKS))
         pos = self.read_pos.get(key, 0)
+        if self.reports_reused:                         # (RESUME: what THIS call reads on from - P124b's figure)
+            self.reused = pos
         self._tls.own_pp = None
         while pos < total:
             pos = min(total, pos + step)
@@ -130,6 +134,7 @@ class PausingRead(ReadEngine):
     keeps_stopped_read = False
     can_pause = True
     multi = 1
+    reports_reused = False          # the line-protocol driver has no per-call reused figure over the pipe
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -150,6 +155,27 @@ class PausingRead(ReadEngine):
                     return
             yield t
         self.last = {"finish": "stop", "generated": 0, "prompt_ms": 0.0, "decode_ms": 0.0}
+
+
+class LostRead(ReadEngine):
+    """The mortar bug's engine (P124b): it lets a read be cut - the server believes the conversation stays live at
+    the token reached (#1620) - but the read stopped INSIDE a batched part and its state was dropped: the request
+    coming back reads the base again from 0, and its own RESUME figure is 0.  The continue line must carry that 0 -
+    never the reuse the old wording claimed."""
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        with self.rlock:
+            for key, pos in list(self.read_pos.items()):    # (a call that continues a base re-reads it from 0)
+                if pos:
+                    self.read_pos[key] = 0
+        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+
+class UnreportingRead(ReadEngine):
+    """Keeps a cut read, but reports no reused figure over the pipe (no RESUME line, as the line-protocol drivers
+    have none): the continue line keeps its old numberless wording - it never invents a figure the engine did not
+    tell it."""
+    reports_reused = False
 
 
 class FairLockPriority(Env):
@@ -664,7 +690,7 @@ class ReadsPreempt(Env):
         self.assertEqual(long_calls[1][0], long_calls[0][0])          # the same prompt: nothing written yet
         self.assertIn("priority: a low prompt read paused", log)
         self.assertIn("prompt tokens for a high-priority request", log)
-        self.assertIn("priority: the low prompt read continues", log)
+        self.assertIn("priority: the low prompt read continued", log)     # ... with the engine's reused figure
 
     def test_a_glm_read_pauses_by_its_pause(self):
         engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
