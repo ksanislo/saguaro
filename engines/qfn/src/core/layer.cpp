@@ -713,11 +713,15 @@ bool host_elastic_on() {
             }
         }
         // the attribute is a promise, the probe the proof - and on EVERY device (P124e nit): pieces mode would
-        // fail every grow on a second card that answers the probe differently, where prefix mode still works
-        bool proved = same;
+        // fail every grow on a second card that answers the probe differently, where prefix mode still works.
+        // The probe runs whatever the attribute says (P124e review finding 1): a card that LACKS the attribute
+        // but answers the probe with its own address (HIP's flat VA) earns pieces mode; seeding `proved` from
+        // `same` could only ever DEMOTE attribute-true cards and left mortar in prefix mode behind the report's
+        // pieces-mode claim.  The stderr lines below still say which class refused.
+        bool proved = true;
         for (int d = 0; d < n && proved; ++d) {
             const strata::core::OnDevice on_dev(d);
-            proved = probe_registered_page_address();
+            if (!probe_registered_page_address()) proved = false;
         }
         if (proved) return true;   // pieces: the light mode
         if (same)
