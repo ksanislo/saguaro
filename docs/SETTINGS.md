@@ -2263,4 +2263,6 @@ OpenRouter learns only that a Saguaro asked. The result is cached beside the tok
 that fails keeps yesterday's cache or the shipped table, with one log line, and tries again an hour later.
 `SAGUARO_LIVE_PRICES=0` says no whatever the config holds and whatever the page's switch asks while the server runs:
 the env beats the run config at the start and the switch at runtime, and a toggle against it is refused with the
-reason, nothing saved; the switch off - the default - is the same no.
+reason, nothing saved; the switch off - the default - is the same no.  Right after the switch goes on the Savings
+line still says "built-in prices" - nothing waits for the network - and from the first fetch's answer on it says
+"OpenRouter, <date>".
