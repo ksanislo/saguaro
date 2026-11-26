@@ -233,6 +233,76 @@ These settings change what the engine chooses (put them in the config with `--en
 | `SAGUARO_LOAD_BY_NAME` | off | the server, needs model management on: `1` = a chat request (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) whose `"model"` names another installed model - its config name or the model's own name, case-insensitive, as `/v1/models` shows them - switches to it the way the Models page's Switch and `/models/load` do (one log line: `[saguaro] load by name: <from> -> <to> (requested by a chat)`), so a client that sends a model id (opencode, Hermes) gets that model, like llama-swap. The request itself gets a 503 with `Retry-After`: the switch ends this server and Saguaro starts again with the named config, so it cannot be answered from here - retry it once `GET /v1/models` shows the new model loaded. A request running on the current model is never cut short: the switch waits for it. Unknown names and the loaded model's own names are answered by the loaded model, as today. Needs the API key from another device, like `/models/load`. As `"load_by_name": true` in the config; `0` turns it back off |
 | `SAGUARO_VIDEO_MAX_FRAMES` | 240 | the server (GLM): the most frames a video may give (read at 4 a second, so 240 = a minute); a longer video is refused before it is decoded, with its length in the message. Every frame takes an image's share of the context. Videos need ffmpeg and ffprobe installed |
 | `SAGUARO_FAIR_READ_S`, `SAGUARO_FAIR_READ_YIELD_S` | 0 (off), 30 | the server, several conversations at once: a prompt the engine has been reading this many seconds while another request waits behind it (sent, nothing heard from it yet) is paused at the engine's next chunk - the engine keeps what it read - and goes on with the rest once the waiting requests have started (at most the yield seconds later). A short turn no longer waits for another chat's whole long read; the read loses a pipeline refill per pause. After upstream PR #144's design |
+| `SAGUARO_PRIORITY_AGE_S` | 0 (off) | the server: set above 0: a queued low request that has waited this many seconds counts as a normal one (see Request priority below). Off by default: a low request waits as long as a higher-priority one uses or waits for the model - it is never dropped or errored for waiting |
+| `SAGUARO_PRIORITY_IDLE_S` | 30 | the server: the idle rule for `low` requests (see Request priority below): a low request starts, or resumes after a pause, only when nothing normal or high runs or waits AND none finished in the last this many seconds - so a person's follow-up a few seconds after an answer finds the model where they left it. `0` = no grace |
+| `SAGUARO_WAIT_EVENT_S`, `SAGUARO_WAIT_SPACE_S` | 15, 20 | the server: how a request that had to wait - queued in the FIFO at least once, or paused for a higher priority - keeps its client, which sees nothing of it. Only a request that waited changes its framing; one that never queued and never paused streams and answers exactly as before, however slow it is. For one that waited: after the second many seconds without a real event its stream adds one empty event beside its keep-alive comments (chat completions a chunk whose delta is `{}`, `/v1/messages` an Anthropic `ping`, `/v1/responses` another `response.in_progress`; the ollama-style streams send nothing - an empty line would break them), never text in the answer; a non-streaming one gets its 200 and headers and a space every `SAGUARO_WAIT_EVENT_S` until the JSON - at once when it is paused, `SAGUARO_WAIT_SPACE_S` after its wait started when it only queued - spaces before a JSON body are valid, and from the headers out an error cannot change the status any more (it says so in the log once) |
+
+**Request priority** (`priority`). A request can say how long it may hold the queue: the body field `"priority"` -
+`"high"`, `"normal"` (the default, today's behaviour) or `"low"` - or the `X-Saguaro-Priority` header, where
+the body wins when a request sends both. Those three are the only accepted names: anything else - `"background"`
+and `"idle"` included - is a 400 that names the three values. Every API takes it:
+`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/api/chat` and `/api/generate`. The run config's
+`"priority"` is the level a request that says nothing runs at. (OpenAI's `service_tier` is something else and does
+nothing here.) The queue then hands the engine to the highest priority waiting - first come first served inside one
+priority - and nothing else changes while requests all have the same level. `high` goes before `normal` and `low`;
+and `low` means "only while idle": a low request starts, or resumes after a pause, only when nothing normal or high
+runs or waits AND none has finished in the last `SAGUARO_PRIORITY_IDLE_S` seconds (default 30, `0` = no grace) - a
+person's follow-up a few seconds after an answer finds the model where they left it. While it waits out the grace
+its keep-alives go on as usual; it is never dropped for waiting.
+
+A running answer gives its place up at once, at its next token: a `low` one whenever any `normal` or `high`
+request is running or waiting - even when a place is free, since `low` means "only while idle" and on a parallel
+engine it would otherwise keep the card's speed from the people using it (every running low answer steps aside,
+not one per waiter); a `normal` one only when a `high` request is waiting AND every place is taken, and then only
+as many as that waiter needs - the low ones, which step aside anyway, are what frees its place, so a normal one
+is cut only when there is no low one to give, and when more than one `normal` answer runs it is the one that
+started its turn LAST that gives its place up. A `high` answer never gives its place up. The giving-up is the way a
+fair slice does it (PAUSE where the engine can, else
+a cut), and without waiting for `SAGUARO_FAIR_SLICE_S`; when its turn comes back it resumes at exactly the token it
+reached - nothing it had written is generated again, and the thinking budget and the loop guard count from where it
+got to - while it waits with keep-alives to its client. A prompt read is only cut short for engines that keep a
+stopped read alive - QFN while it runs solo (its conversation stays live at the token it reached; its batch slots
+drop a stopped read, so a batch read runs on) and GLM by its PAUSE - and an engine that would lose what it read
+finishes it. A request is never cut for one of its own or a lower priority, and requests
+with images are never cut at all, as today. Nothing is promoted by waiting by default: a low request waits
+as long as a higher-priority one uses or waits for the model, however long - a paused or waiting request is never
+dropped or errored for waiting, it ends only when its client goes away, asks to stop, or the server stops (a pause
+past ten minutes says so once, `[saguaro] priority: a low answer has been paused for 10 min`); with
+`SAGUARO_PRIORITY_AGE_S` set above 0 a low waiter that has waited that long counts as a normal one.
+The Monitor shows a small `high` / `low` tag on the running and queued
+rows, and a paused one says "paused for a higher-priority request"; `/metrics` carries `"priority"` and
+`"paused_for_priority"` in its live rows and every finished request's row. While it waits its client sees it as
+alive: the keep-alive comments, and after `SAGUARO_WAIT_EVENT_S` without a real event one empty event too (the
+ollama-style streams send nothing); a non-streaming request gets its 200 and headers early - at once when it is
+paused, `SAGUARO_WAIT_SPACE_S` after its wait began when it only queued - and a space until the JSON arrives. The
+trigger is the waiting itself: a request that never queued and never paused is framed byte for byte as it was
+before this feature, however long its answer or its prompt read takes, and an error of such a request keeps its
+real status.
+
+**An agent's alias at low** (the example below was validated with `llama-swap -validate` on llama-swap v260):
+ONE entry for the model with the agent's alias on it, and the field set by `filters: setParamsByID:` keyed to that
+alias ON THE SAME ENTRY - an alias is another name this model configuration answers for, and `setParamsByID`
+applies last, so a request to `glm-agent` runs on the model that is already running, no swap and no second process
+(a SECOND model entry would swap to its own process, which is the opposite of one server one model, and is not how
+this is done). v260's config file has `models` as a MAP keyed by the model id, every entry carrying its `cmd`:
+
+```yaml
+models:
+  glm:                             # v260: models is a map keyed by the model id, and the entry needs its cmd
+    aliases:
+      - glm-agent                  # requests to glm-agent run on THIS model: no swap, no second process
+    cmd: llama-server --model glm.gguf --port ${PORT}
+    filters:
+      setParamsByID:
+        glm-agent:
+          priority: low
+```
+
+Every request through that alias then arrives as low: a normal request that lands while one of its answers is
+writing starts at the answer's next token instead of after the whole of it, and the log says so
+(`[saguaro] priority: a low answer paused at 214 tokens for a normal-priority request (1 waiting)`, then
+`[saguaro] priority: the low answer continues`); the agent notices nothing, its answer is the same text, only
+later by one turn's worth of tokens.
 
 **The expert profile** (`data/expert-profile-glm.bin`). At start the engine fills VRAM with the experts a profile ranks
 first. That profile ranks every (layer, expert) pair, and its order also decides how many VRAM slots each layer

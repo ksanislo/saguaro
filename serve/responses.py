@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import time
 import uuid
 
@@ -105,7 +106,7 @@ def normalize_request(req):
     allowed = {"model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls", "reasoning",
                "max_output_tokens", "temperature", "top_p", "stream", "store", "metadata", "previous_response_id",
                "background", "text", "truncation", "include", "service_tier", "prompt_cache_key", "client_metadata",
-               "top_logprobs", "turbo"}
+               "top_logprobs", "turbo", "priority"}   # "priority": the queue level (R122; "service_tier" is not it)
     for key in req:
         if key not in allowed:
             raise ValueError(f"unsupported Responses parameter: {key}")
@@ -266,7 +267,8 @@ def normalize_request(req):
     if instruction:
         messages = with_system_note(messages, instruction)
     normalized = {k: req[k] for k in ("temperature", "top_p", "reasoning", "stream", "parallel_tool_calls",
-                                      "turbo")   # live Turbo (PLAN-turbo-live): checked with the rest (check_request)
+                                      "turbo",     # live Turbo (PLAN-turbo-live): checked with the rest (check_request)
+                                      "priority")   # the queue level (R122): checked by check_request
                   if k in req}
     normalized.update(messages=messages, tools=tools, tool_choice=choice, _response_validation=validation)
     if "max_output_tokens" in req:
@@ -301,8 +303,23 @@ def response_usage(data, prompt_tokens):
             "output_tokens_details": {"reasoning_tokens": data.get("reasoning_tokens", 0)}}
 
 
-def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=None, validation=None, cancel=None):
-    """Serialize engine events directly, with one item lifecycle and one terminal response event."""
+def wait_event_seconds() -> float:
+    """SAGUARO_WAIT_EVENT_S (15): the same setting serve.server's wait_events() uses - read here because the server
+    imports this module, not the other way round: a responses stream whose request was queued at least once, or
+    priority-paused (the `waited` gate of response_events, Ken's trigger decision), adds an empty
+    response.in_progress once this long goes by without a real event (R122)."""
+    try:
+        return max(0.01, float(os.environ.get("SAGUARO_WAIT_EVENT_S", "") or 15))
+    except ValueError:
+        return 15.0
+
+
+def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=None, validation=None, cancel=None,
+                    waited=None):
+    """Serialize engine events directly, with one item lifecycle and one terminal response event.  `waited`
+    (R122, Ken's decision on the trigger): a callable saying whether this request was queued at least once, or
+    paused - only then does a ping's gap add the empty response.in_progress; a request that never waited is
+    framed as before R122, a long prompt read (whose ticks arrive as pings too) included."""
     response = new_response(model, req, response_id)
     if validation is not None:
         run = validation.events(run, cancel)
@@ -323,6 +340,7 @@ def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=
 
     def event(name, **data):
         nonlocal sequence
+        last[0] = time.monotonic()
         out = {"type": name, "sequence_number": sequence, **data}
         sequence += 1
         return name, copy.deepcopy(out)
@@ -368,12 +386,15 @@ def response_events(model, req, run, prompt_tokens=0, persist=None, response_id=
         item["status"] = status
         yield event("response.output_item.done", output_index=index, item=item)
 
+    last = [time.monotonic()]                            # (R122: the wait's empty response.in_progress keeps its own
     try:
         yield event("response.created", response=response)
         yield event("response.in_progress", response=response)
         for kind, data in run:
             if kind == "ping":
                 yield None
+                if (waited is None or waited()) and time.monotonic() - last[0] >= wait_event_seconds():
+                    yield event("response.in_progress", response=response)   # for clients that count only events
             elif kind == "event":
                 ev = data
                 if incomplete_call:

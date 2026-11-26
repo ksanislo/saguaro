@@ -368,6 +368,55 @@ class MockEngine:
             yield t
 
 
+# R122: the queue priorities (a request's "priority" field, its X-Saguaro-Priority header, the config's
+# "priority"): a person's question steps an agent's long answer aside at once and runs first.  Everything
+# without one is normal, so an old client's order is exactly the plain FIFO it always was.
+PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW = 2, 1, 0
+PRIORITY_NAMES = {PRIORITY_HIGH: "high", PRIORITY_NORMAL: "normal", PRIORITY_LOW: "low"}
+
+
+def priority_level(value, field="priority") -> int:
+    """One of "high" / "normal" / "low" as its level, or a ValueError naming the field (a 400).  Exactly the
+    three (Ken's ONE name): "background" and "idle" are refused like any other wrong value."""
+    if isinstance(value, str) and value.strip().lower() in PRIORITY_NAMES.values():
+        return {"high": PRIORITY_HIGH, "normal": PRIORITY_NORMAL, "low": PRIORITY_LOW}[
+            value.strip().lower()]
+    raise ValueError(f'{field}: "high", "normal" or "low"')
+
+
+_ENV_S: dict = {}      # name -> (the raw env string, what it parsed to): see _env_seconds
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """A seconds setting from the environment, parsed only when its raw string changed - the queue checks read
+    them under the FIFO's lock, once per waiter per grant check, and re-parsing there is pure noise. Unset,
+    empty or unparseable: the default; nothing under these goes below 0."""
+    raw = os.environ.get(name)
+    hit = _ENV_S.get(name)
+    if hit is not None and hit[0] == raw:
+        return hit[1]
+    try:
+        value = max(0.0, float(raw))
+    except (TypeError, ValueError):
+        value = float(default)
+    _ENV_S[name] = (raw, value)
+    return value
+
+
+def priority_age_seconds() -> float:
+    """SAGUARO_PRIORITY_AGE_S (0 = off): a low waiter that has waited this many seconds counts as normal.
+    Off by default (Ken's rule): a low request waits as long as a higher-priority one uses or waits for the
+    model, however long - it is never dropped or errored for waiting, only by its client, a stop or a shutdown."""
+    return _env_seconds("SAGUARO_PRIORITY_AGE_S", 0.0)
+
+
+def priority_idle_seconds() -> float:
+    """SAGUARO_PRIORITY_IDLE_S (30): the idle rule (R122) - a low request starts, or resumes after a pause, only
+    when nothing normal or high runs or waits AND none finished in the last this many seconds (0 = no grace):
+    a person's follow-up a few seconds after an answer finds the model where they left it."""
+    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 30.0)
+
+
 class FairLock:
     """The service's FIFO: waiters get the engine in the order they asked (threading.Lock promises no order), and the
     holder can see that someone is waiting (`waiting()`, the fair slices).  acquire/release/with as threading.Lock.
@@ -375,15 +424,33 @@ class FairLock:
     With an engine that runs several conversations at once (READY ... multi=<n>) it has n places: a request takes
     one (`units=1`), and what needs the engine to itself - an image encode, a context reload, an update - takes them
     all (the default, and `with`).  Places go in arrival order: a waiter for all of them holds back the ones behind
-    it, so it is not starved."""
+    it, so it is not starved.
+
+    Entries carry a priority (`enqueue(units, priority)`, `acquire(priority=...)`, high 2 / normal 1 / low 0,
+    normal the default): the highest priority is granted first, FIFO inside one priority, and an all-places waiter
+    holds back the ones behind it of its own or a lower priority - with equal priorities the order is the plain
+    FIFO's, unchanged.  A low waiter older than SAGUARO_PRIORITY_AGE_S counts as normal (aging), and a low one
+    starts or resumes only while the model is idle (SAGUARO_PRIORITY_IDLE_S, `_idle_wait`); `waiting(above=p)`
+    counts the waiters that would step ahead of a runner at level p, and `step_aside(p)` is the runner's own
+tick decision: a low one gives its place up whenever a normal or high one runs OR waits - even when a place
+     is free - a normal one only for a waiting high one that does not fit (claim_yield's counting, and of several
+     running normals it is the one that started last), a high never."""
 
     def __init__(self, capacity: int = 1):
         self._cv = threading.Condition(threading.Lock())
-        self._queue: collections.deque = collections.deque()   # [token, units]
+        self._queue: collections.deque = collections.deque()   # [token, units, asked at, queued again, priority]
         self.capacity = max(1, int(capacity))
         self._used = 0
         self._yields = 0                                       # runners that decided to give their place up (claim_yield)
         self._one = False                                      # one holder at a time, whatever the capacity (Turbo)
+        self._held: list = []                                  # one entry per grant: (the priority it was taken at,
+        #  the thread that took it) - the idle rule's "nothing normal or high runs", and the order the running
+        #  requests started their turns in: of several running normals it is the one that started LAST that steps
+        #  aside for a waiting high one (Ken's "then the normal one that started last", `_last_normal`), and the
+        #  ident is how a runner names itself about that without a handle plumbed through _turn and _sliced - a
+        #  request's whole run, FIFO turn included, lives on one thread
+        self._last_finish = 0.0                                # when the last normal or high request ended (release
+        #  with its priority): the idle rule's grace counts from here; 0: since before the process started
 
     def set_one(self, on: bool):
         """One holder at a time while on (places and their sizes stay the capacity's, so a flip mid-run is safe)."""
@@ -409,40 +476,92 @@ class FairLock:
     def _units(self, units):
         return self.capacity if units is None else max(1, min(int(units), self.capacity))
 
-    def acquire(self, blocking: bool = True, timeout: float = -1, units: int | None = None) -> bool:
+    def _eff(self, e) -> int:
+        """What priority a waiter counts at now: with SAGUARO_PRIORITY_AGE_S > 0 a low one that has waited
+        that long has aged into normal; 0 (the default) = no promotion by waiting (an entry from before the
+        priorities is normal)."""
+        p = e[4] if len(e) > 4 else PRIORITY_NORMAL
+        age = priority_age_seconds()
+        if p == PRIORITY_LOW and 0 < age <= time.monotonic() - e[2]:
+            return PRIORITY_NORMAL
+        return p
+
+    def _first(self, me) -> bool:
+        """Whether `me` is the head of the grant order (the highest priority first, FIFO inside one priority):
+        nothing that counts waits ahead of it at its own level or above, and nothing above it waits behind it.
+        Entries in the deque are in arrival order, so a plain FIFO (all one priority) means exactly what the
+        head of the deque meant before."""
+        p = self._eff(me)
+        ahead = True
+        for e in self._queue:
+            if e is me:
+                ahead = False
+                continue
+            q = self._eff(e)
+            if q > p or (q == p and ahead):
+                return False
+        return True
+
+    def acquire(self, blocking: bool = True, timeout: float = -1, units: int | None = None,
+                priority: int | None = None) -> bool:
         k = self._units(units)
+        p = PRIORITY_NORMAL if priority is None else priority
         with self._cv:
-            if not self._queue and self._fits(k):
+            # the fast path only when nobody of an equal or higher priority waits: a new normal request may step
+            # over a queued low one, but never over its own kind or above a high one; and a low one takes it only
+            # while the model is idle (the idle rule, `_idle_wait`)
+            if self._fits(k) and not any(self._eff(e) >= p for e in self._queue) and self._idle_wait(p) == 0.0:
                 self._used += k
-                return True
+                self._held.append((p, threading.get_ident()))    # (running at p: the idle rule counts it, and
+                return True                                      #  the start order names who steps aside first)
             if not blocking:
                 return False
-        me = self.enqueue(units)
+        me = self.enqueue(units, p)
         if self.wait_turn(me, timeout):
             return True
         self.leave(me)
         return False
 
-    def enqueue(self, units: int | None = None) -> object:
+    def _idle_wait(self, p: int) -> float:
+        """Seconds a request at level p still waits under the idle rule (R122) - 0: it may start or resume now.
+        A LOW one runs only while the model is idle: nothing normal or high holds a place, and none of them
+        finished in the last SAGUARO_PRIORITY_IDLE_S seconds (0 = no grace), so a person's follow-up a few
+        seconds after an answer finds the model where they left it.  -1: a normal or high request has the
+        engine - its release wakes the line.  Waiters are not looked at: the grant order already keeps a low
+        one behind every normal or high one in line.  Called under the lock; `self._held` carries one (level,
+        thread) entry per live grant, and a release naming no level is a context manager or a maintenance path -
+        it holds every place, so nothing else can have a grant to lose."""
+        if p > PRIORITY_LOW:
+            return 0.0
+        if any(lvl > PRIORITY_LOW for lvl, _ in self._held):
+            return -1.0
+        return max(0.0, priority_idle_seconds() - (time.monotonic() - self._last_finish))
+
+    def enqueue(self, units: int | None = None, priority: int | None = None) -> object:
         """A place in line (wait_turn waits for it, leave gives it up): a waiter that wakes up now and then (to send
         a heartbeat) keeps its place."""
-        me = [object(), self._units(units), time.monotonic(), False]    # (token, units, asked at: the queue watchdog's age, queued again by a fair slice)
+        me = [object(), self._units(units), time.monotonic(), False,     # (token, units, asked at: the queue watchdog's age, queued again by a fair slice)
+              PRIORITY_NORMAL if priority is None else priority]         # (R122: its place in the grant order)
         with self._cv:
             self._queue.append(me)
         return me
 
-    def claim_yield(self, slice_s: float) -> bool:
+    def claim_yield(self, slice_s: float, above: int | None = None) -> bool:
         """The fair slices' decision, made one runner at a time: True when this runner should give its place up now,
         and then counted until it does (yield_place) or says it did not (unclaim_yield).  Without the count, every
         runner past its slice saw the same waiter and gave up its place for it: with 4 conversations running, one
         short request cut all 4, each to read all it had written again.  The waiters that count are the ones that
         asked for a place (a request that has not run yet), and those a slice put back in line once they have waited
         a slice themselves (long answers still take turns); what they need, less the places free and the runners
-        already on their way out, is how many more runners give up a place."""
+        already on their way out, is how many more runners give up a place.
+
+        `above` (R122): a priority preemption counts only the waiters above that level - a runner is never cut for
+        its own or a lower priority; with it left out (the fair slices) every waiter counts, as before."""
         now = time.monotonic()
         with self._cv:
             need = sum(min(e[1], self.capacity) for e in self._queue
-                       if not (len(e) > 3 and e[3]) or now - e[2] >= slice_s)
+                       if (above is None or self._eff(e) > above)
+                       and (not (len(e) > 3 and e[3]) or now - e[2] >= slice_s))
             free = 0 if self._one and self._used > 0 else self.capacity - self._used
             if need - free - self._yields > 0:
                 self._yields += 1
@@ -453,36 +572,113 @@ class FairLock:
         with self._cv:
             self._yields = max(0, self._yields - 1)
 
-    def yield_place(self, units: int | None = 1) -> object:
+    def _unhold(self, p):
+        """Giving one `_held` entry back (called under the lock): THIS thread's grant first - the (level, thread)
+        pairs make the giver's own findable - at level p, or at any level when p is None; failing that any entry
+        at p (a place taken on one thread and given back on another: the old behaviour the odd maintenance path
+        needs); and with no level named and nothing of this thread's held, the newest, which is what a release
+        without a level always popped."""
+        tid = threading.get_ident()
+        for i in range(len(self._held) - 1, -1, -1):
+            lvl, th = self._held[i]
+            if th == tid and (p is None or lvl == p):
+                return self._held.pop(i)
+        if p is not None:
+            for i in range(len(self._held) - 1, -1, -1):
+                if self._held[i][0] == p:
+                    return self._held.pop(i)
+            return None
+        return self._held.pop() if self._held else None
+
+    def _last_normal(self):
+        """The thread that took its turn last among the running NORMAL grants - `_held` is appended in grant
+        order, so the newest NORMAL entry names the one that started last (Ken's "then the normal one that
+        started last" steps aside for a waiting high one); None with no normal running. Called under the lock."""
+        for lvl, _tid in reversed(self._held):
+            if lvl == PRIORITY_NORMAL:
+                return _tid
+        return None
+
+    def step_aside(self, p: int, slice_s: float = 0.0) -> bool:
+        """The runner's preemption decision on its token tick (R122, Ken's "who steps aside, exactly"): True when
+        a runner at level p gives its place up now.  A LOW one does so whenever ANY normal or high request runs
+        or waits - even when a place is free: low is "only while idle", and with parallel > 1 it would otherwise
+        keep the card's speed from the people using it (every low runner steps aside on its own, all of them,
+        while a person is around).  A NORMAL one only for a waiting HIGH one that does
+        fit - `claim_yield`'s counting cuts just as many runners as that waiter needs, and a free place is its
+        place, not a reason to cut anybody; when more than one normal runs, the one that STEPS ASIDE is the one
+        that started its turn LAST (Ken's choice of victim, `_last_normal`) - an earlier one keeps its place and
+        an earlier runner's tick simply does not claim.  A HIGH one never.  A True claims the decision like
+        `claim_yield` does: the runner then either gives its place up (`yield_place`) or says it did not
+        (`unclaim_yield`); the low one's claim needs no need/free arithmetic - it gives its place up beside a
+        running person, where nobody is waiting at all."""
+        if p >= PRIORITY_HIGH:
+            return False
+        if p == PRIORITY_LOW:
+            with self._cv:
+                if not (self._idle_wait(PRIORITY_LOW) != 0.0        # a normal or high holds a place, or the grace
+                        or any(self._eff(e) > PRIORITY_LOW for e in self._queue)):   # (aged ones count)
+                    return False
+                self._yields += 1                               # (counted, as a fair slice's claim is: the place
+                return True                                     #  is on its way out - nobody else must give one)
+        with self._cv:
+            if self._last_normal() != threading.get_ident():
+                return False                        # (a normal that started earlier: not this one's place to give)
+        return self.waiting(above=p) > 0 and self.claim_yield(slice_s, above=p)
+
+    def highest_active(self):
+        """The highest priority running or waiting (waiters aged), None with nothing at all: whose name a
+        stepping-aside line logs - a low answer cut while a normal one runs has no WAITER to name."""
+        with self._cv:
+            levels = [lvl for lvl, _ in self._held] + [self._eff(e) for e in self._queue]
+        return max(levels, default=None)
+
+    def yield_place(self, units: int | None = 1, priority: int | None = None) -> object:
         """A runner's place given up, and a place in line behind whoever waits now, in one step (the claim ends with it:
-        the free place is counted from here)."""
+        the free place is counted from here).  It keeps its priority (R122): the resumed request waits with the same
+        claim it had before it gave way, so a high-priority answer cut for a person's question does not land behind
+        the agents' low queue."""
         k = self._units(units)
-        me = [object(), k, time.monotonic(), True]
+        p = PRIORITY_NORMAL if priority is None else priority
+        me = [object(), k, time.monotonic(), True, p]
         with self._cv:
             self._queue.append(me)
             self._used -= min(k, self._used)
-            self._yields = max(0, self._yields - 1)
+            self._unhold(p)                               # (waiting in line again, not running: the idle rule -
+            self._yields = max(0, self._yields - 1)       #  and its OWN grant entry goes: the pairs are the key)
             self._cv.notify_all()
         return me
 
     def wait_turn(self, me, timeout: float = -1) -> bool:
         """Wait until `me` is first in line and its places are free, then hold them (True); False after `timeout`,
         still in line - and False at once when `me` was given up (leave) or is no longer in the line: a wedged FIFO
-        (waiting for a place that never comes free) is what a queue that stops moving was."""
+        (waiting for a place that never comes free) is what a queue that stops moving was.  A low entry (R122)
+        also waits out the idle rule (`_idle_wait`): the sleep is capped by what is left of its grace, since
+        only time clears that part."""
         with self._cv:
             end = None if timeout is None or timeout < 0 else time.monotonic() + timeout
             while True:
                 if me not in self._queue:
                     return False
-                if self._queue[0] is me and self._fits(min(me[1], self.capacity)):
+                p = me[4] if len(me) > 4 else PRIORITY_NORMAL
+                #  (its OWN level, not `_eff`: with SAGUARO_PRIORITY_AGE_S > 0 a low waiter that has aged into
+                #  normal grants in normal order and cuts runners like a normal one (_eff is what _first and
+                #  waiting count with), but it still waits out the idle grace - the grace is the model's rest
+                #  after a person, not a queue position - and the grant is recorded at the raw level, which is
+                #  what the request's release(priority=) hands back to _held)
+                grace = self._idle_wait(p)
+                if grace == 0.0 and self._first(me) and self._fits(min(me[1], self.capacity)):
                     self._queue.remove(me)
                     me[1] = min(me[1], self.capacity)
                     self._used += me[1]
-                    self._cv.notify_all()                   # the next in line may fit in what is left
+                    self._held.append((p, threading.get_ident()))   # (running at p: the idle rule counts it, and
+                    self._cv.notify_all()                   #  the start order names who steps aside first)
                     return True
                 left = None if end is None else end - time.monotonic()
                 if left is not None and left <= 0:
                     return False
+                if grace > 0:                               # grace left: sleep no longer than that, then look again
+                    left = grace if left is None else min(left, grace)
                 self._cv.wait(left)
 
     def leave(self, me):
@@ -491,7 +687,10 @@ class FairLock:
                 self._queue.remove(me)
                 self._cv.notify_all()                   # the next one may now be first in line
 
-    def release(self, units: int | None = None):
+    def release(self, units: int | None = None, priority: int | None = None):
+        """Giving a place back.  `priority` (R122): the level the place was taken at - the request path passes it,
+        and a normal or high request that ends here starts the idle rule's grace (`_idle_wait`); a release
+        without it (an encode, a reload, the context manager) is no request that finished and starts none."""
         k = self._units(units)
         with self._cv:
             if self._used < k:
@@ -502,13 +701,41 @@ class FairLock:
                       f"{self.capacity}): the engine's conversations changed while it ran", flush=True)
                 k = self._used
             self._used -= k
+            if priority is None:
+                if self._held:                            # (no level given: this thread's own newest grant - and
+                    self._unhold(None)                    #  the newest at all when it holds none of them here,
+            else:                                         #  the release-without-a-level of before)
+                self._unhold(priority)                    # (this thread's own at that level first: the pairs make
+                #  the giver's entry findable; a level with no entry at all leaves _held alone, as before)
+            if priority is not None and priority > PRIORITY_LOW:
+                self._last_finish = time.monotonic()      # (a person's answer finished: the low grace starts)
             self._cv.notify_all()
 
     def locked(self) -> bool:
         return self._used > 0
 
-    def waiting(self) -> int:
-        return len(self._queue)
+    def waiting(self, above: int | None = None) -> int:
+        """The waiters in line; with `above` (R122), only those of a HIGHER priority than that level - a runner asks
+        this before it even looks at giving its place up.  Under the lock like every other view of the line (the
+        values are advisory either way: `claim_yield` re-decides under the lock; this just reads the deque as the
+        thread that appends or removes an entry left it)."""
+        with self._cv:
+            if above is None:
+                return len(self._queue)
+            return sum(1 for e in self._queue if self._eff(e) > above)
+
+    def highest_waiting(self):
+        """The highest priority waiting (aged), None with an empty line: whose name a preemption logs."""
+        with self._cv:
+            return max((self._eff(e) for e in self._queue), default=None)
+
+    def all_low_waiting(self) -> bool:
+        """True when the line holds waiters and every one of them is a low request (R122, the queue watchdog):
+        a low request waiting a long time behind the people is Ken's rule (no promotion by waiting), not a
+        wedged FIFO - the WARNING would fire on ordinary busy evenings.  With an age setting on an aged low
+        waiter counts as normal, and the line is worth printing again."""
+        with self._cv:
+            return bool(self._queue) and all(self._eff(e) == PRIORITY_LOW for e in self._queue)
 
     def oldest_wait(self) -> float:
         """Seconds the request first in line has been waiting (0 when nobody waits): 0 while it is being served."""
@@ -537,6 +764,52 @@ def queue_ping_seconds() -> float:
         return max(0.01, float(os.environ.get("SAGUARO_QUEUE_PING_S", "") or QUEUE_PING_S))
     except ValueError:
         return QUEUE_PING_S
+
+
+def wait_event_seconds() -> float:
+    """SAGUARO_WAIT_EVENT_S (15): R122 - a stream whose request was queued at least once, or paused for a higher
+    priority (Ken's trigger: wait_events' `waited` gate), keeps its ": keep-alive" comments, and once this long goes
+    by without a real event one empty event goes out too (an empty chat.completion.chunk, an Anthropic ping, a
+    response.in_progress): clients that count only events stay. Never text in the answer; a request that never
+    waited sends nothing extra, however long it takes."""
+    try:
+        return max(0.01, float(os.environ.get("SAGUARO_WAIT_EVENT_S", "") or 15))
+    except ValueError:
+        return 15.0
+
+
+def wait_space_seconds() -> float:
+    """SAGUARO_WAIT_SPACE_S (20): R122 - a non-streaming request that has waited this long (or was paused once by a
+    higher priority) gets its 200 and headers early, and a space every SAGUARO_WAIT_EVENT_S until the JSON: spaces
+    before a JSON body are valid, and an error after the headers cannot change the status any more (the log says so)."""
+    try:
+        return max(0.01, float(os.environ.get("SAGUARO_WAIT_SPACE_S", "") or 20))
+    except ValueError:
+        return 20.0
+
+
+def wait_events(items, empty, waited=None):
+    """R122: a stream's keep-alive comments (the None items) stay as they are; once SAGUARO_WAIT_EVENT_S goes by
+    without a real event, one empty event follows them - `empty()` builds it, and the answer text is never touched.
+    `waited` (Ken's decision on the trigger): a callable saying whether THIS request is one that waits - queued at
+    least once, or paused; while it says no, the None items stay plain comments and the stream is framed exactly as
+    before R122, a long prompt read (whose PP ticks are None items too) included. `waited=None`: every gap counts,
+    as the queued case does anyway. Closing this closes what it wraps."""
+    last, every = time.monotonic(), wait_event_seconds()
+    try:
+        for c in items:
+            if c is None:
+                yield None
+                if (waited is None or waited()) and time.monotonic() - last >= every:
+                    yield empty()
+                    last = time.monotonic()
+            else:
+                last = time.monotonic()
+                yield c
+    finally:
+        close = getattr(items, "close", None)
+        if close is not None:
+            close()
 
 
 def fair_slice_seconds() -> float:
@@ -856,6 +1129,26 @@ def loop_guard_setting(cfg: dict | None, env=None) -> bool:
         return str(v).strip().lower() not in off
     v = (cfg or {}).get("loop_guard")
     return str(v).strip().lower() not in off if isinstance(v, str) else v is not False and v != 0
+
+
+def priority_setting(cfg: dict | None):
+    """The run config's "priority" (R122): the queue level a request without its own runs at - "low" makes
+    every request on this server step aside for other clients' normal ones (a llama-swap alias of the same model
+    sets it in its params).  None: normal, as ever; a bad value refuses to start the server."""
+    v = (cfg or {}).get("priority")
+    if v is None:
+        return None
+    try:
+        return priority_level(v)
+    except ValueError as e:
+        raise SystemExit(f"[saguaro] config priority: {e}")
+
+
+def request_priority(sampling) -> int:
+    """The level this request runs at: what Service.check_request put in "_priority" (R122); a caller that never
+    went through it (an older integration, a test) is normal."""
+    p = (sampling or {}).get("_priority")
+    return p if p in (PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW) else PRIORITY_NORMAL
 
 
 def client_stop_strings(req: dict | None) -> list[str]:
@@ -2833,6 +3126,12 @@ class RequestStat:
         self.samples = collections.deque(maxlen=4096)   # the samples inside the window, oldest first
         # what the Monitor shows of this request (several answer at once: each its own, not the shared status's)
         self.phase, self.generated, self.prompt_tokens, self.max_tokens = "waiting", 0, 0, None
+        # R122: its queue priority's name (the Monitor's small tag: high / low, normal shows nothing) and
+        # whether it gave its place up for a request of a higher priority and waits for the engine again
+        self.priority, self.paused_for_priority = None, False
+        self.had_to_wait = False                          # (R122, Ken's trigger decision: this request waited in
+        #  the FIFO at least once, or gave its place up - set where each happens below; the padding and the
+        #  stream's empty events fire only once it is True, so a request that never waited is framed as in 1.2.1)
         self.started, self.progress, self.prefill_tok_s = None, None, None
         # the prompt read (the drivers' PP lines / the batch slots' read counters): tokens read so far - what the
         # conversation cache held stays out - the span the server saw them arrive over, and whether another chat
@@ -2871,6 +3170,8 @@ class RequestStat:
             pr = (pr[1], pr[1])                          #  by the first answer step) - once answering, all n are read
         return {"state": "writing" if self.first_token else "reading" if self.started else "waiting",
                 "phase": self.phase, "prompt_tokens": self.prompt_tokens, "generated": self.generated,
+                "priority": self.priority, "paused_for_priority": self.paused_for_priority,   # (R122: the tag, and
+                #  its words while it waits: "paused for a higher-priority request")
                 "max_tokens": self.max_tokens, "prompt_read": pr[0] if pr else None, "prompt_total": pr[1] if pr else None,
                 "prefill_tok_s": self.prefill_tok_s if not self.first_token else None,
                 "prefill_shared": self.read_shared,     # (it read beside another chat: that rate is a shared clock's)
@@ -2913,6 +3214,7 @@ class Service:
         self.fit_max_tokens = fit_max_tokens          # --fit-max-tokens: clamp the output cap instead of 400
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
         self.default_effort = None                    # the run config's `reasoning_effort`: a request without one
+        self.priority_default = None                  # the run config's `priority` (R122): None = normal
         self.shared = {}                              # the web app's Chat settings for every client (POST /settings)
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.turbo_default = None                     # the model's live Turbo (PLAN-turbo-live): {"drop","skip"} or None
@@ -3056,6 +3358,17 @@ class Service:
         line takes, before anything is sent.  A logit_bias needs an engine that applies it (INFO logit_bias=1): an
         older one would answer as if it had none."""
         check_request_sampling(req)
+        # R122: the queue priority.  The body's "priority" ("high" | "normal" | "low", anything else a 400),
+        # else the X-Saguaro-Priority header the handler passed in (the body wins), else the run config's
+        # "priority", else normal.  OpenAI's "service_tier" is NOT this: it names a billing tier and is refused
+        # where the dialect checks it (/v1/responses), it never steps another client's request aside.
+        want, where = req.get("priority"), "priority"
+        if want is None and req.get("_priority_header") is not None:
+            want, where = req.get("_priority_header"), "X-Saguaro-Priority header"
+        if want is not None:
+            req["_priority"] = priority_level(want, where)
+        else:
+            req["_priority"] = self.priority_default if self.priority_default is not None else PRIORITY_NORMAL
         # PLAN-turbo-live: a request without its own Turbo takes the model's live one (the control panel's, no
         # config rewrite); one that says off keeps off - it overrides the global setting for itself
         if not isinstance(req.get("turbo"), dict):
@@ -3971,9 +4284,12 @@ class Service:
                 time.sleep(QUEUE_TICK_S)
                 try:
                     oldest, waiting = self.fifo.oldest_wait(), self.fifo.waiting()
+                    low_only = self.fifo.all_low_waiting()   # (R122: a low request waiting long behind the
+                    #  people is the no-aging rule, not a wedge: the WARNING is for the line a person waits in)
                 except Exception:  # noqa: BLE001 - a diagnostic must never end the thread
                     continue
-                if not waiting or oldest < QUEUE_WEDGED_S or time.monotonic() - warned < QUEUE_WARN_S:
+                if not waiting or oldest < QUEUE_WEDGED_S or low_only \
+                        or time.monotonic() - warned < QUEUE_WARN_S:
                     continue
                 warned = time.monotonic()
                 with self.status_lock:
@@ -4311,6 +4627,7 @@ class Service:
         for st in sorted(self.waiting, key=lambda r: r.queued_at or 0.0):
             rows.append({"id": st.id, "cid": getattr(st, "cid", None), "label": st.api, "conv": st.conv.id if st.conv else None,
                          "state": "queued", "phase": None,
+                         "priority": st.priority, "paused_for_priority": st.paused_for_priority,   # (R122)
                          "prompt_tokens": st.prompt_tokens or None, "prompt_read": None, "prompt_total": None,
                          "generated": 0, "max_tokens": st.max_tokens, "tok_s": None, "prefill_tok_s": None,
                          "turbo": dict(st.turbo) if st.turbo else None,
@@ -4526,6 +4843,9 @@ class Service:
             active = self.active
             writing = len(self.current_requests)        # (of the active ones, those past their prompt)
             spec_off = bool(self.current_requests) and all(r.spec_off for r in self.current_requests)
+            prios = {r.priority for r in self.running}  # (R122: the live state says at which priority it runs,
+            priority = prios.pop() if len(self.running) == 1 else None   #  and the Monitor tags high/low)
+            paused = any(r.paused_for_priority for r in self.running)
             now = time.time()
             convs = self._convs_list(now)               # (one entry per conversation: the Monitor's Conversations)
             ended = list(self.ended)
@@ -4539,6 +4859,8 @@ class Service:
             state = "unloaded" if self.unloaded else "idle"
         live = {"state": state, "queued": s.get("queued", 0), "active": active,   # (answering at once: --parallel)
                 "writing": writing, "spec_off": spec_off,   # (the request(s) running asked for no drafting)
+                "priority": priority, "paused_for_priority": paused,   # (R122: whose turn this is, and whether an
+                #  answer is sitting out for one above it - the chats rows carry each request's own)
                 "phase": s.get("phase") if s.get("busy") else None,
                 "prompt_tokens": s.get("prompt_tokens") if s.get("busy") else None,
                 "prompt_read": None, "prompt_total": None, "generated": s.get("generated") if s.get("busy") else None,
@@ -5113,7 +5435,7 @@ class Service:
         return now
 
     @contextlib.contextmanager
-    def _turn(self, hold, cancel=None, units=1):
+    def _turn(self, hold, cancel=None, units=1, priority=None):
         """The engine's turn for one request: the FIFO, given back at the end unless a fair slice already did.  The
         place is taken (and given up) inside the try: an exception while waiting - a FIFO that throws instead of
         waiting - left it in the line for ever, and every request behind it waited for a turn nothing would take."""
@@ -5122,10 +5444,10 @@ class Service:
             if hold[0]:
                 pass                                    # (the turn taken already: _queue_wait's, with keep-alives)
             elif cancel is None:
-                self.fifo.acquire(units=units)
+                self.fifo.acquire(units=units, priority=priority)
                 hold[0] = True
             else:
-                place = self.fifo.enqueue(units=units)
+                place = self.fifo.enqueue(units, priority)
                 while not cancel.is_set():
                     if self.fifo.wait_turn(place, timeout=0.05):
                         hold[0] = True
@@ -5136,24 +5458,29 @@ class Service:
                 self.fifo.leave(place)
             if hold[0]:
                 hold[0] = False
-                self.fifo.release(units=units)
+                self.fifo.release(units=units, priority=priority)   # (R122: its level - a normal or high request
+                #  that ends here is a finished answer: the idle rule's grace for the low queue starts with it)
 
-    def _queue_wait(self, hold, cancel, units=1) -> Iterator[tuple[str, object]]:
+    def _queue_wait(self, hold, cancel, units=1, priority=None, stat=None) -> Iterator[tuple[str, object]]:
         """A request's wait in the FIFO for its first turn, as ("ping", None) every QUEUE_PING_S - the streams write
         them as SSE comments (": keep-alive"), which every client's parser ignores (#483: a request queued behind a
         long answer sent nothing at all, and a client with a stream-idle timeout gave up on a turn that was only
         waiting).  hold[0] is True once the turn is this request's (_turn then holds it and gives it back); a client
-        that goes away meanwhile - the GeneratorExit at a ping - gives its place back here."""
+        that goes away meanwhile - the GeneratorExit at a ping - gives its place back here.  `stat` (R122, Ken's
+        trigger decision): a turn that does not come on the first look marks the request as one that had to wait -
+        from there on its client may get the padding / empty events; one granted straight off never does."""
         if cancel is None:                              # (no way to leave the line: _turn waits as before)
             return
         every = queue_ping_seconds()
-        place = self.fifo.enqueue(units=units)
+        place = self.fifo.enqueue(units, priority)
         try:
             last = time.monotonic()
             while not cancel.is_set():
                 if self.fifo.wait_turn(place, timeout=0.05):
                     hold[0] = True
                     return
+                if stat is not None:
+                    stat.had_to_wait = True             # (it waited: the engine was somebody else's)
                 if time.monotonic() - last >= every:
                     last = time.monotonic()
                     yield "ping", None
@@ -5179,6 +5506,16 @@ class Service:
             if isinstance(smp.get("_think_soft"), int):
                 smp["_think_soft"] = max(1, smp["_think_soft"] - len(produced))
         return smp
+
+    def _read_position(self):
+        """(read, total) of the prompt THIS thread is reading, or None while it reads nothing: the pipe engines' PP
+        lines land in `_tls.pp` (their multi path) and `_tls.own_pp` (solo, and QFN's per-request read - its batch
+        slots report the same on BRP lines); both put the position and the prompt length first.  The fair reads
+        read `_tls.pp` only (multi, where a read can pause with PAUSE); this sees every driver's own read, which is
+        what the priority preemption of a read checks on its ticks (R122)."""
+        tls = getattr(self.engine, "_tls", None)
+        pp = getattr(tls, "pp", None) or (getattr(tls, "own_pp", None) or (None,))[0]
+        return pp[:2] if isinstance(pp, (tuple, list)) and len(pp) >= 2 else None
 
     def _loop_guard_on(self, sampling) -> bool:
         """The loop guard for this request: its own "loop_guard" when it sends one, else the server's."""
@@ -5317,6 +5654,13 @@ class Service:
         The caller sees one stream of token ids (None: a heartbeat, also while queued again).  `hold[0]` says
         whether this request holds the FIFO now.  Not for image prompts: their state is never kept in a slot.
 
+        R122: a request gives its place up the same way and at once, on the next decode token's tick, where
+        `FairLock.step_aside` says so - a LOW one whenever any normal or high request runs or waits (even when a
+        place is free: low is "only while idle"), a NORMAL one only for a waiting high one that does not fit -
+        and on a read tick (PP/BRP lines) only where the engine keeps a stopped read (PAUSE where it can, QFN's
+        cut where its conversation stays live at the token reached; every other engine's read runs to its end).  The same resumed call: prompt + written tokens, _resumed_sampling, the segments'
+        stats summed, the same streamed text - and it waits with keep-alives, leaving the line if the client goes.
+
         With the loop guard (`guard`, serve/loop_guard.py) every id goes through it and the caller gets only what
         lies before the short tail it holds back (what could still be a loop's repeats, at most HOLD_MAX tokens).  A
         loop restarts the engine the same way, at once and still holding the FIFO: prompt + what is kept (the repeats
@@ -5325,6 +5669,9 @@ class Service:
         engine calls and their sampling are the ones without it."""
         produced, cur, left, smp = [], list(ids), max_new, sampling
         segments = []                                   # each slice's DONE (engine.last), summed at the end
+        prio = request_priority(sampling)               # (R122: this answer gives its place up at once for a waiter
+        preempt = None                                  #  of a higher priority; while it waits, what it waits for)
+        pos = None                                      # (a read cut: where its PP/BRP tick found it)
         sent = 0                                        # produced[:sent] went to the caller (the guard holds the rest)
         # the thinking budget closed at a sentence's or line's end (THINK_GRACE, #613): past `soft` tokens of
         # reasoning, the first token that ends one is followed by the end of the thinking - this call stops there and
@@ -5342,6 +5689,8 @@ class Service:
             gen = self.engine.generate(cur, n_call, smp_call, cancel, embeddings=emb) if emb else \
                 self.engine.generate(cur, n_call, smp_call, cancel)
             slice_s, t0, cut, pausing, claimed = fair_slice_seconds(), None, False, False, False
+            preempt, pos = None, None                   # (R122: the pause and its read position belong to THIS
+            #  engine call: left over from an earlier one, a plain fair slice would be logged as a priority pause)
             act, got, closed = None, 0, False           # the loop guard's action; this call's tokens; a soft close
             t_read, paused_for = None, set()            # fair reads: the first chunk report's time, who it paused for
             try:
@@ -5366,6 +5715,29 @@ class Service:
                                 pausing = True
                                 print(f"[saguaro] fair read: {pp[0]:,} of {pp[1]:,} prompt tokens read, paused for "
                                       f"{len(paused_for)} waiting request(s); the rest after they started", flush=True)
+                        # R122: a read tick and step_aside saying so (a low read beside a running or waiting
+                        # person, a normal one for a waiting high that does not fit) - give the place up at once,
+                        # no timer, and only for engines that keep a stopped read: GLM by its PAUSE, gated to a
+                        # multi conversation engine the way the fair reads are (on a solo can_pause one a PAUSE
+                        # during a read may be ignored or lose the read), and QFN by its cut SOLO (the
+                        # conversation stays live at the token reached, keeps_stopped_read) - a QFN BATCH slot's
+                        # cancelled read is dropped, nothing of it reaches the next BGEN, so its read runs on;
+                        # every other engine's read runs to its end rather than lose what it read.
+                        if (prio < PRIORITY_HIGH and t0 is None and not pausing and not emb and not self.stopping
+                                and ((getattr(self.engine, "can_pause", False) and getattr(self.engine, "multi", 0))
+                                     or (getattr(self.engine, "keeps_stopped_read", False)
+                                         and not getattr(self.engine, "batch", 0)))):
+                            pos = self._read_position()
+                            if pos and pos[0] < pos[1] and self.fifo.step_aside(prio):
+                                # (the decision held; the last waiter can still have left the line by now -
+                                #  name the highest level that runs or waits, or this request's own one)
+                                claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_active() or prio]
+                                if getattr(self.engine, "can_pause", False):
+                                    self.engine.pause()   # (multi, see the gate: the state with what it read stays)
+                                    pausing = True
+                                else:
+                                    cut = True            # (STOP: gen.close() drains to the DONE, the engine keeps
+                                    break                 #  the conversation at the token it reached)
                         continue
                     produced.append(t)
                     if soft_text is not None:
@@ -5389,6 +5761,24 @@ class Service:
                         break                           # (gen.close(): STOP + drain, still holding the FIFO)
                     if t0 is None:
                         t0 = time.monotonic()
+                    # R122: give the place up at once on this token's tick (as a fair slice does: PAUSE where the
+                    # engine keeps the state, else cut), not on the SAGUARO_FAIR_SLICE_S timer, where step_aside
+                    # says so: a low answer steps aside whenever a normal or high one runs or waits - a free place
+                    # is no shield, low is "only while idle" - and a normal one only for a waiting high one that
+                    # does not fit (claim_yield's counting: only as many runners as the waiter needs).  Never for
+                    # a waiter of an equal or lower priority, and never a high answer.
+                    if (prio < PRIORITY_HIGH and not pausing and not emb and not self.stopping
+                            and len(produced) < max_new and self.fifo.step_aside(prio)):
+                        # (the decision held; the last waiter can still have left the line by now - name the
+                        #  highest level that runs or waits (the normal this low one steps aside for is RUNNING,
+                        #  not waiting), or this request's own level rather than crash)
+                        claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_active() or prio]
+                        if getattr(self.engine, "can_pause", False):
+                            self.engine.pause(keep=len(cur) == len(ids))   # its first slice (as a fair slice's)
+                            pausing = True
+                        else:
+                            cut = True
+                            break
                     if slice_s > 0 and not pausing and not emb and not self.stopping and len(produced) < max_new \
                             and self.fifo.waiting() and time.monotonic() - t0 >= slice_s \
                             and self.fifo.claim_yield(slice_s):     # (one runner a waiter, not every runner)
@@ -5455,14 +5845,35 @@ class Service:
                 self.status["queued"] += 1
                 self._wall_tick()
             waiting = self.fifo.waiting()
-            place = self.fifo.yield_place(units=1)      # in line, and the place free, in one step: behind whoever waits now
+            place = self.fifo.yield_place(units=1, priority=prio)   # in line, and the place free, in one step:
+            #                                     behind whoever waits now - at its own priority, so the resumed
+            #                                     answer keeps its claim against the queue behind it
+            stat.had_to_wait = True                     # (R122, Ken's trigger decision: back in line - a pause or
+            #                                     a slice's wait counts as queued once: its client may get the
+            #                                     padding / empty events from here)
             hold[0] = False
-            print(f"[saguaro] fair slice: {len(produced)} tokens written, the engine goes to the next request "
-                  f"({waiting} waiting); this one continues after it", flush=True)
+            if preempt:
+                stat.paused_for_priority = True
+                print(f"[saguaro] priority: a {PRIORITY_NAMES[prio]} "
+                      f"{f'answer paused at {len(produced)} tokens' if produced else f'prompt read paused at {pos[0]:,} of {pos[1]:,} prompt tokens'}"
+                      f" for a {preempt}-priority request ({waiting} waiting)", flush=True)
+            else:
+                print(f"[saguaro] fair slice: {len(produced)} tokens written, the engine goes to the next request "
+                      f"({waiting} waiting); this one continues after it", flush=True)
             try:
+                paused_at, noted = time.monotonic(), False
                 while not self.fifo.wait_turn(place, timeout=0.1):
                     if cancel.is_set() or self.stopping:
                         return
+                    if preempt and not noted:
+                        waited = time.monotonic() - paused_at
+                        if waited >= 600:
+                            # R122: a long pause says so once - the request is never ended or promoted for waiting,
+                            # it ends only when its client goes away, asks to stop, or the server stops
+                            noted = True
+                            print(f"[saguaro] priority: a {PRIORITY_NAMES[prio]} "
+                                  f"{'answer' if produced else 'prompt read'} has been paused for "
+                                  f"{int(waited // 60)} min", flush=True)
                     yield None                          # keeps the client's watchdog calm while queued again
                 hold[0] = True
             finally:
@@ -5470,6 +5881,13 @@ class Service:
                     self.fifo.leave(place)
                 with self.status_lock:
                     self.status["queued"] -= 1
+            if preempt:                                 # R122: its turn again - the answer goes on from exactly the
+                stat.paused_for_priority = False        #  token it reached, nothing the engine holds re-read. The
+                #  read's line says where the engine kept it, not where the tick saw it: the engine cannot report
+                #  more over the pipe, and a stop between two windows may quietly keep less than the tick printed
+                print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} "
+                      f"{'answer continues' if produced else 'prompt read continues from where the engine kept it'}",
+                      flush=True)
             with self.status_lock:
                 self.active += 1
                 self.touch_telemetry()
@@ -5588,6 +6006,8 @@ class Service:
         stat.spec_off = request_spec_off(sampling)
         stat.turbo = turbo_live.turbo_of(sampling)      # (the Monitor's Turbo badge shows its options)
         stat.id, stat.api = next(self._req_ids), (sampling or {}).get("_api")
+        prio = request_priority(sampling)               # (R122: its place in the FIFO and the preemption rule)
+        stat.priority = PRIORITY_NAMES[prio]
         stat.cid = (sampling or {}).get("_cid")
         stat.prompt_tokens, stat.max_tokens, stat.queued_at = len(ids), max_new, my_started
         conv_tail = (sampling or {}).get("_gen_tail")   # the reply's opening tokens (prepare's gt=): not the opening
@@ -5600,8 +6020,9 @@ class Service:
         hold = [False, False]                           # holds the FIFO (fair slices let go of it); counts as active
         asked = time.monotonic()
         try:
-            yield from self._queue_wait(hold, cancel)   # (#483: keep-alives while queued; the turn taken there)
-            with self._turn(hold, cancel):
+            yield from self._queue_wait(hold, cancel, priority=prio,   # (#483: keep-alives while queued; the turn
+                                        stat=stat)                     #  taken there; R122: at its own priority)
+            with self._turn(hold, cancel, priority=prio):              #  (stat: the had_to_wait mark of a real wait)
                 with self.status_lock:
                     self.status["queued"] -= 1
                     queued = False
@@ -6090,6 +6511,7 @@ class Service:
                         # the drafts offered and kept (the engine's DONE line; None: it reported none)
                         "drafts_offered": last.get("drafts_offered"), "drafts_accepted": last.get("drafts_accepted"),
                         "spec_off": stat.spec_off,
+                        "priority": stat.priority,      # (R122: the level it queued and answered at)
                         "turbo": dict(stat.turbo) if stat.turbo else None,
                         "loop_guard": guards[0].summary() if guards and guards[0].events else None}
                     self.history.append(row)
@@ -6772,6 +7194,95 @@ def make_handler(svc: Service):
             self.end_headers()
             self.wfile.write(body)
 
+        def _cid_paused(self, req):
+            """R122: is this request the one currently paused for a higher priority? Its answer carries the
+            conversation id, and the live state says whose turn paused."""
+            cid = (req or {}).get("_cid")
+            return bool(cid) and any(getattr(s, "paused_for_priority", False) and getattr(s, "cid", None) == cid
+                                     for s in list(svc.running))
+
+        def _cid_waited(self, req):
+            """R122 (Ken's decision on the trigger): is this request one that had to wait - queued in the FIFO at
+            least once, or paused for a higher priority? Only those get the padding spaces and the streams' empty
+            events; one that never waited is framed byte for byte as before R122, a slow answer and a long prompt
+            read included. The state rides on the request's own live row: `had_to_wait` (set where it first waits
+            for a turn or gives a place back) and `paused_for_priority`."""
+            cid = (req or {}).get("_cid")
+            return bool(cid) and any(getattr(s, "cid", None) == cid and
+                                     (s.had_to_wait or s.paused_for_priority)
+                                     for s in list(svc.running) + list(svc.waiting))
+
+        def _collect_wait(self, make, name: str, cancel, paused, waited, code_of=lambda out: 200):
+            """A non-streaming answer collected on a side thread. R122 (Ken's decision on the trigger): a client
+            whose request waits for the model sees nothing of it - and only such a request changes its framing: the
+            200 and headers go out as soon as this request is PAUSED (`paused()`) - a priority pause starts the
+            padding at once - or `SAGUARO_WAIT_SPACE_S` has gone by since it first WAITED (`waited()`: queued at
+            least once, or paused), and a space follows every SAGUARO_WAIT_EVENT_S until the JSON body: spaces
+            before a JSON body are valid, so the client keeps waiting instead of dropping a request that is only
+            waiting. A request that never waits answers whole exactly as before R122: no early 200, no chunked
+            spaces, and an error keeps its real status however long the answer took. From the headers out an error
+            cannot change the status any more - the log says so once, and the error's JSON rides as the body."""
+            box = {}
+
+            def work():
+                try:
+                    box["body"] = make()
+                except Exception as e:                     # any of them (a GpuBusy or a QueueWaitExpired is a plain
+                    box["error"] = e                       #  RuntimeError): the thread must not die with the box
+                    #  empty - the main thread would raise a KeyError no client asked for. After the headers an
+                    #  error can only ride in the body; before them the caller re-raises it as its own status
+            t = threading.Thread(target=work, daemon=True)
+            t.start()
+            if self.request_version == "HTTP/1.0":   # (an HTTP/1.0 client parses no chunked body: the padding
+                t.join()                             #  spaces could not be framed for it - wait for the JSON
+                if "error" in box:                   #  with the status still free, as this did before R122)
+                    raise box["error"]
+                self._json(code_of(box["body"]), box["body"])
+                return
+            # (R122, Ken's decision on the trigger): the padding is for a request that waits for the model -
+            # SAGUARO_WAIT_SPACE_S counts from the first moment `waited()` says it queued or paused, and a
+            # PAUSE starts it at once. A request that never waited answers whole exactly as before R122,
+            # however slow it is: no early 200, and its error keeps its real status until the JSON is sent.)
+            started = None
+            while t.is_alive():
+                if started is None:
+                    if paused():
+                        break                              # paused for a higher priority: the headers go now
+                    if waited():
+                        started = time.monotonic()         # queued at least once: the space counts from here
+                if started is not None and time.monotonic() - started >= wait_space_seconds():
+                    break
+                t.join(0.05)
+            if not t.is_alive():
+                if "error" in box:
+                    raise box["error"]
+                self._json(code_of(box["body"]), box["body"])
+                return
+            print("[saguaro] " + name + ": the answer is still waiting - the status and headers go out now; "
+                  "an error after this cannot change the status any more", flush=True)
+            self.answer_started = True
+            self.protocol_version = "HTTP/1.1"             # (chunked, so the spaces are a keep-alive body)
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                while t.is_alive():
+                    t.join(wait_event_seconds())
+                    if t.is_alive():
+                        self.wfile.write(b"1\r\n \r\n")
+                        self.wfile.flush()
+            except OSError:
+                cancel.set()                               # the client went away: stop the answer
+                return
+            out = ({"error": {"type": "server_error", "message": str(box["error"])}} if "error" in box
+                   else box["body"])
+            data = json.dumps(out, ensure_ascii=False).encode()
+            self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n0\r\n\r\n")
+            self.wfile.flush()
+
         def _llamacpp_model(self, op: str):
             """llama.cpp's /models/load and /models/unload: Open WebUI's Models page (load / switch)."""
             if not getattr(svc, "model_management", False):
@@ -7075,6 +7586,7 @@ def make_handler(svc: Service):
             svc.keep_alive_s = ka                               # (the model stays loaded that long after this request)
             oreq = svc.with_shared(oreq, "openai")
             oreq["_api"] = "openai"
+            self._priority_header(oreq)
             svc.check_request(oreq)
             messages, tools, kw = openai_to_messages(oreq, deepseek=getattr(svc.template, "deepseek", False))
             max_new = int(oreq.get("max_tokens") or 0)
@@ -7094,20 +7606,24 @@ def make_handler(svc: Service):
                 self.wfile.write((json.dumps(ev, ensure_ascii=False) + "\n").encode())
             try:
                 if not oreq.get("stream"):
-                    pieces = [ev for c in chunks for ev in tr.feed(c)]
-                    calls = [c for ev in tr.finish_calls() for c in ev["message"]["tool_calls"]]
-                    last = tr.done()
-                    if kind == "chat":
-                        msg = {"role": "assistant", "content": "".join(p["message"]["content"] for p in pieces)}
-                        think = "".join(p["message"].get("thinking", "") for p in pieces)
-                        if think:
-                            msg["thinking"] = think
-                        if calls:
-                            msg["tool_calls"] = calls
-                        last["message"] = msg
-                    else:
-                        last["response"] = "".join(p["response"] for p in pieces)
-                    self._json(200, last)
+                    def make():
+                        pieces = [ev for c in chunks for ev in tr.feed(c)]
+                        calls = [c for ev in tr.finish_calls() for c in ev["message"]["tool_calls"]]
+                        last = tr.done()
+                        if kind == "chat":
+                            msg = {"role": "assistant",
+                                   "content": "".join(p["message"]["content"] for p in pieces)}
+                            think = "".join(p["message"].get("thinking", "") for p in pieces)
+                            if think:
+                                msg["thinking"] = think
+                            if calls:
+                                msg["tool_calls"] = calls
+                            last["message"] = msg
+                        else:
+                            last["response"] = "".join(p["response"] for p in pieces)
+                        return last
+                    return self._collect_wait(make, f"ollama {kind}", cancel, lambda: self._cid_paused(oreq),
+                                              waited=lambda: self._cid_waited(oreq))
                 else:
                     self._ndjson_start()
                     for c in chunks:
@@ -7721,6 +8237,13 @@ def make_handler(svc: Service):
                 return False
             return True
 
+        def _priority_header(self, req: dict):
+            """The X-Saguaro-Priority header onto the request (R122): Service.check_request reads it together with
+            the body's own "priority" - the body wins - and a bad value of either is the 400."""
+            h = self.headers.get("X-Saguaro-Priority")
+            if h is not None:
+                req["_priority_header"] = h
+
         def _context(self):
             # It reloads the model for every client, so only the app's own page may ask for it
             body = self._body()
@@ -7873,6 +8396,8 @@ def make_handler(svc: Service):
             sampling = svc.with_shared(sampling, "openai")
             sampling["_api"] = "openai"
             sampling["_responses"] = True
+            sampling["_cid"] = "resp-" + uuid.uuid4().hex[:24]   # (R122: the live state can name this request)
+            self._priority_header(sampling)
             svc.check_request(sampling)
             if req.get("background"):
                 initial = new_response(svc.model, req, status="queued")
@@ -7887,8 +8412,10 @@ def make_handler(svc: Service):
             events = self._response_work(req, sampling, history, validation, owner, cancel)
             try:
                 if not req.get("stream"):
-                    out = response_collect(events)
-                    return self._json(500 if out["status"] == "failed" else 200, out)
+                    return self._collect_wait(lambda: response_collect(events), "responses", cancel,
+                                              lambda: self._cid_paused(sampling),
+                                              waited=lambda: self._cid_waited(sampling),
+                                              code_of=lambda out: 500 if out["status"] == "failed" else 200)
                 first = next(events)
                 self._sse()
                 for item in itertools.chain([first], events):
@@ -7930,7 +8457,8 @@ def make_handler(svc: Service):
                 run = svc.run(ids, thinking, tools, max_new, sampling, cancel)
                 save = (lambda out: svc.responses.put(owner, out, history)) if req.get("store") and persist else None
                 events = response_events(svc.model, config, run, len(ids), persist=save, response_id=response_id,
-                                         validation=validation, cancel=cancel)
+                                         validation=validation, cancel=cancel,
+                                         waited=lambda: self._cid_waited(sampling))
                 yield from events
             finally:
                 if events is not None:
@@ -7943,6 +8471,7 @@ def make_handler(svc: Service):
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
             req["_api"] = "web" if req.get("strata_resume") is True else "openai"   # the Monitor's request table
+            self._priority_header(req)
             svc.check_request(req)                             # a bad sampling field or logit_bias: a 400, now
             messages, tools, kw = openai_to_messages(req, deepseek=getattr(svc.template, "deepseek", False))
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
@@ -7971,7 +8500,9 @@ def make_handler(svc: Service):
                                {t["name"] for t in extra}) if use_mcp else None
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
             if not req.get("stream"):
-                return self._json(200, openai_collect(chunks, logprobs=logprobs_asked(req) is not None))
+                return self._collect_wait(lambda: openai_collect(chunks, logprobs=logprobs_asked(req) is not None),
+                                          "openai", cancel, lambda: self._cid_paused(req),
+                                          waited=lambda: self._cid_waited(req))
             if req.get("strata_resume") is True:
                 # the web app: the answer runs on if the connection drops; the page reconnects to it by id
                 first = next(chunks)
@@ -7981,9 +8512,12 @@ def make_handler(svc: Service):
                 self._sse()
                 self._stream_job(job, 0)
                 return
+            empty_chat_chunk = lambda: {"id": req.get("_cid") or "", "object": "chat.completion.chunk",
+                                        "created": int(time.time()), "model": svc.model,
+                                        "choices": [{"index": 0, "delta": {}, "finish_reason": None}]}
             self._sse()
             try:
-                for c in chunks:
+                for c in wait_events(chunks, empty_chat_chunk, lambda: self._cid_waited(req)):
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
                     else:
@@ -8050,6 +8584,7 @@ def make_handler(svc: Service):
         def _anthropic(self, req):
             req = svc.with_shared(req, "anthropic")
             req["_api"] = "anthropic"
+            self._priority_header(req)
             svc.check_request(req)                             # a bad sampling field: a 400, now
             messages, tools, kw = anthropic_to_messages(req, deepseek=getattr(svc.template, "deepseek", False))
             max_new = int(req.get("max_tokens") or 0)                  # 0/-1: the rest of the context
@@ -8062,14 +8597,17 @@ def make_handler(svc: Service):
                 req = {**req, "_gen_tail": kw["_gen_tail"]}
             req = {**req, "_conv_label": kw.get("_conv_label")}   # the Monitor's conversation row: its first words
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
+            req = {**req, "_cid": "anth-" + uuid.uuid4().hex[:24]}   # (R122: the live state can name this request)
             cancel = threading.Event()
             watch_client(self, cancel)
             events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel)
             if not req.get("stream"):
-                return self._json(200, anthropic_collect(events))
+                return self._collect_wait(lambda: anthropic_collect(events), "anthropic", cancel,
+                                          lambda: self._cid_paused(req), waited=lambda: self._cid_waited(req))
             self._sse()
             try:
-                for item in events:
+                for item in wait_events(events, lambda: ("ping", {"type": "ping"}),
+                                        lambda: self._cid_waited(req)):
                     if item is None:
                         self.wfile.write(b": keep-alive\n\n")
                     else:
@@ -8122,6 +8660,7 @@ SERVER_ENV = ("SAGUARO_ENGINE_STALL_S", "SAGUARO_REQUEST_QUIET_S", "SAGUARO_DRAI
               "SAGUARO_MAX_BODY_MIB", "SAGUARO_FAIR_SLICE_S", "SAGUARO_FAIR_READ_S", "SAGUARO_FAIR_READ_YIELD_S",
               "SAGUARO_DS4_KEEP_THINKING",
               "SAGUARO_SERVER_LOG", "SAGUARO_GLM_THINK_RESERVE", "SAGUARO_LOOP_GUARD", "SAGUARO_QUEUE_PING_S",
+              "SAGUARO_PRIORITY_AGE_S", "SAGUARO_PRIORITY_IDLE_S", "SAGUARO_WAIT_EVENT_S", "SAGUARO_WAIT_SPACE_S",
               "SAGUARO_UPDATE_CHECK", "SAGUARO_PACK_TEMPLATE") + RESPONSE_ENV_KEYS + \
     ("SAGUARO_DS4_RESTORE_POINTS", "SAGUARO_DS4_RESTORE_TAIL")
 
@@ -8884,8 +9423,21 @@ def _qfn_engine_class():
 
     class QfnEngine(QE.StrataEngine):
         """QFN's driver as this server's engine: several conversations at once are its batch slots (the FIFO's places);
-        the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself)."""
+        the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself).  A STOP is its
+        cut: SOLO, a stopped request keeps its conversation, so an answer or a half-read prompt continues from the
+        token it reached (see keeps_stopped_read) - which is what lets a priority preemption cut a solo QFN read.
+        In a batch slot a stopped request's conversation is kept for the answer, but its half-read prompt is not:
+        a stopped batch read runs again from 0 on its next BGEN, so the preemption never cuts a batch read."""
         can_pause = False
+        keeps_stopped_read = True      # R122: a stopped (cut) request keeps its conversation LIVE at the token it
+        #  reached, also in the middle of a prompt read, and the next request continues from it or parks it -
+        #  the SOLO GEN path only: engines/qfn/src/program/generate.cpp #1620 ("stopped between two windows ...
+        #  it stays the live conversation", printed as "cancelled request keeps its conversation: N tokens live").
+        #  A BATCH slot's cancelled read is dropped, not kept: "a read that failed keeps none" - the BRA 0 cancel
+        #  and the BSTOP path clear the slot's read and ids and hand every checkpoint back to the pool
+        #  (generate.cpp, the cancelled-read and BSTOP branches), and the driver frees the slot with nothing held
+        #  for the next BGEN (leaving "queued" it drops its held tokens) - which is why Service._sliced fires the
+        #  read preemption for this engine only while it runs solo (`not engine.batch`).
         vram_reserve = QE.StrataEngine.vram   # the VRAM give-back command; self.vram (below) is the Monitor's lines
 
         def __init__(self, *a, **kw):
@@ -9395,6 +9947,10 @@ def main() -> int:
     svc.loop_guard = loop_guard_setting(cfg)            # (SAGUARO_LOOP_GUARD=0 or "loop_guard": false: off)
     if not svc.loop_guard:
         print("[saguaro] loop guard: off (a request's \"loop_guard\": true turns it on for that request)", flush=True)
+    svc.priority_default = priority_setting(cfg)        # (R122: "priority": the level a request without one runs at)
+    if svc.priority_default is not None:
+        print(f"[saguaro] request priority when a request names none: {PRIORITY_NAMES[svc.priority_default]}",
+              flush=True)
     svc.api_key = api_key
     try:
         svc.cors_origins = parse_cors_origins(cfg.get("cors_origins"))

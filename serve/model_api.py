@@ -145,6 +145,8 @@ def _options(req: dict, out: dict):
     for k in ("temperature", "top_p"):             # (the top level of an OpenAI-style call too)
         if req.get(k) is not None and k not in out:
             out[k] = req[k]
+    if req.get("priority") is not None and "priority" not in out:
+        out["priority"] = req["priority"]          # (R122: the queue level, a top-level field of both bodies)
     if req.get("think") is False:                  # (the OpenAI path reads chat_template_kwargs, not Anthropic's "thinking")
         out["chat_template_kwargs"] = {"enable_thinking": False}
     fmt = req.get("format")
