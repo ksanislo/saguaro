@@ -13,7 +13,7 @@ Per-request lossy Turbo = the engine line's `turbo_drop=` / `turbo_skip=` keys, 
    body in `model_api.chat_to_openai` / `generate_to_openai` (serve/model_api.py:172-193), so no `turbo` field
    can reach the pipeline from there.
 2. **The model's live Turbo default `svc.turbo_default`** - applied to EVERY request that does not carry its own
-   dict `turbo`, agents and API clients included: serve/server.py:3380-3382 in `Service.check_request`.
+   dict `turbo`, agents and API clients included: serve/server.py:3380-3382 before this change (3381-3382 now).
    This is the path that breaks Ken's rule. What can put it on:
    - the sidecar `<config>.turbo.json` read at start (serve/server.py:10039-10047, `turbo_path` at 10040);
    - POST `/api/turbo/options` - the control panel's "Turbo, live" (serve/server.py:8142-8143 -> `_turbo_options`
@@ -27,5 +27,25 @@ Per-request lossy Turbo = the engine line's `turbo_drop=` / `turbo_skip=` keys, 
    `_own_page` (serve/server.py:8330), not a per-request skip/drop field.
 
 ## Step 2 - the change
+
+One rule point: `Service.check_request` (serve/server.py) now feeds `turbo_default` only to the web app's own
+chats - the requests `_openai` marks `req["_api"] = "web"` (their `strata_resume: true`, the same marker the
+Monitor's table uses, serve/server.py:8505). Every dialect handler overwrites `_api` itself before
+`check_request` (7618 openai/Ollama, 8429 responses, 8505 chat, 8618 anthropic), so a client cannot claim it.
+
+- serve/server.py:3378-3382 - the default applies `if req.get("_api") == "web" and not isinstance(...)`;
+  an API request without its own dict `turbo` keeps nothing: the engine line stays today's exact line.
+  Its own `turbo` field (checked at 1224) is untouched - that stays the only way an API request gets Turbo on.
+  `NO_LIVE_TURBO` (3383-3384) still forces exact for ik2/hy4 whatever the source.
+- Doc words of the old rule corrected to the new one: `set_turbo_default`'s docstring (agents included -> the
+  app's own chats), GET /api/turbo/options and `_turbo_options` comments + its print line, the start-up sidecar
+  line, and `check_request_sampling`'s comment (absent = exact).
+- serve/web/turbo.js - the "Turbo, live" panel words, its section comments and the toast no longer promise the
+  apps and the agents: the setting is this app's own chats; API requests run exact unless they ask. The page
+  needs no behavioural change: chats.js still sends the chat's own `turbo` every turn (serve/web/chats.js:436-437)
+  and its requests carry `strata_resume: true`, so the panel's choice keeps applying to them server-side.
+
+No config, no sidecar format, no engine line, no /api/turbo (the engine's Turbo button) change. serve/qfn_engine.py
+untouched (nothing in engines/qfn/serve/server.py changed, so no re-extraction was due).
 
 ## Step 3 - tests
