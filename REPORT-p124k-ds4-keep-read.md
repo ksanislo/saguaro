@@ -56,12 +56,15 @@ One change, in `prompt_piece`, so solo and `--parallel` both get it; the DONE ke
   - `serve()` :750-766 - the keep's two settings: `SAGUARO_DS4_KEEP_READ` (default on; 0: no keep, and READY says no
     `keepread`) and `SAGUARO_DS4_KEEP_READ_STEP` (default 8192 tokens; 0: the read takes no keep points of its own
     and keeps only the request's marks and its base).
-  - `prompt_piece` - a run is capped at `keep_step` tokens (:1745-1747; `feed`'s `after` arg still tells the model of
-    the prompt up to the next cut), each whole run's end stands as checkpoint 0 (:1817-1819 - the conversation's own
-    slot, no mark-LRU pressure; the old prompt's end it replaces is held as checkpoint 1 by `prompt_begin` :1637),
-    and the marks-inside one-run shortcut (:1727-1743) is not taken while the keep splits (:1758) - a run stopped
-    inside keeps nothing of the points it was carrying. `Prompt::run_start` (:1474) records where each run began.
-  - the stopped branch (:1831-1880): `mid = !ok` (stopped inside a run) → `stored = m.restorable(run_start)`, else
+  - `prompt_piece` - a run is capped at `keep_step` tokens (:1749-1752; `feed`'s `after` arg still tells the model of
+    the prompt up to the next cut), and the read takes its keep point **by progress**: checkpoint 0 where the read
+    first stands at or past the next `keep_at` position (:1822-1828 - the conversation's own slot, no mark-LRU
+    pressure; the old prompt's end it replaces is held as checkpoint 1 by `prompt_begin` :1659), so a run cut short
+    by `feed_unit` - the windows path's 16 - does not pay a snapshot of its own, while the whole piece's end still
+    stands behind the run that follows it; and the marks-inside one-run shortcut (:1756-1770) is not taken while the
+    keep splits (:1763) - a run stopped inside keeps nothing of the points it was carrying. `Prompt::run_start`
+    (:1474) records where each run began.
+  - the stopped branch (:1840-1889): `mid = !ok` (stopped inside a run) → `stored = m.restorable(run_start)`, else
     the live end at `done`; land via `read_stop_landing` (restore only where the state does not already stand there),
     re-hang the pictures the kept state really holds (`held` as `prompt_end` re-hangs it, at `keep`), `checkpoint(0)`
     at the kept position, and DONE with `reused = keep`. Where there is no landing (nothing stored - a fresh
@@ -117,9 +120,10 @@ compares piecewise against whole reads bit for bit.
    conversation are unprotected, and `SAGUARO_DS4_KEEP_READ_STEP` is one size for every card. Should a low-priority
    read start with a shorter first step (or should the server only cut past the first step)? A card run of the script
    with default settings will show where the cuts actually land.
-3. **`keep_step` = 8192 default**: each whole run's end now costs one `checkpoint(0)` copy (rings + compressor
-   partials, ~`check_bytes()` MB of host traffic). On the 30K control reads that is noise, but the read shape also
-   left the marks-inside shortcut (§8.4's cheap-points optimization) whenever the keep splits - measurable against
+3. **`keep_step` = 8192 default**: every keep point now costs one `checkpoint(0)` copy (rings + compressor
+   partials, ~`check_bytes()` MB of host traffic) - one per `keep_step` tokens read, where the run shape lets the
+   read stand at the point. On the 30K control reads that is noise, but the read shape also left the marks-inside
+   shortcut (§8.4's cheap-points optimization) whenever the keep splits - measurable against
    `SAGUARO_DS4_KEEP_READ=0` with the card script's control phase.
 4. **Anchor/pin after a resumed read**: a prompt that began at 0, was kept mid-read and finished on the resumed
    request ends `continued=true`, so `prompt_end` never pins the anchor - before P124k the discarded-rerun path

@@ -752,8 +752,8 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
     // restore point at or before the run that was stopped - and says it as the DONE's reused, so the next request of
     // the same prompt shares it and reads the rest, as it shares a finished turn's conversation.  READY says keepread
     // only where this keep is real; SAGUARO_DS4_KEEP_READ=0 drops both the behaviour and the word.  The step is how
-    // many tokens a run reads before its end stands as the keep point (0: no points of its own - the read keeps only
-    // what the request's marks and its base checkpoint hold).
+    // many tokens the read advances before its end stands as the keep point (0: no points of its own - the read keeps
+    // only what the request's marks and its base checkpoint hold).
     static const bool keep_read = [] {
         const char* v = std::getenv("SAGUARO_DS4_KEEP_READ");
         return v == nullptr || std::atoi(v) != 0;
@@ -1473,6 +1473,9 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
         size_t done = 0;         // the prompt's tokens in the state so far
         size_t run_start = 0;    // (the run in flight: where it began - a run stopped inside leaves the state past it
                                  //  unusable, so the keep lands on the deepest point stored at or before here)
+        size_t keep_at = 0;      // (keepread: the next position its keep point stands at: checkpoint 0 where a run
+                                 //  first ends at or past here - taken by progress, so runs shorter than the step
+                                 //  (windows of 16) do not pay a snapshot of their own)
         size_t next_pp = 0;      // (the next PP line's)
         bool continued = false;  // (the conversation goes on - its anchor stays)
         std::vector<Pic> pics;
@@ -1656,6 +1659,7 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
         if (from > 0 && from < r.ids.size()) m.checkpoint(1);
         P.from = from;
         P.done = from;
+        P.keep_at = from + keep_step;   // (keepread: the first of the read's keep points, `keep_step` tokens in)
         P.next_pp = from + 64;
         P.continued = continued;
         // the restore points the request asks for (marks= / shared=; ds4_marks.hpp picks the ones this read reaches):
@@ -1742,7 +1746,8 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
             // (a restore point: the read stops there, and a piece tells the model of the prompt only up to it - the
             //  state kept at the point is the one a whole read up to it leaves)
             const size_t upto = P.next_cut < P.cuts.size() ? (size_t) P.cuts[P.next_cut].pos : total;
-            // (keepread: runs of at most `keep_step` tokens, so the piece ends their runs leave stand as keep points)
+            // (keepread: runs of at most `keep_step` tokens, so the keep point a Stop inside a run falls back to lies
+            //  at most one step behind that run's start)
             size_t n = std::min<size_t>({(size_t) m.feed_unit(), upto - P.done, piece - (P.done - start),
                                          keep_read && keep_step > 0 ? keep_step : (size_t) -1});
             // (the rest of the prompt in one read that keeps the restore points left on the way, where that costs
@@ -1814,9 +1819,13 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
                 if (sh && P.from == 0 && P.next_cut == 0 && !pic) prefix_keep();
                 ++P.next_cut;
             }
-            // (keepread: the whole piece's end stands as the conversation's checkpoint 0: a Stop inside the run that
-            //  follows leaves the state past its start unusable, and this is the deepest point stored behind that run)
-            if (ok && keep_read && keep_step > 0 && took == n && P.done < total) m.checkpoint(0);
+            // (keepread: the read's own keep point, taken by *progress* and not by run end: checkpoint 0 where the read
+            //  first stands at or past `keep_at` - a run cut short by `feed_unit` (windows of 16, `--prefill-chunk 0`)
+            //  is no keep point of its own, while the whole piece's end still stands behind the run that follows it)
+            if (ok && keep_read && keep_step > 0 && P.done < total && P.done >= P.keep_at) {
+                m.checkpoint(0);
+                P.keep_at = P.done + keep_step;
+            }
             if (ok && (P.done >= P.next_pp || P.done == total)) {
                 const double ms = P.read_ms;   // (the read's own running time, parity 2)
                 std::printf("PP%s %zu %zu %.1f %.1f %zu\n", tag.c_str(), P.done, total, ms,
