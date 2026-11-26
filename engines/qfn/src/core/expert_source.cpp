@@ -3490,12 +3490,17 @@ uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
         const uint64_t hi = (s.off + s.len) / page * page;
         complement_offsets_[s.index] = kNoComplement;
         if (hi > lo) {
-            // its working-set lock first (lock_resident covered [lock_off, lock_off + locked) when not registered)
+            // its working-set lock first, in EVERY backing mode: the lock covers [lock_off, lock_off + locked)
+            // whatever the registration state, and the paced/CS-T complement is BOTH a registered prefix AND an
+            // mlock'ed tail above it (lock_off = the registered share) - exactly the bytes the trims sit on
+            // (keep_below = the pin limit).  Registered pages the kernels must not lose are the prefix, and slots
+            // inside it are skipped above; a locked page survives MADV_DONTNEED (the kernel's zap skips it, the
+            // call still answers 0), so without this unlock the bytes below are claimed but never given back.
             const uint64_t a = (uint64_t) (uintptr_t) (complement_host_ + lo);
             const uint64_t lock_lo = (uint64_t) (uintptr_t) complement_host_ + complement_lock_off_;
             const uint64_t lock_hi = lock_lo + complement_locked_;
             const uint64_t u0 = std::max(a, lock_lo), u1 = std::min(a + (hi - lo), lock_hi);
-            if (!complement_registered_ && complement_locked_ > 0 && u1 > u0) {
+            if (complement_locked_ > 0 && u1 > u0) {
                 strata::platform::unlock_resident((void*) u0, u1 - u0);
                 complement_locked_ -= u1 - u0;
             }
