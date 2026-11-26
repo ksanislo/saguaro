@@ -430,7 +430,9 @@ class FairLock:
     holds back the ones behind it of its own or a lower priority - with equal priorities the order is the plain
     FIFO's, unchanged.  A low waiter older than SAGUARO_PRIORITY_AGE_S counts as normal (aging), and a low one
     starts or resumes only while the model is idle (SAGUARO_PRIORITY_IDLE_S, `_idle_wait`); `waiting(above=p)`
-    counts the waiters that would step ahead of a runner at level p."""
+    counts the waiters that would step ahead of a runner at level p, and `step_aside(p)` is the runner's own
+    tick decision: a low one gives its place up whenever a normal or high one runs OR waits - even when a place
+    is free - a normal one only for a waiting high one that does not fit (claim_yield's counting), a high never."""
 
     def __init__(self, capacity: int = 1):
         self._cv = threading.Condition(threading.Lock())
@@ -564,6 +566,35 @@ class FairLock:
     def unclaim_yield(self):
         with self._cv:
             self._yields = max(0, self._yields - 1)
+
+    def step_aside(self, p: int, slice_s: float = 0.0) -> bool:
+        """The runner's preemption decision on its token tick (R122, Ken's "who steps aside, exactly"): True when
+        a runner at level p gives its place up now.  A LOW one does so whenever ANY normal or high request runs
+        or waits - even when a place is free: low is "only while idle", and with parallel > 1 it would otherwise
+        keep the card's speed from the people using it (every low runner steps aside on its own, all of them,
+        while a person is around).  A NORMAL one only for a waiting HIGH one that does not
+        fit - `claim_yield`'s counting cuts just as many runners as that waiter needs, and a free place is its
+        place, not a reason to cut anybody.  A HIGH one never.  A True claims the decision like `claim_yield`
+        does: the runner then either gives its place up (`yield_place`) or says it did not
+        (`unclaim_yield`); the low one's claim needs no need/free arithmetic - it gives its place up beside a
+        running person, where nobody is waiting at all."""
+        if p >= PRIORITY_HIGH:
+            return False
+        if p == PRIORITY_LOW:
+            with self._cv:
+                if not (self._idle_wait(PRIORITY_LOW) != 0.0        # a normal or high holds a place, or the grace
+                        or any(self._eff(e) > PRIORITY_LOW for e in self._queue)):   # (aged ones count)
+                    return False
+                self._yields += 1                               # (counted, as a fair slice's claim is: the place
+                return True                                     #  is on its way out - nobody else must give one)
+        return self.waiting(above=p) > 0 and self.claim_yield(slice_s, above=p)
+
+    def highest_active(self):
+        """The highest priority running or waiting (waiters aged), None with nothing at all: whose name a
+        stepping-aside line logs - a low answer cut while a normal one runs has no WAITER to name."""
+        with self._cv:
+            levels = list(self._held) + [self._eff(e) for e in self._queue]
+        return max(levels, default=None)
 
     def yield_place(self, units: int | None = 1, priority: int | None = None) -> object:
         """A runner's place given up, and a place in line behind whoever waits now, in one step (the claim ends with it:
@@ -5551,10 +5582,11 @@ class Service:
         The caller sees one stream of token ids (None: a heartbeat, also while queued again).  `hold[0]` says
         whether this request holds the FIFO now.  Not for image prompts: their state is never kept in a slot.
 
-        R122: a request of a LOWER priority than someone waiting gives its place up the same way and at once, on the
-        next decode token's tick - and on a read tick (PP/BRP lines) only where the engine keeps a stopped read
-        (PAUSE where it can, QFN's cut where its conversation stays live at the token reached; every other engine's
-        read runs to its end).  The same resumed call: prompt + written tokens, _resumed_sampling, the segments'
+        R122: a request gives its place up the same way and at once, on the next decode token's tick, where
+        `FairLock.step_aside` says so - a LOW one whenever any normal or high request runs or waits (even when a
+        place is free: low is "only while idle"), a NORMAL one only for a waiting high one that does not fit -
+        and on a read tick (PP/BRP lines) only where the engine keeps a stopped read (PAUSE where it can, QFN's
+        cut where its conversation stays live at the token reached; every other engine's read runs to its end).  The same resumed call: prompt + written tokens, _resumed_sampling, the segments'
         stats summed, the same streamed text - and it waits with keep-alives, leaving the line if the client goes.
 
         With the loop guard (`guard`, serve/loop_guard.py) every id goes through it and the caller gets only what
@@ -5611,23 +5643,23 @@ class Service:
                                 pausing = True
                                 print(f"[saguaro] fair read: {pp[0]:,} of {pp[1]:,} prompt tokens read, paused for "
                                       f"{len(paused_for)} waiting request(s); the rest after they started", flush=True)
-                        # R122: a read tick and a waiter that outranks this request - give the place up at once, no
-                        # timer, and only for engines that keep a stopped read: GLM by its PAUSE, gated to a multi
-                        # conversation engine the way the fair reads are (on a solo can_pause one a PAUSE during a
-                        # read may be ignored or lose the read), and QFN by its cut SOLO (the conversation stays
-                        # live at the token reached, keeps_stopped_read) - a QFN BATCH slot's cancelled read is
-                        # dropped, nothing of it reaches the next BGEN, so its read runs on; every other engine's
-                        # read runs to its end rather than lose what it read.
+                        # R122: a read tick and step_aside saying so (a low read beside a running or waiting
+                        # person, a normal one for a waiting high that does not fit) - give the place up at once,
+                        # no timer, and only for engines that keep a stopped read: GLM by its PAUSE, gated to a
+                        # multi conversation engine the way the fair reads are (on a solo can_pause one a PAUSE
+                        # during a read may be ignored or lose the read), and QFN by its cut SOLO (the
+                        # conversation stays live at the token reached, keeps_stopped_read) - a QFN BATCH slot's
+                        # cancelled read is dropped, nothing of it reaches the next BGEN, so its read runs on;
+                        # every other engine's read runs to its end rather than lose what it read.
                         if (prio < PRIORITY_HIGH and t0 is None and not pausing and not emb and not self.stopping
                                 and ((getattr(self.engine, "can_pause", False) and getattr(self.engine, "multi", 0))
                                      or (getattr(self.engine, "keeps_stopped_read", False)
                                          and not getattr(self.engine, "batch", 0)))):
                             pos = self._read_position()
-                            if pos and pos[0] < pos[1] and self.fifo.waiting(above=prio) \
-                                    and self.fifo.claim_yield(0.0, above=prio):
-                                # (the claim held under the lock; the last waiter can still have left the line
-                                #  by now - name it, or name this request's own level rather than crash)
-                                claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting() or prio]
+                            if pos and pos[0] < pos[1] and self.fifo.step_aside(prio):
+                                # (the decision held; the last waiter can still have left the line by now -
+                                #  name the highest level that runs or waits, or this request's own one)
+                                claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_active() or prio]
                                 if getattr(self.engine, "can_pause", False):
                                     self.engine.pause()   # (multi, see the gate: the state with what it read stays)
                                     pausing = True
@@ -5657,16 +5689,18 @@ class Service:
                         break                           # (gen.close(): STOP + drain, still holding the FIFO)
                     if t0 is None:
                         t0 = time.monotonic()
-                    # R122: a waiter that outranks this answer and does not fit - give the place up at once, on this
-                    # token's tick (as a fair slice does: PAUSE where the engine keeps the state, else cut), not on
-                    # the SAGUARO_FAIR_SLICE_S timer; claim_yield's counting cuts only as many runners as needed,
-                    # and only while no place is free.  Never for a waiter of an equal or lower priority.
+                    # R122: give the place up at once on this token's tick (as a fair slice does: PAUSE where the
+                    # engine keeps the state, else cut), not on the SAGUARO_FAIR_SLICE_S timer, where step_aside
+                    # says so: a low answer steps aside whenever a normal or high one runs or waits - a free place
+                    # is no shield, low is "only while idle" - and a normal one only for a waiting high one that
+                    # does not fit (claim_yield's counting: only as many runners as the waiter needs).  Never for
+                    # a waiter of an equal or lower priority, and never a high answer.
                     if (prio < PRIORITY_HIGH and not pausing and not emb and not self.stopping
-                            and len(produced) < max_new and self.fifo.waiting(above=prio)
-                            and self.fifo.claim_yield(0.0, above=prio)):
-                        # (the claim held under the lock; the last waiter can still have left the line by
-                        #  now - name it, or name this request's own level rather than crash)
-                        claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting() or prio]
+                            and len(produced) < max_new and self.fifo.step_aside(prio)):
+                        # (the decision held; the last waiter can still have left the line by now - name the
+                        #  highest level that runs or waits (the normal this low one steps aside for is RUNNING,
+                        #  not waiting), or this request's own level rather than crash)
+                        claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_active() or prio]
                         if getattr(self.engine, "can_pause", False):
                             self.engine.pause(keep=len(cur) == len(ids))   # its first slice (as a fair slice's)
                             pausing = True

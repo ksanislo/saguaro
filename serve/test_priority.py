@@ -4,7 +4,10 @@ higher-priority request and continuing from exactly where it was, the request's 
 the X-Saguaro-Priority header, the config's default, a bad value a 400) and the /metrics fields - against
 scripted engines that continue an answer or a half-read prompt from wherever the prompt says it got to, as the
 real ones do: QFN keeps a stopped read's conversation live at the token it reached - solo (generate.cpp #1620; a
-batch slot drops a cancelled read, so a batch read is never cut) - and GLM pauses by its PAUSE.
+batch slot drops a cancelled read, so a batch read is never cut) - and GLM pauses by its PAUSE. Who steps aside
+(Ken's 11-25 block): a LOW answer gives its place up whenever a normal or high request runs or waits - even when
+a place is free, all running lows at once; a NORMAL one only for a waiting high one that does not fit; a HIGH one
+never.
 
     python -m unittest serve.test_priority -v
 """
@@ -269,11 +272,15 @@ class FairLockPriority(Env):
         self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_LOW))   # the other stays: it is covered
         lock.unclaim_yield()
 
-    def test_a_free_place_nobody_yields(self):
-        lock = FairLock(2)
-        lock.acquire(units=1)
-        lock.enqueue(units=1, priority=PRIORITY_HIGH)   # a place is free: the waiter takes it by itself
-        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_LOW))
+    def test_a_free_place_makes_the_low_one_step_aside_anyway(self):
+        lock = FairLock(2)                              # Ken's "who steps aside": a FREE place is no shield
+        lock.acquire(units=1, priority=PRIORITY_LOW)    # a low answer has one of the two places
+        hi = lock.enqueue(units=1, priority=PRIORITY_HIGH)     # the waiter would take the free one by itself
+        self.assertFalse(lock.step_aside(PRIORITY_NORMAL))     # normal: only a waiter that does not fit cuts one
+        self.assertTrue(lock.step_aside(PRIORITY_LOW))         # low: gives its place up even here: only idle
+        lock.unclaim_yield()                            # (the claim step_aside's True came with)
+        lock.release(priority=PRIORITY_LOW)
+        lock.leave(hi)
 
 
 class IdleRule(Env):
@@ -450,13 +457,16 @@ class ServicePreempts(Env):
         self.assertEqual(out["long one"][0], LONG)                    # and it went on to its end: waiting ends
         self.assertEqual(out["other one"][0], other)                  #   nothing, and promotes nothing
 
-    def test_parallel_two_cuts_only_as_many_as_needed(self):
+    def test_parallel_two_two_lows_and_a_high_both_lows_pause(self):
+        # Ken's 11-25 block, scenario 4: two lows and a high on parallel 2 -> BOTH lows pause while the
+        # high is around: low is "only while idle", so free places and claim counting cut none of them
+        # down to "one per waiter" - every low answer gives its place up.
         longs = {f"long {c}": "".join(random.Random(700 + i).choices(string.ascii_letters, k=400))
                  for i, c in enumerate("AB")}
         self.engine = ResumingEngine(self.tok, {**longs, "short": SHORT}, delay_s=0.003)
         self.svc.engine = self.engine
         self.svc.fifo.set_capacity(2)                   # two conversations at once, both places taken
-        out, threads = {}, []
+        out, threads, log = {}, [], io.StringIO()
         for user in longs:
             th = threading.Thread(target=ask, args=(self.svc, user, 4096, out, PRIORITY_LOW))
             th.start()
@@ -464,19 +474,84 @@ class ServicePreempts(Env):
         while len(self.svc.current_requests) < 2:
             time.sleep(0.001)
         time.sleep(0.05)                                # both answers are under way
-        hi = threading.Thread(target=ask, args=(self.svc, "short one", 4096, out, PRIORITY_HIGH))
-        hi.start()
-        for th in threads + [hi]:
-            th.join(60)
+        with contextlib.redirect_stdout(log):
+            hi = threading.Thread(target=ask, args=(self.svc, "short one", 4096, out, PRIORITY_HIGH))
+            hi.start()
+            for th in threads + [hi]:
+                th.join(60)
         self.assertEqual(out["short one"][0], SHORT)
         for user, text in longs.items():
             self.assertEqual(out[user][0], text)        # both continue intact
         resumed = [b for b in self.engine.bases if sum(1 for c in self.engine.calls
                      if c[0][:len(b)] == b and len(c[0]) > len(b)) > 0]
-        self.assertEqual(len(resumed), 1)               # exactly one answer gave its place up for the one waiter
+        self.assertEqual(len(resumed), 2)               # BOTH lows were cut, and both went on from the
+        text = log.getvalue()                           #  token they reached
+        self.assertEqual(text.count("priority: a low answer paused"), 2)
+        self.assertEqual(text.count("for a high-priority request"), 2)
+        self.assertEqual(text.count("priority: the low answer continues"), 2)
         self.assertLess(out["short one"][1], out["long A"][1])
         self.assertLess(out["short one"][1], out["long B"][1])
         self.assertFalse(self.svc.fifo.locked())
+        self.assertEqual(self.svc.fifo._yields, 0)
+
+    def test_a_normal_and_a_high_run_side_by_side_untouched(self):
+        # Ken's 11-25 block, scenario 1: parallel 2, one normal + one high running together - high never
+        # steps aside, and a normal one pauses only for a WAITING high, so nobody gives a place up here
+        self.svc.fifo.set_capacity(2)
+        out, log = {}, io.StringIO()
+        with contextlib.redirect_stdout(log):
+            a = threading.Thread(target=ask, args=(self.svc, "long one", 4096, out, PRIORITY_NORMAL))
+            a.start()
+            while self.svc.latest_request not in self.svc.current_requests:
+                time.sleep(0.001)
+            time.sleep(0.05)                            # the normal answer is under way
+            ask(self.svc, "short one", 4096, out, PRIORITY_HIGH)    # a place is free: it just takes it
+            a.join(30)
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertEqual(len(self.long_calls()), 1)     # the normal answer was never cut
+        self.assertNotIn("priority:", log.getvalue())   # and nothing says it should have been
+        self.assertFalse(self.svc.fifo.locked())
+        self.assertEqual(self.svc.fifo.waiting(), 0)
+
+    def test_a_low_answer_steps_aside_for_a_normal_taking_the_free_place(self):
+        # Ken's 11-25 block, scenario 2: parallel 2, a low running + a normal arriving while a place is
+        # free -> the low pauses: beside a person the card is never the low one's to keep
+        self.svc.fifo.set_capacity(2)
+        out, log = {}, io.StringIO()
+        with contextlib.redirect_stdout(log):
+            a = threading.Thread(target=ask, args=(self.svc, "long one", 4096, out, PRIORITY_LOW))
+            a.start()
+            while self.svc.latest_request not in self.svc.current_requests:
+                time.sleep(0.001)
+            time.sleep(0.05)                            # the low answer is past its first tokens
+            ask(self.svc, "short one", 4096, out, PRIORITY_NORMAL)  # the free place does not shield it
+            a.join(30)
+        self.assertEqual(out["long one"][0], LONG)      # cut at a token, continued: nothing lost at the seam
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])
+        self.assertGreaterEqual(len(self.long_calls()), 2)
+        self.assertIn("[saguaro] priority: a low answer paused", log.getvalue())
+        self.assertIn("for a normal-priority request", log.getvalue())     # it names the RUNNING normal
+        self.assertIn("[saguaro] priority: the low answer continues", log.getvalue())
+        self.assertFalse(self.svc.fifo.locked())
+        self.assertEqual(self.svc.fifo.waiting(), 0)
+        self.assertEqual(self.svc.fifo._yields, 0)
+
+    def test_a_high_request_cuts_a_running_normal(self):
+        # Ken's 11-25 block, scenario 3: parallel 1, a normal running + a high arriving -> the normal
+        # pauses (the high waits, all places are taken, and claim_yield's counting cuts this one runner)
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            out = self.race(low_prio=PRIORITY_NORMAL, high_prio=PRIORITY_HIGH)
+        self.assertEqual(out["long one"][0], LONG)      # resumed intact from the token it reached
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])
+        self.assertGreaterEqual(len(self.long_calls()), 2)
+        self.assertIn("[saguaro] priority: a normal answer paused at", log.getvalue())
+        self.assertIn("for a high-priority request", log.getvalue())
+        self.assertIn("[saguaro] priority: the normal answer continues", log.getvalue())
+        self.assertNotIn("fair slice", log.getvalue())  # the priority, not the SAGUARO_FAIR_SLICE_S timer
         self.assertEqual(self.svc.fifo._yields, 0)
 
     def test_a_low_request_waits_the_idle_grace_after_an_answer(self):

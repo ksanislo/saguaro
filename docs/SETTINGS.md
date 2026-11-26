@@ -250,8 +250,13 @@ runs or waits AND none has finished in the last `SAGUARO_PRIORITY_IDLE_S` second
 person's follow-up a few seconds after an answer finds the model where they left it. While it waits out the grace
 its keep-alives go on as usual; it is never dropped for waiting.
 
-A running answer of a lower priority gives its place up at once when a higher-priority request arrives and no place
-is free: at its next token, the way a fair slice does (PAUSE where the engine can, else
+A running answer gives its place up at once, at its next token: a `low` one whenever any `normal` or `high`
+request is running or waiting - even when a place is free, since `low` means "only while idle" and on a parallel
+engine it would otherwise keep the card's speed from the people using it (every running low answer steps aside,
+not one per waiter); a `normal` one only when a `high` request is waiting AND every place is taken, and then only
+as many as that waiter needs - the low ones, which step aside anyway, are what frees its place, so a normal one
+is cut only when there is no low one to give. A `high` answer never gives its place up. The giving-up is the way a
+fair slice does it (PAUSE where the engine can, else
 a cut), and without waiting for `SAGUARO_FAIR_SLICE_S`; when its turn comes back it resumes at exactly the token it
 reached - nothing it had written is generated again, and the thinking budget and the loop guard count from where it
 got to - while it waits with keep-alives to its client. A prompt read is only cut short for engines that keep a
