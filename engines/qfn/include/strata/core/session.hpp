@@ -69,6 +69,9 @@ struct SessionState {
     int turbo_skip = 0;   // PLAN-turbo-live: and its skip tier (0 off, 1 = leave out what is not in VRAM, 2 = ...nor in RAM)
     /// SAGUARO_KV_HOST_ELASTIC: a state outside the session whose host copy grows and shrinks with it (the slot's drafter)
     const QsaState* host_follow = nullptr;
+    /// P124e (round 4, VRAM follows use): the session's block-score scratch in a follow range (qsa_scores_make) -
+    /// index into layer.cpp's registry, -1: carved in the buffers arena whole, as always.
+    int32_t scores_elastic = -1;
     /// The doorbell the host loop polls.  Null until a caller provides one - the engine runs without it, and
     /// neither `session_token` nor `session_replay` looks at it.
     const Doorbell* db = nullptr;

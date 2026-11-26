@@ -390,11 +390,14 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     const bool kv_int8_was = qsa_kv_int8();
     qsa_set_kv_hybrid(false);
     if (kv_hybrid_was) qsa_set_kv_int8(true);   // the drafter under --kv k8v4: plain INT8
-    uint64_t sb = qsa_state_bytes(g, max_cells, false, ring);
+    // P124e (round 4): the drafter's own context-scaled array (its ring's page table, 1 B per cell) follows its
+    // slot the same way - it gets a follow pool when its session's primary state did.
+    const bool dfollow = qsa_state_follow(ss.qsa_states[ss.qsa_primary()]);
+    uint64_t sb = qsa_state_bytes(g, max_cells, false, ring, false, dfollow);
     if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
     // (its session's host copy grows: so does its own, through the session's host_follow)
     if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring, false,
-                       ss.qsa_states[ss.qsa_primary()].host_elastic >= 0) == 0) {
+                       ss.qsa_states[ss.qsa_primary()].host_elastic >= 0, dfollow) == 0) {
         if (st_.kv_mode == 0) { err = "mtp: state init failed"; return false; }
         std::fprintf(stderr, "saguaro mtp: no pinned RAM left for the draft layer's K/V copy; keeping it in VRAM\n");
         cudaGetLastError();
