@@ -215,7 +215,7 @@ int main() {
         Conv cv;
         cv.toks = run(1000, 16384);   // (the pieces the read took whole before its third run was STOPped inside)
         cv.ck[0] = 16384;             // (the checkpoint the second piece's end left: the keep point)
-        const int64_t stored = cv.restorable(20000);   // (the stopped run began at 16384; the model stands there)
+        const int64_t stored = cv.restorable(16384);   // (the stopped run began at 16384: the engine asks at run_start)
         assert(stored == 16384);
         const int64_t land = read_stop_landing(true, 20000, stored, 0, {});   // (20000: what that run had consumed)
         assert(land == 16384);
