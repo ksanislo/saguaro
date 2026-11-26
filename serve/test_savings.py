@@ -4,7 +4,7 @@ price) - against the mock engine, no GPU.  And the prices themselves: the shippe
 OpenRouter list fetched once a day on a background thread when the user turns live_prices on (off by default: a
 default install dials nothing, ever), and the precedence the page's own prices > OpenRouter > shipped > built-ins.
 urllib is mocked throughout: nothing here touches the network; the OpenRouter answer is
-ref/openrouter-models-sample.json, a real response cut to our models.
+serve/testdata/openrouter-models-sample.json, a real response cut to our models.
 
     python -m unittest serve.test_savings -v
 """
@@ -31,7 +31,7 @@ from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 UTC = lambda *a: calendar.timegm((*a, 0, 0, 0))   # noqa: E731  (year, month, day, hour, minute, second)
 TUE_OFF, TUE_PEAK, SAT = UTC(2026, 10, 27, 12, 0, 0), UTC(2026, 10, 27, 2, 30, 0), UTC(2026, 10, 31, 2, 30, 0)
-SAMPLE_TEXT = (ROOT / "ref" / "openrouter-models-sample.json").read_text(encoding="utf-8")   # a real OpenRouter answer
+SAMPLE_TEXT = (ROOT / "serve" / "testdata" / "openrouter-models-sample.json").read_text(encoding="utf-8")   # a real OpenRouter answer
 REAL_OPEN = urllib.request.urlopen    # (the test's own client, kept out of the way of tests that patch urlopen)
 
 
