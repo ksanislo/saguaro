@@ -30,3 +30,27 @@ What each of the plan's machines gets today (checked by running `family_fit` wit
 | (e) one 12 GB card + 32 GB | `ik2` | Inkling 2 Mini |
 
 (Inkling 2 Mini's about-line even says "The model for one or two 16 GB cards", saguaro.py:8634.)
+
+## Step 2 - what Strata itself recommends, per size, inside engines/qfn (grep "recommend", "IQ3_S", "UD-Q4", "Coder", "RAM")
+
+engines/qfn carries **no per-size quant table**; what the greps find is Strata's fit rule and its shrink advice:
+
+- `engines/qfn/strata_control/gpu_fit.py:1-15` - the rule (owner decision): "1. First try the model on ONE card (the
+  largest) plus system RAM, the normal hybrid mode. 2. Only when that does not fit, or would be too tight, offer to
+  add the second card as a layer split. 3. ... a recommended one is pre-selected (recommend, never force)". Exactly
+  one option is recommended (gpu_fit.py:219-251): the single largest card when the model fits it with RAM, else the
+  split; "fits / tight / spills" by the RAM left beyond the experts (FITS_SPARE_RAM_GB, gpu_fit.py:30, 132-137).
+- When RAM/VRAM runs out the engine says to take a SMALLER quant, not another model: the OOM line "close other
+  programs or use a smaller model (Q2_0 / IQ2_XS)" (engines/qfn/serve/server.py:1504-1509) and the tight-RAM warning
+  "run START-HERE --setup and pick a smaller size (Q2_0 / IQ2_XS)" (serve/server.py:8456-8461).
+- Measured facts naming the quants per card size: Coder IQ1_M on a V100 32 GB keeps 94.8 % of the experts in the GPU
+  cache (src/program/generate.cpp:11500); Coder is the pruned variant, fewer than 512 experts (generate.cpp:4111,
+  4128); IQ3_S is the multi-card rigs' size (serve/replicas.py:3 "IQ3_S on two R9700s"; generate.cpp:3286 its prefill
+  numbers).
+- Ours, to line with it: README.md:79-81 "the setup names what fits your PC ... UD-Q4_K_XL is the default ... the
+  smaller GSQ-RCO and Coder quants suit one 16-24 GB card", and the P40 box (24 GB, 32 GB RAM) ran GSQ IQ3_S at
+  ~15-20 tok/s (tools/qfn_fit.py:319, README's speed table).
+
+So "starting from what upstream Strata recommends per VRAM/RAM size" reads as: take the largest quant this PC runs,
+shrink when its memory does not hold it - the plan's ladder UD-Q4_K_XL > IQ3_S > Coder IQ1_M. Q8_0 and CYBER-FROST's
+own quant are accuracy picks, never a fit-based default; they stay out of the ladder.
