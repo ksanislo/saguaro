@@ -533,6 +533,11 @@ class Session:
             self.p.kill()
             self.p.wait()
         self.log.close()
+        for pipe in (self.p.stdin, self.p.stdout):        # (the session is over: its pipes go with it)
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
         return time.time() - t
 
 
@@ -631,7 +636,10 @@ def parallel_places(cfg: dict, reported: int = 0) -> int:
     server turns it into the engine's --batch) or a --parallel / --batch / --slots in its args; at least 1."""
     if reported:
         return max(1, int(reported))
-    out = int(cfg.get("parallel") or 0)
+    try:
+        out = int(cfg.get("parallel") or 0)
+    except (TypeError, ValueError):
+        out = 0
     a = [str(x) for x in cfg.get("args") or []]
     for k in ("--parallel", "--batch", "--slots"):
         if k in a[:-1]:
