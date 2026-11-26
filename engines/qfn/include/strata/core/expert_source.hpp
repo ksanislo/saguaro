@@ -1202,6 +1202,10 @@ private:
     const uint8_t* complement_device_ = nullptr;
     uint64_t complement_bytes_ = 0;
     std::vector<uint64_t> complement_offsets_;
+    mutable std::mutex complement_mu_;          ///< P124e r2: relief's phase-1 offset trims (relieve_ram) are excluded
+                                                ///< with every complement_offsets_ writer (commit_exchanges,
+                                                ///< commit_flip, install_resident), or a writer adopts a just-freed
+                                                ///< place and phase 2 zeroes the expert it named there
     detail::ExchangeStorage exchange_storage_; // authoritative when active; original arenas still own memory
     bool complement_pinned_ = false;
     bool complement_partial_ = false;         ///< CS-T: only the first complement_pin_limit_ bytes are registered

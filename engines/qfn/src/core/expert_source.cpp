@@ -3466,7 +3466,9 @@ uint64_t FileExpertSource::release(int64_t layer, int64_t expert) {
 // reading whole bytes - unlocking does not drop them), wait out the grace window, and only then discard the pages
 // with MADV_DONTNEED, so no CPU reader can ever see zero-filled expert weights.  The bytes `gave` counts are the
 // bytes discarded.  Relief runs serialized under layer.cpp's g_host_mu (qsa_host_grow) and only when a pin failed,
-// so the one wait per give-way costs nothing on any serving path.
+// so the one wait per give-way costs nothing on any serving path.  Phase 1 additionally runs under this source's
+// complement_mu_, which excludes it with every complement_offsets_ WRITER (commit_exchanges, commit_flip,
+// install_resident - P124e round 2 finding 3: the grace window only ever covered readers).
 uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
     if (bytes == 0 || !complement_ready_ || complement_host_ == nullptr || exchange_storage_.active()) return 0;
     if (complement_pinned_ && !complement_registered_) return 0;   // cudaHostAlloc: the driver holds it whole
@@ -3479,16 +3481,22 @@ uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
         size_t index;
         uint64_t off, len;
     };
+    // phase 1: trim the offsets (readers from here route to the files) and undo the locks; the page-runs wait
+    std::vector<std::pair<uint64_t, uint64_t>> runs;   // [lo, hi) page-runs to discard after the grace window
+    uint64_t gave = 0;
     std::vector<Slot> slots;
+    // P124e r2 finding 3: the snapshot and every offset trim run under complement_mu_, held by the writers of
+    // complement_offsets_ (commit_exchanges/commit_flip/install_resident) from reading a slot's place through
+    // naming it for an incoming expert.  Without it a writer that passed its != kNoComplement check before the
+    // flip could adopt a slot relief had just trimmed, and phase 2 would discard the expert bytes copied there -
+    // silent wrong weights.  The grace wait and the madvise stay OUTSIDE the lock.
+    std::lock_guard<std::mutex> cmu_lk(complement_mu_);
     for (size_t i = 0; i < complement_offsets_.size(); ++i) {
         if (complement_offsets_[i] == kNoComplement) continue;
         const uint64_t len = layer_blob_bytes_[(size_t) (i / (size_t) n_expert_)];
         slots.push_back({i, complement_offsets_[i], len});
     }
     std::sort(slots.begin(), slots.end(), [](const Slot& a, const Slot& b) { return a.off > b.off; });
-    // phase 1: trim the offsets (readers from here route to the files) and undo the locks; the page-runs wait
-    std::vector<std::pair<uint64_t, uint64_t>> runs;   // [lo, hi) page-runs to discard after the grace window
-    uint64_t gave = 0;
     for (const Slot& s : slots) {
         if (gave >= bytes) break;
         if (s.off < keep_below) continue;   // (straddling or inside the registered prefix: stays)
@@ -4394,6 +4402,10 @@ int64_t FileExpertSource::commit_exchanges() {
             override_[x.out] = nullptr;
             continue;
         }
+        // P124e r2 finding 3: read the place, copy, flip under complement_mu_, excluded with relieve_ram's
+        // phase-1 trims - a slot relief trimmed answers kNoComplement here and the exchange is simply not
+        // adopted (its next read re-adapts); it must never name a place whose pages phase 2 discards.
+        std::lock_guard<std::mutex> cmu_lk(complement_mu_);
         const uint64_t at = complement_offsets_[x.in];
         if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
             complement_host_ != nullptr) {
@@ -4440,6 +4452,11 @@ bool FileExpertSource::install_resident(int64_t layer, int64_t in, int64_t out, 
     const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
     if (i_in >= complement_offsets_.size() || i_out >= complement_offsets_.size()) return false;
     if (!override_.empty() && (override_[i_in] != nullptr || override_[i_out] != nullptr)) return false;
+    // P124e r2 finding 3: the check, the copy and the flip run under complement_mu_, excluded with relieve_ram's
+    // phase-1 trims - the ram_install caller read `out`'s place tens of ms ago in its prefetch, and a slot relief
+    // trimmed since must not be adopted from that stale look (it answers kNoComplement here, so the install is
+    // skipped and the expert just stays file-backed).
+    std::lock_guard<std::mutex> cmu_lk(complement_mu_);
     const uint64_t at = complement_offsets_[i_out], bytes = layer_blob_bytes_[(size_t) layer];
     if (at == kNoComplement || complement_offsets_[i_in] != kNoComplement || at > complement_bytes_ ||
         bytes > complement_bytes_ - at) return false;
@@ -4594,6 +4611,7 @@ int64_t FileExpertSource::commit_flip() {
             override_[x.out] = nullptr;
             continue;
         }
+        std::lock_guard<std::mutex> cmu_lk(complement_mu_);   // (P124e r2 finding 3, as in commit_exchanges)
         const uint64_t at = complement_offsets_[x.in];
         // the same test as commit_copies: an exchange whose bytes were copied is the one that flips
         if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
