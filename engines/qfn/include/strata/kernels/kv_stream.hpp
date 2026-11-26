@@ -79,8 +79,10 @@ inline constexpr int kKvCtlInts = 16;   ///< [0] epoch [1] hand [2] misses [3] o
 /// Bytes of the map's arrays besides the page table (which the state already has): 5 per-slot ints + ctl.
 inline uint64_t kv_stream_map_bytes(int64_t n_slots) { return (uint64_t) n_slots * 4 * 5 + kKvCtlInts * 4; }
 
-/// Every block evicted: page table all -1, slots free, counters zero.
-void kv_stream_reset(const KvStreamMap& m, void* stream);
+/// Every block evicted: page table all -1, slots free, counters zero.  `n_blocks`: the page table entries to
+/// clear - P124e: an elastic (VMM-backed) page table is only written where it is mapped; the entries past it are
+/// -1 by the fill every fresh chunk gets, and nothing reads an entry before its block is live.  -1: all of them.
+void kv_stream_reset(const KvStreamMap& m, void* stream, int64_t n_blocks = -1);
 
 /// Make every block named by the selections of `n_q` queries resident (ids [n_q][cap], width from
 /// steps[q * kStepCount + kStepWidth]). Capturable. `n_slots` must hold the distinct blocks of one call
@@ -91,6 +93,10 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
 
 /// The static ring table `block -> block % n_slots`.
 void kv_ring_table(int32_t* page_table, int64_t n_blocks, int64_t n_slots, void* stream);
+
+/// The ring formula for blocks [lo, hi) only: P124e, filling the page table entries a VMM-backed ring table's
+/// fresh chunks gain as a conversation grows (a zeroed entry would name slot 0 instead of `block % n_slots`).
+void kv_ring_fill(int32_t* page_table, int64_t lo, int64_t hi, int64_t n_slots, void* stream);
 
 /// Copy blocks [b0, b1) of the host copy into the pool pages `page_table` names (host-side table `phys(b)`
 /// computed as `b % n_slots`: the ring restore). Not capturable.

@@ -179,9 +179,10 @@ __global__ void copy_kernel(KvStreamMap m, Runs r) {
     }
 }
 
-__global__ void reset_kernel(KvStreamMap m) {
+__global__ void reset_kernel(KvStreamMap m, long long table_blocks) {
+    const long long lim = table_blocks < 0 ? m.n_blocks : table_blocks;
     const long long i0 = (long long) blockIdx.x * blockDim.x + threadIdx.x, st = (long long) gridDim.x * blockDim.x;
-    for (long long i = i0; i < m.n_blocks; i += st) m.page_table[i] = -1;
+    for (long long i = i0; i < lim; i += st) m.page_table[i] = -1;
     for (long long i = i0; i < m.n_slots; i += st) {
         m.slot_block[i] = -1;
         m.slot_stamp[i] = -1;
@@ -192,6 +193,12 @@ __global__ void reset_kernel(KvStreamMap m) {
 
 __global__ void ring_kernel(int32_t* table, long long n_blocks, long long n_slots) {
     for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < n_blocks;
+         i += (long long) gridDim.x * blockDim.x)
+        table[i] = (int32_t) (i % n_slots);
+}
+
+__global__ void ring_fill_kernel(int32_t* table, long long lo, long long hi, long long n_slots) {
+    for (long long i = lo + (long long) blockIdx.x * blockDim.x + threadIdx.x; i < hi;
          i += (long long) gridDim.x * blockDim.x)
         table[i] = (int32_t) (i % n_slots);
 }
@@ -208,8 +215,8 @@ uint64_t kv_block_bytes(const QsaShapes& s, int fmt) {
                 : rows * (uint64_t) s.head_dim * 2 * 2;
 }
 
-void kv_stream_reset(const KvStreamMap& m, void* stream) {
-    reset_kernel<<<128, 256, 0, (cudaStream_t) stream>>>(m);
+void kv_stream_reset(const KvStreamMap& m, void* stream, int64_t n_blocks) {
+    reset_kernel<<<128, 256, 0, (cudaStream_t) stream>>>(m, (long long) n_blocks);
     check("reset");
 }
 
@@ -238,6 +245,12 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
 void kv_ring_table(int32_t* page_table, int64_t n_blocks, int64_t n_slots, void* stream) {
     ring_kernel<<<64, 256, 0, (cudaStream_t) stream>>>(page_table, n_blocks, n_slots);
     check("ring table");
+}
+
+void kv_ring_fill(int32_t* page_table, int64_t lo, int64_t hi, int64_t n_slots, void* stream) {
+    if (hi <= lo) return;
+    ring_fill_kernel<<<64, 256, 0, (cudaStream_t) stream>>>(page_table, lo, hi, n_slots);
+    check("ring fill");
 }
 
 void kv_ring_restore(const QsaAttnPools& slots, const KvHostPools& host, int fmt, int64_t b0, int64_t b1,
