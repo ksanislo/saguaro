@@ -6,7 +6,9 @@ scripted engines that continue an answer or a half-read prompt from wherever the
 real ones do: QFN keeps a stopped read's conversation live at the token it reached - solo (generate.cpp #1620; a
 batch slot drops a cancelled read, so a batch read is never cut) - and GLM pauses by its PAUSE. saguaro-hy4 keeps a
 stopped read solo too (hy4_main.cpp:1086, :1106-1110; P124i: the driver reports keeps_stopped_read for its INFO
-engine_kind=hy4, and a LOW read steps aside for a waiting NORMAL one as well). Who steps aside
+engine_kind=hy4, and a LOW read steps aside for a waiting NORMAL one as well; saguaro-mm3 the same by its INFO line,
+P124j - and from P124u any line engine can claim it itself: READY carrying `keepread`, what saguaro-ds4 says when it
+keeps a stopped read live, keeps the read at the point it stored). Who steps aside
 (Ken's 11-25 block): a LOW answer gives its place up whenever a normal or high request runs or waits - even when
 a place is free, all running lows at once; a NORMAL one only for a waiting high one that does not fit; a HIGH one
 never.
@@ -181,6 +183,15 @@ class UnreportingRead(ReadEngine):
     have none): the continue line keeps its old numberless wording - it never invents a figure the engine did not
     tell it."""
     reports_reused = False
+
+
+class Ds4Read(UnreportingRead):
+    """saguaro-ds4 as the line driver sets it up (P124u): READY ... stop keepread [multi=n] (P124k) - no PAUSE; a
+    STOP'd prompt read stays live at the deepest point it stored (ds4_main.cpp's stopped branch), so the READY word
+    gives the driver keeps_stopped_read and a LOW read steps aside for a waiting NORMAL one."""
+    can_pause = False
+
+
 class Hy4Read(ReadEngine):
     """saguaro-hy4 as the line driver sets it up: SOLO (its READY says stop only - no PAUSE, never a multi=), with
     keeps_stopped_read - serve/server.py gives it to the engine when its INFO line says engine_kind=hy4, for its
@@ -777,6 +788,35 @@ class ReadsPreempt(Env):
         self.assertIn("priority: a low prompt read paused", log)
         self.assertIn("prompt read continues from where the engine kept it", log)
 
+    def test_a_ds4_solo_read_is_cut_for_a_normal_and_continues_kept(self):
+        # saguaro-ds4 solo (READY ... stop keepread): P124u gives the driver keeps_stopped_read from the word - a
+        # STOP'd read stays live at the point it stored (P124k's keep), so a LOW read steps aside for a NORMAL one
+        engine = Ds4Read(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        out, log = self.race_read(engine, PRIORITY_NORMAL)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])   # the normal one answered first
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)   # the kept read was not read again
+        long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
+        self.assertEqual(len(long_calls), 2)
+        self.assertEqual(long_calls[1][0], long_calls[0][0])       # the same prompt: nothing written yet
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt read continues from where the engine kept it", log)   # no figure over the pipe
+
+    def test_a_ds4_multi_read_is_cut_for_a_normal_and_continues_kept(self):
+        engine = Ds4Read(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        engine.multi = 2                            # saguaro-ds4 --parallel: READY ... stop multi=n keepread - the
+        out, log = self.race_read(engine, PRIORITY_NORMAL)    #  cut ends THIS request (STOP <rid>: the test below)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
+        long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
+        self.assertEqual(len(long_calls), 2)
+        self.assertEqual(long_calls[1][0], long_calls[0][0])
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt read continues from where the engine kept it", log)
+
     def test_a_solo_pause_engine_lets_its_read_finish(self):
         engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
         engine.multi = 0                            # solo AND an engine that drops a stopped read (no
@@ -812,11 +852,12 @@ class ReadsPreempt(Env):
         self.assertFalse(cls.can_pause)                # read, so only a solo read may be cut by a STOP
 
 
-# a line engine that only says who it is (its INFO engine_kind=), answers nothing, and ends on QUIT: the driver's
-# own start-up parsing, for which engines the driver reports keeps_stopped_read
+# a line engine that only says who it is (its INFO engine_kind=) and what its READY offers (its words after the
+# ctx), answers nothing, and ends on QUIT: the driver's own start-up parsing, for which engines it reports
+# keeps_stopped_read
 INFO_KIND_ENGINE = r'''#!/usr/bin/env python3
 import os, sys, threading, time
-kind = sys.argv[-1]
+kind, ready = sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "stop")
 def out(s):
     sys.stdout.write(s + "\n"); sys.stdout.flush()
 def reader():
@@ -825,7 +866,7 @@ def reader():
             os._exit(0)
 threading.Thread(target=reader, daemon=True).start()
 out("INFO engine=%s engine_kind=%s model=Test ctx=4096" % (kind, kind))
-out("READY 4096 stop")
+out("READY 4096 " + ready)
 while True:
     time.sleep(0.05)
 '''
@@ -834,14 +875,16 @@ while True:
 class TheReadKeepDriver(Env):
     """serve/server.py starts every line engine with StrataEngine; P124i gave the one whose INFO line says
     engine_kind=hy4 (its own line: hy4_main.cpp:932) the keeps_stopped_read the read preemption gates on -
-    its stopped read keeps the conversation live at the chunk reached.  The others are not given it."""
+    its stopped read keeps the conversation live at the chunk reached.  P124j did the same for mm3, and P124u let
+    any engine claim it itself: READY carrying `keepread` (saguaro-ds4 says it with its keep on, P124k) - the word
+    is the truth, not the engine's name.  An engine neither named nor saying the word is not given it."""
 
-    def start(self, kind):
+    def start(self, kind, ready="stop"):
         path = Path(tempfile.mkdtemp()) / "saguaro-x.py"
         path.write_text(INFO_KIND_ENGINE)
         path.chmod(0o755)
         try:
-            return StrataEngine(str(path), [kind])
+            return StrataEngine(str(path), [kind, ready])
         finally:
             shutil.rmtree(path.parent, ignore_errors=True)
 
@@ -862,9 +905,38 @@ class TheReadKeepDriver(Env):
         finally:
             eng.close()
 
+    def test_the_keepread_word_gives_it_to_any_engine(self):
+        # P124u: the word is the truth, not the engine's name - READY ... stop keepread (any engine's, DS4's with
+        # its keep on per P124k) is what the driver gates on, solo as multi
+        eng = self.start("ds4", "stop keepread")
+        try:
+            self.assertTrue(eng.keeps_stopped_read)    # solo: READY ... stop keepread - no PAUSE, no multi=
+            self.assertFalse(eng.can_pause)
+            self.assertEqual(eng.multi, 0)
+        finally:
+            eng.close()
+        eng = self.start("ds4", "stop multi=4 keepread")        # --parallel: the same word rides the multi READY
+        try:
+            self.assertEqual(eng.multi, 4)
+            self.assertTrue(eng.keeps_stopped_read)    # the cut there ends ONE request: STOP <rid>, the class below
+        finally:
+            eng.close()
+        eng = self.start("some-new-line-engine", "stop keepread")   # a name the driver never heard: the word holds
+        try:
+            self.assertTrue(eng.keeps_stopped_read)
+        finally:
+            eng.close()
+
+    def test_an_engine_without_the_word_is_not_given_it(self):
+        eng = self.start("ds4")                        # SAGUARO_DS4_KEEP_READ=0 (P124k): its READY says no keepread,
+        try:                                           #   it drops a stopped read - the name alone must not decide
+            self.assertFalse(getattr(eng, "keeps_stopped_read", False))
+        finally:
+            eng.close()
+
     def test_another_line_engine_is_not_given_it(self):
         eng = self.start("ik2")                        # Inkling 2 drops a cut read in multi (audit 8.5): not given it
-        try:                                           #   (hy4 by P124i, mm3 by P124j are)
+        try:                                           #   (hy4 by P124i, mm3 by P124j, any READY keepread by P124u are)
             self.assertFalse(getattr(eng, "keeps_stopped_read", False))
         finally:
             eng.close()
@@ -873,7 +945,8 @@ class TheReadKeepDriver(Env):
 class TheMultiCutNamesOneRequest(unittest.TestCase):
     """P124j: saguaro-mm3 --parallel (READY ... stop multi=n) keeps a cut read too, so a low read is preempted
     there as well - and the cut must end ONE conversation: the line driver's close sends `STOP <rid>`, never a
-    bare STOP, which on a multi engine ends every request the engine is running."""
+    bare STOP, which on a multi engine ends every request the engine is running.  saguaro-ds4 --parallel (READY ...
+    stop multi=n keepread, its cut gated in by P124u) drives this same close."""
 
     class Stdin:
         def __init__(self, eng):
