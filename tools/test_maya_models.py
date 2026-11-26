@@ -1,6 +1,7 @@
 """tools/test_maya_models.py - the setup's model downloads: what a setup is offered (Saguaro's four quants, the
-24 GB recommendation, the EXL3 model on NVIDIA only) and that every download names a hash per file.  No GPU, no
-network."""
+ 24 GB recommendation, the EXL3 model on NVIDIA only), that every download names a hash per file, and P124f: a
+ setup again of an existing config takes the model folder its installer records when the files are all there, and
+ offers - exactly - the files that are missing.  No GPU, no network."""
 from pathlib import Path
 import shlex
 import sys
@@ -8,6 +9,8 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import saguaro as maya  # noqa: E402
@@ -518,6 +521,71 @@ class Exl3DownloadSc410(Exl3Download405):
                 (models / n).write_bytes(b"")
             self.assertEqual(maya.download_dir(models, "EXL3-4.05bpw"), models)
             self.assertEqual(maya.download_dir(models, self.Q), models / self.Q)
+
+
+class SetupAgainOfAnExistingModel(unittest.TestCase):
+    """P124f: --setup --config <an existing config> does not ask to download its model again: the model folder
+    the config's installer records (--gguf-dir then: gguf / gguf_dir) is taken whole as it is, and a model
+    whose files lost one is offered exactly that file."""
+
+    def whole_gguf(self, path: Path) -> Path:           # (tools/gguf_writer: a GGUF incomplete() accepts)
+        from gguf_writer import GGUFWriter
+        w = GGUFWriter()
+        w.add("general.architecture", "glm5next")
+        w.add_f32("token_embd.weight", np.zeros(4, dtype=np.float32))
+        return w.write(path)
+
+    def test_the_recorded_gguf_dir_is_taken_and_nothing_is_offered(self):
+        """A config set up with --gguf-dir records gguf and gguf_dir: the setup again takes that same folder -
+        no question, no download - and step 5 uses its shards in place."""
+        names = maya.shard_names(maya.MODELS["Maya-M"])
+        with tempfile.TemporaryDirectory() as d:
+            models, folder = Path(d), Path(d) / "my-models"
+            folder.mkdir()
+            first = self.whole_gguf(folder / names[0])
+            for n in names[1:]:
+                self.whole_gguf(folder / n)
+            inst = {"models_dir": str(models), "quant": "Maya-M", "gguf": str(first), "gguf_dir": str(folder),
+                    "draft": "mtp"}
+            a = SimpleNamespace(gguf_dir=None, model=None, model_dir=None, yes=True, backend="cuda", repack=False)
+            with patch.object(maya.S, "gpus", return_value=[]), patch.object(maya, "say"), \
+                    patch.object(maya, "step", lambda *x: None), patch.object(maya, "ok", lambda *x: None), \
+                    patch.object(maya, "warn", lambda *x: None), \
+                    patch.object(maya, "rotational", return_value=False), \
+                    patch.object(maya, "offer_download", side_effect=AssertionError("nothing to download here")):
+                self.assertEqual(maya.choose_model(a, models, inst), ("local", first))
+                got = maya.model_step(a, models, ("local", first))
+            self.assertEqual((got[0], got[1], got[2]), (folder, [folder / n for n in names], "Maya-M"))
+
+    def test_a_missing_shard_is_the_only_one_offered(self):
+        """The existing config's Maya-M download has shard 3 gone: the setup again keeps Maya-M as the default
+        and its download names exactly that shard, no other file."""
+        m = maya.MODELS["Maya-M"]
+        names = maya.shard_names(m)
+        with tempfile.TemporaryDirectory() as d:
+            models = Path(d)
+            folder = models / "Maya-M"
+            folder.mkdir()
+            for n in names[:-1]:
+                self.whole_gguf(folder / n)
+            a = SimpleNamespace(gguf_dir=None, model=None, model_dir=None, yes=True, backend="cuda")
+            inst = {"models_dir": str(models), "quant": "Maya-M"}
+            with patch.object(maya.S, "gpus", return_value=[]), patch.object(maya, "say"):
+                self.assertEqual(maya.choose_model(a, models, inst), ("download", "Maya-M"))
+            lines = []
+            da = SimpleNamespace(download_model=False, yes=False)
+            with patch.object(maya, "say", side_effect=lambda *x: lines.append(" ".join(map(str, x)))), \
+                    patch.object(maya, "step", lambda *x: None), patch.object(maya, "warn", lambda *x: None), \
+                    patch.object(maya, "ok", lambda *x: None), patch.object(maya, "hf_token", return_value=None), \
+                    patch.object(maya, "rotational", return_value=False), \
+                    patch.object(maya.shutil, "disk_usage", return_value=SimpleNamespace(free=500e9)), \
+                    patch.object(maya, "ask", return_value="n"):
+                self.assertIsNone(maya.model_step(da, models, ("download", "Maya-M")))
+        text = "\n".join(lines)
+        self.assertIn("1 still to download", text)
+        curls = [ln for ln in lines if " -o " in ln]
+        self.assertEqual(len(curls), 1)
+        self.assertIn(names[-1], curls[0])
 
 
 if __name__ == "__main__":
