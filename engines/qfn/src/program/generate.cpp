@@ -18207,7 +18207,12 @@ vs.d_skip_usage = gs.d_skip_usage;
             // PLAN-p124a: the resident expert tier and the live K/V pool are ours and no release gives them back -
             // count them out of the shortage, or a resident-RAM engine drops every park seconds after parking it
             // while the host is wide open (mortar: 8.6 GiB "free", 81 GiB actually there, 68 GiB pinned by us).
-            mem.own_pinned = (srcp == &arena_src ? arena_src.pinned_arena_bytes() : src.resident_bytes()) +
+            // Only what is really pinned is credited: during a pin or after a failed one resident_bytes() names the
+            // PLANNED tier, which is not RAM held yet (complement_ready() as at :8573; the credit stops at the
+            // hard floor anyway - review F9).
+            mem.own_pinned = (srcp == &arena_src
+                                  ? arena_src.pinned_arena_bytes()
+                                  : (src.complement_ready() ? src.resident_bytes() : 0)) +
                              strata::core::qsa_kv_host_bytes();
             {
                 std::ifstream psi("/proc/pressure/memory");
