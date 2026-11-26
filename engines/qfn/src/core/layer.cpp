@@ -824,7 +824,9 @@ void host_apply(HostPool& p, uint8_t* const* a) {
 // sync drains queued GPU work, but a CPU thread that latched an old base just before host_apply would copy
 // through a dead device mapping (prefix mode: d != a).  Nothing here enforces the rule, and the mistake is
 // silent - keep any new caller on the owning session's thread.
-uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok) {
+// `announce`: log the "the host copy backs N cells now (... ms)" step - grows only; a trim gives memory BACK and
+// the card script greps that line for growth-step timings, so a park must not print it (P124e nit).
+uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, bool announce = true) {
     const auto t0 = std::chrono::steady_clock::now();
     const uint64_t had = host_prefix_bytes(p, p.backed);
     g_kv_host_bytes -= had;
@@ -901,10 +903,12 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok) {
     g_kv_host_bytes += got;
     host_apply(p, p.d.data());
     ok = true;
-    std::fprintf(stderr, "saguaro: KV streaming: the host copy backs %lld cells now (%.2f GiB pinned for K/V in all, "
-                         "%lld ms)\n", (long long) (pages * p.page_size), (double) g_kv_host_bytes.load() / 1073741824.0,
-                 (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
-                     .count());
+    if (announce)
+        std::fprintf(stderr, "saguaro: KV streaming: the host copy backs %lld cells now (%.2f GiB pinned for K/V in "
+                             "all, %lld ms)\n", (long long) (pages * p.page_size),
+                     (double) g_kv_host_bytes.load() / 1073741824.0,
+                     (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+                         .count());
     return got;
 }
 #endif
@@ -1019,7 +1023,7 @@ uint64_t qsa_host_trim(const QsaState& st, int64_t cells) {
         }
         const uint64_t before = g_kv_host_bytes.load();
         bool ok = false;
-        (void) host_prefix_reregister_locked(p, keep, ok);
+        (void) host_prefix_reregister_locked(p, keep, ok, false);   // a trim is not a growth step (no announce)
         if (!ok)   // the smaller prefix was refused: the fallback left the copy standing on MORE pages than the
                    // park needs (or none) - the conversation keeps running, but the room did not come back (nit)
             std::fprintf(stderr, "saguaro: KV streaming: giving K/V pages back failed to re-register the smaller "
