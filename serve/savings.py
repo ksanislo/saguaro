@@ -363,13 +363,15 @@ class PriceBook:
     def source(self) -> dict:
         """Where the default prices come from right now (the Savings line says it): "OpenRouter, <date>" or
         "built-in prices, <release>"."""
-        if self.live and self.live_doc is not None:
-            return {"from": "openrouter", "date": self.live_doc["as_of"], "fetched": self.live_doc.get("fetched")}
+        live, doc = self.live, self.live_doc          # (read once: the fetch thread swaps the doc wholesale)
+        if live and doc is not None:
+            return {"from": "openrouter", "date": doc["as_of"], "fetched": doc.get("fetched")}
         return {"from": "built-in", "as_of": PRICES_AS_OF, "release": release_name()}
 
     def as_of(self) -> str:
-        if self.live and self.live_doc is not None:
-            return self.live_doc["as_of"]
+        live, doc = self.live, self.live_doc
+        if live and doc is not None:
+            return doc["as_of"]
         if self.disk is not None:
             return self.disk["as_of"]
         return PRICES_AS_OF
@@ -378,7 +380,8 @@ class PriceBook:
         """The model's default prices: the fetched list's entry whose "match" fits its name, then the file's,
         then the built-in one."""
         m = str(model or "")
-        docs = ([self.live_doc] if (self.live and self.live_doc) else []) + ([self.disk] if self.disk else [])
+        live_doc = self.live_doc if self.live else None      # (read once: the fetch thread swaps the doc wholesale)
+        docs = ([live_doc] if live_doc else []) + ([self.disk] if self.disk else [])
         for doc in docs:
             for p in doc["prices"].values():
                 if re.search(p["match"], m, re.I):
