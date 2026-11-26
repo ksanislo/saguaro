@@ -125,6 +125,17 @@ int main() {
         check(said(plan(e, parked, 90 * G, 0, calm, idle, false, true)) == "1d:idle ", "never the only copy: without a folder an unwritten idle entry stays");
         check(said(plan(e, parked, 21 * G, 0, calm, idle, true, true)) == "1d:budget 2w:idle ", "one action an entry");
     }
+    // PLAN-p124a2: adopting the turn save's host capture instead of copying the K/V a second time. Only the
+    // conjunction adopts: a live whole capture, one stage, nothing retained over it, nothing run since, the same
+    // tokens, no images. The mortar case: every one of the six true, and every single one of them false refuses.
+    check(adopt_turn_capture(true, true, true, true, true, true),
+          "a whole capture the park follows: the park adopts it, no second copy");
+    check(!adopt_turn_capture(false, true, true, true, true, true), "no capture alive (its file write ended): capture normally");
+    check(!adopt_turn_capture(true, false, true, true, true, true), "a layer split parks per stage: capture normally");
+    check(!adopt_turn_capture(true, true, false, true, true, true), "the retained K/V is the source already: it keeps its prefix");
+    check(!adopt_turn_capture(true, true, true, false, true, true), "a request ran since the capture: the session is no longer those bytes");
+    check(!adopt_turn_capture(true, true, true, true, false, true), "another conversation, or more tokens: the ids say no");
+    check(!adopt_turn_capture(true, true, true, true, true, false), "images on either side: the capture is not compared against them");
     {
         std::istringstream psi("some avg10=12.34 avg60=3.00 avg300=1.00 total=123\nfull avg10=1.00 avg60=0.5 avg300=0.1 total=9\n");
         const auto v = psi_some10(psi);
