@@ -2261,5 +2261,6 @@ start whose cache has aged past a day, on a background thread that never delays 
 asks for nothing but the public list: it carries nothing about the user, the chats, the model or the machine, and
 OpenRouter learns only that a Saguaro asked. The result is cached beside the token count with its fetch time; a fetch
 that fails keeps yesterday's cache or the shipped table, with one log line, and tries again an hour later.
-`SAGUARO_LIVE_PRICES=0` says no whatever the config holds (the env beats the run config); the switch off - the
-default - is the same no.
+`SAGUARO_LIVE_PRICES=0` says no whatever the config holds and whatever the page's switch asks while the server runs:
+the env beats the run config at the start and the switch at runtime, and a toggle against it is refused with the
+reason, nothing saved; the switch off - the default - is the same no.

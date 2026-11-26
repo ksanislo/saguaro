@@ -267,6 +267,15 @@ class Page(unittest.TestCase):
         s, _ = self.req("POST", "/api/savings/live", {"live": True}, {"Origin": "http://elsewhere.example"})
         self.assertEqual(s, 403)
 
+    def test_the_live_switch_refused_while_the_environment_says_no(self):
+        """An explicit SAGUARO_LIVE_PRICES=0 wins at runtime too: the endpoint answers 400 with the reason, the
+        setting stays off and the daily path never starts."""
+        with mock.patch.dict(os.environ, {"SAGUARO_LIVE_PRICES": "0"}):
+            s, b = self.req("POST", "/api/savings/live", {"live": True})
+        self.assertEqual(s, 400)
+        self.assertIn("SAGUARO_LIVE_PRICES", b["error"]["message"])
+        self.assertFalse(self.req("GET", "/api/savings")[1]["live"])
+
 
 class PriceFiles(unittest.TestCase):
     """The shipped table: the page's own prices > data/api-prices.json > the built-ins.  A file that does not check
@@ -521,6 +530,9 @@ class OpenRouterPrices(unittest.TestCase):
 
     def test_the_setting_and_its_priority(self):
         self.assertFalse(SV.live_enabled(None, {}))                            # (off by default: nothing leaves the box)
+        self.assertIsNone(SV.env_live({}))                                     # (says nothing: the config decides)
+        self.assertIs(SV.env_live({"SAGUARO_LIVE_PRICES": "0"}), False)
+        self.assertIs(SV.env_live({"SAGUARO_LIVE_PRICES": "on"}), True)
         self.assertFalse(SV.live_enabled(True, {"SAGUARO_LIVE_PRICES": "0"}))  # (the env beats the run config)
         self.assertTrue(SV.live_enabled(False, {"SAGUARO_LIVE_PRICES": "1"}))
         self.assertTrue(SV.live_enabled(True, {"SAGUARO_LIVE_PRICES": ""}))    # (empty: the config decides)
@@ -540,6 +552,29 @@ class OpenRouterPrices(unittest.TestCase):
             self.assertEqual(json.loads(cfg.read_text())["live_prices"], False)
             led.book.start()
         net.assert_called_once()                                               # (the off spell dials nothing after)
+
+    def test_the_environment_beats_the_switch_while_running(self):
+        """SAGUARO_LIVE_PRICES=0 is not only the start's answer: the page's switch cannot override it either, and a
+        refused request starts no fetch and writes nothing; an env that agrees with the page works as before."""
+        cfg = self.tmp / "maya-maya-m.json"
+        cfg.write_text(json.dumps({"model_name": "glm-5.3-flash"}))
+        led = self.ledger(config=cfg)
+        with mock.patch.dict(os.environ, {"SAGUARO_LIVE_PRICES": "0"}), \
+                mock.patch.object(SV.urllib.request, "urlopen") as net:
+            with self.assertRaises(ValueError, msg="the env says no, the switch says yes"):
+                led.set_live(True)                                             # (the explicit env "no" wins at runtime)
+            self.assertFalse(led.book.live)
+            self.assertNotIn("live_prices", json.loads(cfg.read_text()))       # (the run config untouched)
+            net.assert_not_called()
+        with mock.patch.dict(os.environ, {"SAGUARO_LIVE_PRICES": "1"}), \
+                mock.patch.object(SV.urllib.request, "urlopen", return_value=answered()) as net:
+            led.set_live(True)                                                 # (env and page agree: it works)
+            led.book.thread.join(10)
+            with self.assertRaises(ValueError, msg="the env says yes, the switch says no"):
+                led.set_live(False)                                            # (and the same the other way)
+            self.assertTrue(led.book.live)
+        self.assertTrue(json.loads(cfg.read_text())["live_prices"])            # (saved while they agreed)
+        net.assert_called_once()                                               # (one fetch; the refused one dialled nothing)
 
     def test_a_page_turns_it_on_through_the_server(self):
         """POST /api/savings/live: the Settings switch, its own page only; the report answers with the new state."""

@@ -250,15 +250,22 @@ def load_live_file(path: Path) -> dict | None:
     return {"as_of": as_of, "fetched": fetched, "prices": prices}
 
 
-def live_enabled(cfg_value=None, env=None) -> bool:
-    """Whether the OpenRouter prices are wanted: SAGUARO_LIVE_PRICES (1/0) beats the run config's "live_prices";
-    both off by default - nothing leaves the box unless the user says so (docs/SETTINGS.md)."""
+def env_live(env=None) -> bool | None:
+    """What SAGUARO_LIVE_PRICES says about the live prices (1/on/true/yes or 0/off/false/no), or None when it says
+    nothing: this beats the run config at the start, and the page's switch while the server runs."""
     v = ((os.environ if env is None else env).get("SAGUARO_LIVE_PRICES") or "").strip().lower()
     if v in ("1", "on", "true", "yes"):
         return True
     if v in ("0", "off", "false", "no"):
         return False
-    return bool(cfg_value)
+    return None
+
+
+def live_enabled(cfg_value=None, env=None) -> bool:
+    """Whether the OpenRouter prices are wanted: SAGUARO_LIVE_PRICES (1/0) beats the run config's "live_prices";
+    both off by default - nothing leaves the box unless the user says so (docs/SETTINGS.md)."""
+    v = env_live(env)
+    return bool(cfg_value) if v is None else v
 
 
 def release_name() -> str:
@@ -472,8 +479,15 @@ class Ledger:
 
     def set_live(self, on: bool):
         """Settings > Savings: update the prices from OpenRouter once a day, or not (the shipped table only).
-        Saved in the run config ("live_prices") so the next start keeps it; on starts the fetch right away."""
+        Saved in the run config ("live_prices") so the next start keeps it; on starts the fetch right away.
+        SAGUARO_LIVE_PRICES beats this switch at runtime as it beats the config at the start: when it says 1/0
+        and the switch asks for the other, the request is refused and nothing is written (docs/SETTINGS.md)."""
         on = bool(on)
+        forced = env_live()
+        if forced is not None and forced != on:
+            raise ValueError(f"SAGUARO_LIVE_PRICES={1 if forced else 0} keeps the prices "
+                             f"{'live' if forced else 'on the shipped table'} from the environment; "
+                             "unset it to change that on the page")
         if self.config is not None:
             try:
                 p = Path(self.config)
