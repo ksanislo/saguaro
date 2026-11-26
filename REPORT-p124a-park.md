@@ -1,7 +1,7 @@
 # REPORT - P124a: the QFN conversation park lost seconds and the false "host is short of RAM"
 
 Branch `saguaro/q1-p124a-park`, engine tree `engines/qfn` (Strata 0.1.49.2). Card evidence:
-`ref/mortar-park-lines-20261225.log` (RX 9070 XT, 96 GB RAM, QFN UD-Q4, resident RAM mode 68.00 GiB pinned).
+`ref/mortar-park-lines-20261125.log` (RX 9070 XT, 96 GB RAM, QFN UD-Q4, resident RAM mode 68.00 GiB pinned).
 Nothing was run on a GPU here; the engine was built and its CPU-side test modules run (section 4).
 
 ## 1. The lost seconds: the park path end to end, and what the split's clock covers
