@@ -5642,11 +5642,13 @@ def bench_prompt_text(ref: str | None = None) -> str:
 
 def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int = 2, wait_min: float = 10.0,
           lock_ok: bool = False, tokens_file: Path | None = None, text_ref: str | None = None,
-          smoke: bool = False) -> int:
+          smoke: bool = False, parallel: bool = True) -> int:
     """--bench: the speed-test standard (tools/maya_bench.py) on the installed model - a quiet-machine check, one engine
-    session with a warm-up answer, 3 answers of 256 tokens and the 2K / 8K prompts 3 times each; medians with min-max,
-    what drafting chose, the wall time of each phase and one result line (saguaro-bench-results.txt).  --compare: the same
-    on this build and another, alternated, exactness first.  Writes saguaro-bench.txt (--report includes it).
+    session with a warm-up answer, 3 answers of 256 tokens and the 2K / 8K prompts 3 times each and (parallel, the
+    default: --bench-parallel off skips it) rounds of 1, 2 and 4 different 2K prompts sent together within the
+    config's places, ref/parallel.py's method; medians with min-max, what drafting chose, the wall time of each phase
+    and one result line (saguaro-bench-results.txt).  --compare: the same on this build and another, alternated,
+    exactness first (several-at-once rounds are not part of an A/B).  Writes saguaro-bench.txt (--report includes it).
     smoke (--bench-smoke): two short answers and no 2K / 8K prompts - does the model load and answer (the saved
     answers and the nightly check use it for a model too large for its box); no result line, never a speed number."""
     import socket
@@ -5700,10 +5702,14 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
         ctx = int(args[args.index("--max-context") + 1]) if "--max-context" in args[:-1] else 32768
         fmt = bench_chat(config_family(cfg), tp)   # (each family's own chat format, thinking off - #416, #549)
         chats = [tok.encode(fmt(q), parse_special=True) for q in BENCH_TOPICS]
+        par_plan = None
         if smoke:                                # (the last topic warms up, the first ones are the answers)
             prompts, warm, chats = {}, chats[-1], chats[:MB.SMOKE_ANSWERS]
         else:
-            prompts, warm = MB.plan_prompts(tok.encode(bench_prompt_text(text_ref)), ctx)
+            doc = tok.encode(bench_prompt_text(text_ref))
+            prompts, warm = MB.plan_prompts(doc, ctx)
+            if parallel and not compare:         # (the several-at-once rounds: same session, the engine still warm)
+                par_plan = MB.plan_parallel(doc, ctx)
         start = lambda c, cmd, env, tag: (cmd, env, c.get("cwd") or str(ROOT), ROOT / f"saguaro-bench{tag}.log")  # noqa
         cmd, env = bench_start_command(cfg, tok)      # (QFN's batch driver as its server starts it; the rest: SV's)
         here = start(cfg, cmd, env, "")
@@ -5718,9 +5724,12 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
         if not compare:
             before = MB.learned_listing(ROOT, cfg)
             run = MB.run_session(here, chats, prompts, warm, "", say,
-                                 MB.SMOKE_TOKENS if smoke else MB.DECODE_TOKENS)
+                                 MB.SMOKE_TOKENS if smoke else MB.DECODE_TOKENS,
+                                 par=par_plan, cfg_places=MB.parallel_places(cfg))
             runs = {"this": [run]}
             res = MB.summarize([run], prompts)
+            if not smoke:                        # (the several-at-once part of the table: None when skipped)
+                res["parallel"] = run["parallel"]
             drafting = MB.drafting_choice(args, cfg.get("env") or {}, run["engine_lines"], res["answers"],
                                         config_family(cfg))
             new = sorted(set(MB.learned_listing(ROOT, cfg)) - set(before))
@@ -5793,6 +5802,8 @@ def bench_text(version, cfg_path, cfg, ctx, gpu_text, res, drafting, runs, t_qui
              (f"; {res['short']} ended early, left out" if res["short"] else "")]
     lines += [f"prompt reading: {n // 1024}K tokens, median {MB.fmt_stats(s, 0)} tokens/s"
               for n, s in sorted(res["prompt"].items())]
+    if "parallel" in res:      # (the several-at-once section: absent of --compare, where no such round is run)
+        lines += MB.parallel_section(res["parallel"])
     lines.append(f"wall time: quiet check {t_quiet:.0f} s, {MB.phase_line(runs)}; all {time.time() - t_all:.0f} s")
     return lines
 
@@ -9821,6 +9832,11 @@ def main() -> int:
                                                                "(not a speed number, no result line)")
     ap.add_argument("--bench-wait", type=float, default=10.0, help="--bench: minutes to wait for a quiet machine "
                                                                    "before refusing (default 10; 0 = refuse at once)")
+    ap.add_argument("--bench-parallel", choices=("on", "off"), default="on",
+                     help="--bench: also measure several answers at once - 1, 2 and 4 different 2K prompts sent "
+                          "together within the config's places (\"parallel\" / the engine's batch slots), each "
+                          "answer's own figure including its prompt read and queueing (ref/parallel.py's method; "
+                          "the default on, off skips the section)")
     ap.add_argument("--calibrate", action="store_true",
                     help="tune the engine's CPU lane for this PC (the PCIe share and the CPU threads, ~10-15 minutes; "
                          f"{DS4}: the tensor parallel groups and the CPU threads, an engine start each, ~25-40 "
@@ -9875,7 +9891,8 @@ def main() -> int:
             fail("Saguaro is not set up here yet", f"run {ME} first")
         more = {k: v for k, v in (("lock_ok", a.bench_lock_ok), ("tokens_file", a.bench_tokens),
                                   ("text_ref", a.bench_text_ref), ("smoke", a.bench_smoke)) if v}
-        return bench(have[0], version, a.compare, max(1, a.bench_rounds), max(0.0, a.bench_wait), **more)
+        return bench(have[0], version, a.compare, max(1, a.bench_rounds), max(0.0, a.bench_wait),
+                     parallel=a.bench_parallel == "on", **more)
 
     if not a.check:                                      # (1.2.2 on an existing install: the maya-<model>.json
         renamed = migrate_config_names()                 #  configs move to the saguaro- name once, sidecars with
