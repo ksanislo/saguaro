@@ -91,10 +91,19 @@ int main() {
               "without the credit the same 8 GiB under the 16 GiB floor is still pressure (8 + an eighth asked)");
     }
     {
+        // the credit stops at the hard floor (review F1): the old check only asserted `severe` and never called
+        // plan(), while the credited pressure_need kept `pressed` false forever and no release ever ran
         Memory deep = mortar;
-        deep.available = 1 * G;   // the host genuinely critical: severe judges the raw reading, uncredited
-        check(pressure_need(deep, lim) == 0 && severe(deep, lim),
-              "a raw 1 GiB is under the hard floor: severe sees it uncredited, unsaved entries still go");
+        deep.available = 1 * G;   // the host genuinely full: under the hard floor the raw reading decides
+        check(pressure_need(deep, lim) == 17 * G && severe(deep, lim),
+              "a raw 1 GiB under the hard floor asks the raw shortfall back (16 - 1 + an eighth): the credit does not silence it");
+        check(said(plan(four, parked, 90 * G, 0, deep, lim, true, true)) == "1d:pressure 3d:pressure 2u:unsaved ",
+              "and plan() releases at raw 1 GiB with 68 GiB pinned: on disk first, the unwritten one dropped unsaved");
+        Memory above = mortar;
+        above.available = 3 * G;   // back above the hard floor: the credit works again
+        check(pressure_need(above, lim) == 0 && !severe(above, lim) &&
+              plan(four, parked, 90 * G, 0, above, lim, true, true).empty(),
+              "1 GiB over the hard floor is the resident mode working again, not pressure");
     }
     // memory stalls with RAM above the floor: one entry a round, only when the caller says a round is due
     const Memory stalled{40 * G, 23.5};

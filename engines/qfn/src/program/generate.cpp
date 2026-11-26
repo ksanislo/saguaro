@@ -18214,9 +18214,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (psi) mem.psi_some10 = pk::psi_some10(psi);
             }
             const bool pressed = pk::pressure_need(mem, park_lim) > 0;
+            // the hard floor is judged raw: below it the releases must run however big the credit is (F1)
+            const bool hard = pk::severe(mem, park_lim);
             const bool psi_due = pk::psi_high(mem, park_lim) && now - park_psi_last >= std::chrono::seconds(10);
             const bool over = conversations.parked_bytes_live() > conversations.budget();
-            if (!pressed && !psi_due && !over && park_lim.idle_s <= 0.0) return;
+            if (!pressed && !hard && !psi_due && !over && park_lim.idle_s <= 0.0) return;
             const double free_gib = mem.available ? (double) *mem.available / 1073741824.0 : -1.0;
             // the freed blocks the park pool keeps mapped are RAM nobody uses: they go before any conversation
             if (pressed && pooled > 0) {

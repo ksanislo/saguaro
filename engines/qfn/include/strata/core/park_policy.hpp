@@ -7,8 +7,9 @@
 //     that grows or a new conversation shrinks it and the oldest parked entries leave.
 //   * They never take room from the weights or from live context: when the host's available RAM falls under the
 //     floor (or the kernel reports memory stalls), they are released until it is back above it.  The engine's own
-//     pinned weights and K/V pool are credited back when judging that (Memory::own_pinned): a resident-RAM engine
-//     is meant to hold most of the host, and dropping parks cannot change that (PLAN-p124a).
+//     pinned weights and K/V pool are credited back when judging that (Memory::own_pinned) - down to the hard
+//     floor: a resident-RAM engine is meant to hold most of the host, and dropping parks cannot change that, but
+//     below the hard floor the raw reading decides and the releases fire anyway (PLAN-p124a).
 //   * Otherwise they stay: nothing expires by age unless SAGUARO_PARK_IDLE_S says so.
 // An entry whose session file is written leaves at once.  One that is not yet on disk has its write started now (no
 // write delay) and its RAM goes back when the write ends; it is dropped unwritten only when the available RAM is
@@ -40,8 +41,9 @@ struct Memory {
     // K/V pool (PLAN-p124a).  `available` counts them as used - on a resident-RAM box that keeps it under the floor
     // forever, and every park is dropped seconds after it lands while the host is wide open.  Pressure asks for what
     // is really available for one more parked conversation: the engine's own tier is credited back for the release
-    // decision (weights outrank parked, and they are not leaving); `severe` and the admission checks keep the raw
-    // reading, so a host that is genuinely full still stops a park and still drops unsaved entries.
+    // decision (weights outrank parked, and they are not leaving).  The credit stops at the hard floor: under
+    // `severe_bytes` the RAW reading is what is short - a host genuinely full is not the resident mode working, and
+    // its parks must go (F1).  The admission checks keep the raw reading too, so a full host still stops a park.
     uint64_t own_pinned = 0;
 };
 
@@ -83,17 +85,23 @@ inline std::optional<double> psi_some10(std::istream& in) {
     return std::nullopt;
 }
 
+inline bool severe(const Memory& m, const Limits& l) { return m.available && *m.available < l.severe_bytes; }
+
 /// The bytes pressure asks back: up to an eighth above the floor, so one release does not leave it at the edge.
 /// The engine's own pinned tier and live K/V pool (`own_pinned`: RAM no release gives back) are credited first -
 /// the floor guards against a shortage no parked conversation caused, not against the resident RAM mode working.
+/// The credit stops at the hard floor: under `severe_bytes` the raw reading is asked for back, so the floor still
+/// fires on a host genuinely full however much the engine itself pins (PLAN-p124a review F1 - with the credit
+/// unbounded, `pressed` could never go true on a resident-RAM box and no release, unsaved ones included, ran).
 inline uint64_t pressure_need(const Memory& m, const Limits& l) {
     if (l.free_bytes == 0 || !m.available) return 0;
-    const uint64_t avail = *m.available > UINT64_MAX - m.own_pinned ? UINT64_MAX : *m.available + m.own_pinned;
+    const uint64_t avail = severe(m, l)
+        ? *m.available
+        : (*m.available > UINT64_MAX - m.own_pinned ? UINT64_MAX : *m.available + m.own_pinned);
     if (avail >= l.free_bytes) return 0;
     return l.free_bytes - avail + l.free_bytes / 8;
 }
 inline bool psi_high(const Memory& m, const Limits& l) { return l.psi > 0.0 && m.psi_some10 && *m.psi_some10 > l.psi; }
-inline bool severe(const Memory& m, const Limits& l) { return m.available && *m.available < l.severe_bytes; }
 
 /// The releases due now.  `entries`: least recently active first.  `parked_bytes` / `budget_bytes`: what the cache
 /// holds and may hold.  `pending_bytes`: RAM of entries already released whose session file is still being written
