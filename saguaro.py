@@ -2260,7 +2260,10 @@ def choose_family(a, prev: dict) -> str:
 def choose_model(a, models: Path, inst: dict) -> tuple:
     """("download", one of MODELS) or ("local", the model's first .gguf file): --gguf-dir, --model, else asked among
     the downloads - the earlier download is the default.  ("exl3", the folder): --model-dir naming an EXL3 folder of
-    GLM-5.3-Flash."""
+    GLM-5.3-Flash.  A setup again of a config whose installer names the folder its model was set up from (gguf /
+    gguf_dir, or model_dir for an EXL3 folder) takes that folder when its files are all there: no download, no
+    question; a file missing from it is said in model_step / exl3_folder_files, and a download then takes only the
+    missing shards."""
     metal = getattr(a, "backend", None) == "metal"
     if getattr(a, "model_dir", None) and exl3_folder_family(a.model_dir) == "glm":
         if metal:
@@ -2275,6 +2278,18 @@ def choose_model(a, models: Path, inst: dict) -> tuple:
         if metal and is_exl3(a.model):
             fail(f"{a.model} runs on NVIDIA GPUs only", f"a GGUF quant runs on Metal: {ME} --setup --model {next(iter(MODELS))}")
         return "download", a.model
+    # a setup again of a config set up from its own files: --gguf-dir recorded gguf/gguf_dir in the installer,
+    # --model-dir with an EXL3 folder recorded model_dir.  If all the files are whole there, take them: no
+    # download, no question; what is missing is named by model_step / exl3_folder_files, and the download
+    # branch below then offers only the shards that are missing.
+    for p in [Path(x) for x in (inst.get("gguf"), inst.get("gguf_dir")) if x]:
+        first, _ = local_first(p)
+        if first is not None and not any(incomplete(s) for s in shard_set(first)):
+            return "local", first
+    own = Path(inst["model_dir"]) if inst.get("model_dir") else None
+    if own is not None and own.is_dir() and all(
+            (own / n).is_file() for n in ("config.json", "tokenizer.json", "tokenizer_config.json")):
+        return "exl3", own
     opts = [q for q in MODELS if (q not in MODELS_BY_HAND or q == inst.get("quant"))
             and not (metal and is_exl3(q))]   # (a chosen-by-hand download: only where it is installed; Metal: GGUFs)
     # cards of 24 GB or less: Maya-S24 (its 4-bit attention leaves ~1.5 GB more of the card for experts - decode about
@@ -6702,15 +6717,18 @@ def ds4_shards(d: Path) -> list:
 
 def ds4_dir(a, models: Path, prev: dict, quant: str = "exl3") -> Path:
     """The model's folder: --model-dir, else the folder of the DeepSeek setup before when it holds the same files
-    (its pack is inside it), else <models folder>/DeepSeek-V4.1-Flash-1017 (a GGUF: .../DeepSeek-V4.1-Flash-1017-GGUF/
-    <its folder>)."""
+    (its pack is inside it - its args' --pack folder, or the folder its installer recorded), else
+    <models folder>/DeepSeek-V4.1-Flash-1017 (a GGUF: .../DeepSeek-V4.1-Flash-1017-GGUF/<its folder>)."""
     if a.model_dir:
         return Path(a.model_dir).expanduser().resolve()
     args = prev.get("args") or []
-    if "--pack" in args[:-1] and (prev.get("installer") or {}).get("ds4_quant", "exl3") == quant:
-        d = Path(args[args.index("--pack") + 1]).parent
-        if (d / "config.json").exists() or (quant not in DS4_EXL3 and ds4_shards(d)):
-            return d
+    inst = prev.get("installer") or {}
+    if inst.get("ds4_quant", "exl3") == quant:
+        cands = ([Path(args[args.index("--pack") + 1]).parent] if "--pack" in args[:-1] else []) + \
+                ([Path(inst["model_dir"])] if inst.get("model_dir") else [])
+        for d in dict.fromkeys(cands):                 # (a setup again: the same files in place - no download;
+            if (d / "config.json").exists() or (quant not in DS4_EXL3 and ds4_shards(d)):   #  what is missing is
+                return d                               #  said and downloaded by ds4_model_step, only that)
     if quant in DS4_EXL3:
         return models / DS4_EXL3[quant]["dir"]
     return models / (f"{DS4}-abliterated-GGUF" if quant in DS4_ABL else f"{DS4}-GGUF") / DS4_QUANTS[quant]
@@ -7232,7 +7250,8 @@ def choose_mm3_quant(a, prev: dict) -> str:
 
 def mm3_dir(a, models: Path, prev: dict, quant: str = "exl3") -> Path:
     """The model's folder: --model-dir, else the folder of the MiniMax setup before when it holds the same quant (its
-    pack is inside it), else <models folder>/MiniMax-M3.1-Flash-EXL3-3.5bpw (a GGUF: <models folder>/<its name>)."""
+    pack is inside it; a folder of your own - installer own/model_dir - the same way without naming --model-dir
+    again), else <models folder>/MiniMax-M3.1-Flash-EXL3-3.5bpw (a GGUF: <models folder>/<its name>)."""
     if a.model_dir:
         return Path(a.model_dir).expanduser().resolve()
     args = prev.get("args") or []
@@ -7241,6 +7260,9 @@ def mm3_dir(a, models: Path, prev: dict, quant: str = "exl3") -> Path:
         d = Path(args[args.index("--pack") + 1]).parent
         if (d / "config.json").exists() or (quant != "exl3" and any(d.glob("*.gguf"))):
             return d
+    if inst.get("own") and inst.get("mm3_quant", "exl3") == quant and inst.get("model_dir") and \
+            Path(inst["model_dir"]).is_dir():          # (a setup again: your own folder, named there by the installer -
+        return Path(inst["model_dir"])                 #  --model-dir need not be named again)
     return models / (MM3_DIR if quant == "exl3" else MM3_QUANTS[quant])
 
 
@@ -7542,6 +7564,9 @@ def set_up_mm3(a, prev: dict) -> Path | None:
     quant = choose_mm3_quant(a, prev)
     gguf = quant != "exl3"
     own = mm3_own_dir(a, quant)                        # --model-dir: an EXL3 folder of your own, not the pinned download
+    if own is None and inst.get("own") and inst.get("mm3_quant", "exl3") == quant and \
+            inst.get("model_dir") and Path(inst["model_dir"]).is_dir():   # (a setup again: the config's own EXL3
+        own = Path(inst["model_dir"])                  #  folder, taken whole by its own index - mm3_own_step)
     need = mm3_memory_gb(quant, own)
     pc = check_pc(a, "minimax", gguf=gguf)             # 1
     total, _ = mem_gb()
@@ -9069,10 +9094,15 @@ def ik2_dir(a, models: Path, prev: dict, quant: str = Q.IK2_QUANT) -> Path:
 
 def ik2_local_gguf(a, d: Path) -> Path | None:
     """--model-dir with another Inkling 2 Mini GGUF than the published one (a quant of your own, e.g. one whose experts
-    all fit a 16 GB card): that file - the only *.gguf there beside an mmproj, the published one absent - else None."""
-    if not getattr(a, "model_dir", None) or not d.is_dir():
+    all fit a 16 GB card): that file - the only *.gguf there beside an mmproj, the published one absent - else None.
+    A setup again without --model-dir named again: the file the config's installer recorded (ik2_file, handed in by
+    set_up_ik2 as a.ik2_prev_file) - found in the recorded folder, it is taken as it is, no download."""
+    if not d.is_dir() or (d / ik2_entry()["gguf"]).is_file() or ik2_pack_in(d):   # (published, or a pack: not yours)
         return None
-    if (d / ik2_entry()["gguf"]).is_file() or ik2_pack_in(d):   # (the published GGUF, or a Strata pack)
+    was = getattr(a, "ik2_prev_file", None)
+    if was and (d / was).is_file():
+        return d / was
+    if not getattr(a, "model_dir", None):
         return None
     found = [f for f in sorted(d.glob("*.gguf")) if not f.name.startswith("mmproj")]
     return found[0] if len(found) == 1 else None
@@ -9416,6 +9446,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     engine (build/saguaro-ik2), the file (pinned, resumable, sha256-checked - or a GGUF of your own in --model-dir),
     the drafter where drafting runs, the tokenizer with the model's own template, the pictures, the config."""
     inst = prev.get("installer") or {}
+    a.ik2_prev_file = inst.get("ik2_file")             # (ik2_local_gguf: a setup again finds your own GGUF there)
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
     pc = check_pc(a, "ik2")                            # 1
