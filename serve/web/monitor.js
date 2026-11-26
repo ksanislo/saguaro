@@ -125,9 +125,9 @@ function drafterName(name) {
 const CHAT_STATES = {queued: ["muted", "Queued"], reading: ["info", "Reading"], thinking: ["accent", "Thinking"],
                      writing: ["accent", "Writing"], tool: ["warn", "Tool call"]};
 
-// the request's queue priority (R122): a small tag on its row - high and background only, normal is the run
+// the request's queue priority (R122): a small tag on its row - high and low only, normal is the run
 // of the mill; a paused one says what it waits for in its detail line ("paused for a higher-priority request")
-const PriorityTag = ({p}) => (p === "high" || p === "background")
+const PriorityTag = ({p}) => (p === "high" || p === "low")
   ? html`<span class=${`badge badge--${p === "high" ? "warn" : "muted"}`}><i class="badge__dot"></i>${p}</span>`
   : null;
 

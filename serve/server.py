@@ -370,21 +370,22 @@ class MockEngine:
 # R122: the queue priorities (a request's "priority" field, its X-Saguaro-Priority header, the config's
 # "priority"): a person's question steps an agent's long answer aside at once and runs first.  Everything
 # without one is normal, so an old client's order is exactly the plain FIFO it always was.
-PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_BACKGROUND = 2, 1, 0
-PRIORITY_NAMES = {PRIORITY_HIGH: "high", PRIORITY_NORMAL: "normal", PRIORITY_BACKGROUND: "background"}
+PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW = 2, 1, 0
+PRIORITY_NAMES = {PRIORITY_HIGH: "high", PRIORITY_NORMAL: "normal", PRIORITY_LOW: "low"}
 
 
 def priority_level(value, field="priority") -> int:
-    """One of "high" / "normal" / "background" as its level, or a ValueError naming the field (a 400)."""
+    """One of "high" / "normal" / "low" as its level, or a ValueError naming the field (a 400).  Exactly the
+    three (Ken's ONE name): "background" and "idle" are refused like any other wrong value."""
     if isinstance(value, str) and value.strip().lower() in PRIORITY_NAMES.values():
-        return {"high": PRIORITY_HIGH, "normal": PRIORITY_NORMAL, "background": PRIORITY_BACKGROUND}[
+        return {"high": PRIORITY_HIGH, "normal": PRIORITY_NORMAL, "low": PRIORITY_LOW}[
             value.strip().lower()]
-    raise ValueError(f'{field}: "high", "normal" or "background"')
+    raise ValueError(f'{field}: "high", "normal" or "low"')
 
 
 def priority_age_seconds() -> float:
-    """SAGUARO_PRIORITY_AGE_S (0 = off): a background waiter that has waited this many seconds counts as normal.
-    Off by default (Ken's rule): a background request waits as long as a higher-priority one uses or waits for the
+    """SAGUARO_PRIORITY_AGE_S (0 = off): a low waiter that has waited this many seconds counts as normal.
+    Off by default (Ken's rule): a low request waits as long as a higher-priority one uses or waits for the
     model, however long - it is never dropped or errored for waiting, only by its client, a stop or a shutdown."""
     try:
         return max(0.0, float(os.environ.get("SAGUARO_PRIORITY_AGE_S", "0") or 0))
@@ -401,10 +402,10 @@ class FairLock:
     all (the default, and `with`).  Places go in arrival order: a waiter for all of them holds back the ones behind
     it, so it is not starved.
 
-    Entries carry a priority (`enqueue(units, priority)`, `acquire(priority=...)`, high 2 / normal 1 / background 0,
+    Entries carry a priority (`enqueue(units, priority)`, `acquire(priority=...)`, high 2 / normal 1 / low 0,
     normal the default): the highest priority is granted first, FIFO inside one priority, and an all-places waiter
     holds back the ones behind it of its own or a lower priority - with equal priorities the order is the plain
-    FIFO's, unchanged.  A background waiter older than SAGUARO_PRIORITY_AGE_S counts as normal (aging);
+    FIFO's, unchanged.  A low waiter older than SAGUARO_PRIORITY_AGE_S counts as normal (aging);
     `waiting(above=p)` counts the waiters that would step ahead of a runner at level p."""
 
     def __init__(self, capacity: int = 1):
@@ -440,12 +441,12 @@ class FairLock:
         return self.capacity if units is None else max(1, min(int(units), self.capacity))
 
     def _eff(self, e) -> int:
-        """What priority a waiter counts at now: with SAGUARO_PRIORITY_AGE_S > 0 a background one that has waited
+        """What priority a waiter counts at now: with SAGUARO_PRIORITY_AGE_S > 0 a low one that has waited
         that long has aged into normal; 0 (the default) = no promotion by waiting (an entry from before the
         priorities is normal)."""
         p = e[4] if len(e) > 4 else PRIORITY_NORMAL
         age = priority_age_seconds()
-        if p == PRIORITY_BACKGROUND and 0 < age <= time.monotonic() - e[2]:
+        if p == PRIORITY_LOW and 0 < age <= time.monotonic() - e[2]:
             return PRIORITY_NORMAL
         return p
 
@@ -471,7 +472,7 @@ class FairLock:
         p = PRIORITY_NORMAL if priority is None else priority
         with self._cv:
             # the fast path only when nobody of an equal or higher priority waits: a new normal request may step
-            # over a queued background one, but never over its own kind or above a high one
+            # over a queued low one, but never over its own kind or above a high one
             if self._fits(k) and not any(self._eff(e) >= p for e in self._queue):
                 self._used += k
                 return True
@@ -522,7 +523,7 @@ class FairLock:
         """A runner's place given up, and a place in line behind whoever waits now, in one step (the claim ends with it:
         the free place is counted from here).  It keeps its priority (R122): the resumed request waits with the same
         claim it had before it gave way, so a high-priority answer cut for a person's question does not land behind
-        the agents' background queue."""
+        the agents' low queue."""
         k = self._units(units)
         me = [object(), k, time.monotonic(), True, PRIORITY_NORMAL if priority is None else priority]
         with self._cv:
@@ -976,7 +977,7 @@ def loop_guard_setting(cfg: dict | None, env=None) -> bool:
 
 
 def priority_setting(cfg: dict | None):
-    """The run config's "priority" (R122): the queue level a request without its own runs at - "background" makes
+    """The run config's "priority" (R122): the queue level a request without its own runs at - "low" makes
     every request on this server step aside for other clients' normal ones (a llama-swap alias of the same model
     sets it in its params).  None: normal, as ever; a bad value refuses to start the server."""
     v = (cfg or {}).get("priority")
@@ -992,7 +993,7 @@ def request_priority(sampling) -> int:
     """The level this request runs at: what Service.check_request put in "_priority" (R122); a caller that never
     went through it (an older integration, a test) is normal."""
     p = (sampling or {}).get("_priority")
-    return p if p in (PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_BACKGROUND) else PRIORITY_NORMAL
+    return p if p in (PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_LOW) else PRIORITY_NORMAL
 
 
 def client_stop_strings(req: dict | None) -> list[str]:
@@ -2970,7 +2971,7 @@ class RequestStat:
         self.samples = collections.deque(maxlen=4096)   # the samples inside the window, oldest first
         # what the Monitor shows of this request (several answer at once: each its own, not the shared status's)
         self.phase, self.generated, self.prompt_tokens, self.max_tokens = "waiting", 0, 0, None
-        # R122: its queue priority's name (the Monitor's small tag: high / background, normal shows nothing) and
+        # R122: its queue priority's name (the Monitor's small tag: high / low, normal shows nothing) and
         # whether it gave its place up for a request of a higher priority and waits for the engine again
         self.priority, self.paused_for_priority = None, False
         self.started, self.progress, self.prefill_tok_s = None, None, None
@@ -3199,7 +3200,7 @@ class Service:
         line takes, before anything is sent.  A logit_bias needs an engine that applies it (INFO logit_bias=1): an
         older one would answer as if it had none."""
         check_request_sampling(req)
-        # R122: the queue priority.  The body's "priority" ("high" | "normal" | "background", anything else a 400),
+        # R122: the queue priority.  The body's "priority" ("high" | "normal" | "low", anything else a 400),
         # else the X-Saguaro-Priority header the handler passed in (the body wins), else the run config's
         # "priority", else normal.  OpenAI's "service_tier" is NOT this: it names a billing tier and is refused
         # where the dialect checks it (/v1/responses), it never steps another client's request aside.
@@ -4678,7 +4679,7 @@ class Service:
             writing = len(self.current_requests)        # (of the active ones, those past their prompt)
             spec_off = bool(self.current_requests) and all(r.spec_off for r in self.current_requests)
             prios = {r.priority for r in self.running}  # (R122: the live state says at which priority it runs,
-            priority = prios.pop() if len(self.running) == 1 else None   #  and the Monitor tags high/background)
+            priority = prios.pop() if len(self.running) == 1 else None   #  and the Monitor tags high/low)
             paused = any(r.paused_for_priority for r in self.running)
             now = time.time()
             convs = self._convs_list(now)               # (one entry per conversation: the Monitor's Conversations)

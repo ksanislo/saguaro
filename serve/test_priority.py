@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.server import (IM_END, PRIORITY_NAMES, ByteTokenizer, FairLock, MockEngine, Service, serve,  # noqa: E402
-                          PRIORITY_BACKGROUND, PRIORITY_HIGH, PRIORITY_NORMAL)
+                          PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL)
 from serve.test_fair import ROOT, ResumingEngine, PausingEngine  # noqa: E402
 
 LONG = "".join(random.Random(600).choices(string.ascii_letters, k=400))     # (no loop: the guard stays out)
@@ -166,29 +166,29 @@ class FairLockPriority(Env):
         self.assertFalse(lock.locked())
 
     def test_the_highest_priority_is_granted_first_fifo_inside_one(self):
-        _lock, order = self.waiting_order([PRIORITY_NORMAL, PRIORITY_BACKGROUND, PRIORITY_HIGH, PRIORITY_NORMAL])
-        self.assertEqual(order, [2, 0, 3, 1])           # high first, the normals by arrival, the background last
+        _lock, order = self.waiting_order([PRIORITY_NORMAL, PRIORITY_LOW, PRIORITY_HIGH, PRIORITY_NORMAL])
+        self.assertEqual(order, [2, 0, 3, 1])           # high first, the normals by arrival, the low one last
 
-    def test_a_waiting_background_does_not_hold_back_a_new_normal_request(self):
+    def test_a_waiting_low_request_does_not_hold_back_a_new_normal_request(self):
         lock = FairLock()
         lock.acquire()
-        bg = lock.enqueue(priority=PRIORITY_BACKGROUND)
+        bg = lock.enqueue(priority=PRIORITY_LOW)
         lock.release()
-        self.assertTrue(lock.acquire(timeout=1))        # the fresh normal steps over the queued background
-        self.assertEqual(lock.waiting(), 1)             # the background keeps its place, behind it now
+        self.assertTrue(lock.acquire(timeout=1))        # the fresh normal steps over the queued low one
+        self.assertEqual(lock.waiting(), 1)             # the low one keeps its place, behind it now
         lock.release()
         self.assertTrue(lock.wait_turn(bg, timeout=2))
         lock.release()
 
     def test_the_aging_setting_is_off_by_default_and_on_above_zero(self):
         lock = FairLock()
-        bg = lock.enqueue(units=1, priority=PRIORITY_BACKGROUND)
+        bg = lock.enqueue(units=1, priority=PRIORITY_LOW)
         time.sleep(0.05)                               # no promotion by waiting at all: the default
-        self.assertEqual(lock._eff(bg), PRIORITY_BACKGROUND)
-        self.assertEqual(lock.waiting(above=PRIORITY_BACKGROUND), 0)      # it never cuts a running background
+        self.assertEqual(lock._eff(bg), PRIORITY_LOW)
+        self.assertEqual(lock.waiting(above=PRIORITY_LOW), 0)      # it never cuts a running low answer
         os.environ["SAGUARO_PRIORITY_AGE_S"] = "0.01"                     # set: that long of a wait counts normal
         self.assertEqual(lock._eff(bg), PRIORITY_NORMAL)
-        self.assertEqual(lock.waiting(above=PRIORITY_BACKGROUND), 1)
+        self.assertEqual(lock.waiting(above=PRIORITY_LOW), 1)
         lock.leave(bg)
 
     def test_a_waiting_normal_holds_back_a_new_one_of_its_own(self):
@@ -217,20 +217,20 @@ class FairLockPriority(Env):
 
     def test_waiting_counts_only_the_ones_that_step_ahead(self):
         lock = FairLock()
-        lock.enqueue(priority=PRIORITY_BACKGROUND)
+        lock.enqueue(priority=PRIORITY_LOW)
         lock.enqueue()
         lock.enqueue(priority=PRIORITY_HIGH)
         self.assertEqual(lock.waiting(), 3)
         self.assertEqual(lock.waiting(above=PRIORITY_NORMAL), 1)         # only the high one cuts a normal runner
-        self.assertEqual(lock.waiting(above=PRIORITY_BACKGROUND), 2)     # normal and high both cut a background
+        self.assertEqual(lock.waiting(above=PRIORITY_LOW), 2)     # normal and high both cut a low answer
         self.assertEqual(lock.highest_waiting(), PRIORITY_HIGH)
-    def test_a_queued_background_ages_into_normal(self):
+    def test_a_queued_low_ages_into_normal(self):
         os.environ["SAGUARO_PRIORITY_AGE_S"] = "0.05"
         lock = FairLock()
         lock.acquire()
-        bg = lock.enqueue(priority=PRIORITY_BACKGROUND)
+        bg = lock.enqueue(priority=PRIORITY_LOW)
         time.sleep(0.08)
-        nm = lock.enqueue()                             # a fresh normal, behind the aged background
+        nm = lock.enqueue()                             # a fresh normal, behind the aged low waiter
         self.assertTrue(lock._first(bg))                # aged into normal, it keeps its earlier arrival place
         self.assertFalse(lock._first(nm))
         lock.release()
@@ -253,21 +253,21 @@ class FairLockPriority(Env):
         lock = FairLock(2)
         lock.acquire(units=1)
         lock.acquire(units=1)
-        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_BACKGROUND))   # nobody above it at all yet
-        lock.enqueue(units=1, priority=PRIORITY_BACKGROUND)                  # an equal is never a reason
-        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_BACKGROUND))
-        self.assertEqual(lock.waiting(above=PRIORITY_BACKGROUND), 0)
-        lock.enqueue(units=1)                          # one normal waiter: cuts a background runner, one of them
+        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_LOW))   # nobody above it at all yet
+        lock.enqueue(units=1, priority=PRIORITY_LOW)                  # an equal is never a reason
+        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_LOW))
+        self.assertEqual(lock.waiting(above=PRIORITY_LOW), 0)
+        lock.enqueue(units=1)                          # one normal waiter: cuts a low runner, one of them
         self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_NORMAL))       # not a normal one (equal)
-        self.assertTrue(lock.claim_yield(0.0, above=PRIORITY_BACKGROUND))    # one gives its place up
-        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_BACKGROUND))   # the other stays: it is covered
+        self.assertTrue(lock.claim_yield(0.0, above=PRIORITY_LOW))    # one gives its place up
+        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_LOW))   # the other stays: it is covered
         lock.unclaim_yield()
 
     def test_a_free_place_nobody_yields(self):
         lock = FairLock(2)
         lock.acquire(units=1)
         lock.enqueue(units=1, priority=PRIORITY_HIGH)   # a place is free: the waiter takes it by itself
-        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_BACKGROUND))
+        self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_LOW))
 
 
 class ServicePreempts(Env):
@@ -277,7 +277,7 @@ class ServicePreempts(Env):
         self.engine = ResumingEngine(self.tok, {"long": LONG, "short": SHORT})
         self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
 
-    def race(self, low_prio=PRIORITY_BACKGROUND, high_prio=PRIORITY_HIGH):
+    def race(self, low_prio=PRIORITY_LOW, high_prio=PRIORITY_HIGH):
         out = {}
         a = threading.Thread(target=ask, args=(self.svc, "long one", 4096, out, low_prio))
         a.start()
@@ -294,7 +294,7 @@ class ServicePreempts(Env):
         base = self.engine.bases[0]
         return [c for c in self.engine.calls if c[0][:len(base)] == base]
 
-    def test_a_high_request_cuts_a_background_answer_at_once(self):
+    def test_a_high_request_cuts_a_low_answer_at_once(self):
         log = io.StringIO()
         with contextlib.redirect_stdout(log):
             out = self.race()
@@ -307,9 +307,9 @@ class ServicePreempts(Env):
         self.assertGreater(written, 0)                  # prompt + the tokens it had written
         self.assertEqual(calls[1][1], calls[0][1] - written)            # the budget left, not the whole again
         text = log.getvalue()
-        self.assertIn("[saguaro] priority: a background answer paused at", text)
+        self.assertIn("[saguaro] priority: a low answer paused at", text)
         self.assertIn("for a high-priority request", text)
-        self.assertIn("[saguaro] priority: the background answer continues", text)
+        self.assertIn("[saguaro] priority: the low answer continues", text)
         self.assertNotIn("fair slice", text)            # the priority, not the SAGUARO_FAIR_SLICE_S timer
         self.assertFalse(self.svc.fifo.locked())
         self.assertEqual(self.svc.fifo.waiting(), 0)
@@ -329,7 +329,7 @@ class ServicePreempts(Env):
         self.assertFalse(self.svc.fifo.locked())
 
     def test_equals_never_preempt(self):
-        for prio in (PRIORITY_NORMAL, PRIORITY_BACKGROUND):
+        for prio in (PRIORITY_NORMAL, PRIORITY_LOW):
             with self.subTest(prio=prio):
                 self.engine.calls.clear()
                 self.engine.bases.clear()
@@ -342,20 +342,20 @@ class ServicePreempts(Env):
                 self.assertEqual(len(self.long_calls()), 1)                # never cut
                 self.assertNotIn("priority:", log.getvalue())
 
-    def test_a_queued_background_ages_and_the_answer_steps_aside(self):
-        os.environ["SAGUARO_PRIORITY_AGE_S"] = "0.02"  # a waiting background counts as normal once it aged
+    def test_a_queued_low_ages_and_the_answer_steps_aside(self):
+        os.environ["SAGUARO_PRIORITY_AGE_S"] = "0.02"  # a waiting low request counts as normal once it aged
         log = io.StringIO()
         with contextlib.redirect_stdout(log):
-            out = self.race(low_prio=PRIORITY_BACKGROUND, high_prio=PRIORITY_BACKGROUND)
-        self.assertLess(out["short one"][1], out["long one"][1])   # the aged waiter cuts the running background
+            out = self.race(low_prio=PRIORITY_LOW, high_prio=PRIORITY_LOW)
+        self.assertLess(out["short one"][1], out["long one"][1])   # the aged waiter cuts the running low answer
         self.assertEqual(out["long one"][0], LONG)
-        self.assertIn("priority: a background answer paused", log.getvalue())
+        self.assertIn("priority: a low answer paused", log.getvalue())
 
     def test_a_cancel_while_paused_leaves_the_line(self):
         out, log = {}, io.StringIO()
         cancel = threading.Event()
         with contextlib.redirect_stdout(log):
-            a = threading.Thread(target=ask, args=(self.svc, "long one", 4096, out, PRIORITY_BACKGROUND),
+            a = threading.Thread(target=ask, args=(self.svc, "long one", 4096, out, PRIORITY_LOW),
                                  kwargs={"cancel": cancel})
             a.start()
             while self.svc.latest_request not in self.svc.current_requests:
@@ -380,7 +380,7 @@ class ServicePreempts(Env):
         self.svc.engine = self.engine
         out, log = {}, io.StringIO()
         with contextlib.redirect_stdout(log):
-            a = threading.Thread(target=ask, args=(self.svc, "long one", 4096, out, PRIORITY_BACKGROUND))
+            a = threading.Thread(target=ask, args=(self.svc, "long one", 4096, out, PRIORITY_LOW))
             a.start()
             while self.svc.latest_request not in self.svc.current_requests:
                 time.sleep(0.001)
@@ -389,7 +389,7 @@ class ServicePreempts(Env):
             while not any(getattr(s, "paused_for_priority", False) for s in list(self.svc.running)):
                 time.sleep(0.005)
             self.assertEqual([s.priority for s in self.svc.running if getattr(s, "paused_for_priority", False)],
-                             [PRIORITY_NAMES[PRIORITY_BACKGROUND]])   # it waits: still a background request
+                             [PRIORITY_NAMES[PRIORITY_LOW]])   # it waits: still a low request
             clock = [time.monotonic()]
 
             def fake():                                               # a minute of waiting per call: the ten-
@@ -402,7 +402,7 @@ class ServicePreempts(Env):
                     time.sleep(0.02)
             b.join(60)
             a.join(60)
-        self.assertIn("priority: a background answer has been paused for", log.getvalue())   # it says so, once
+        self.assertIn("priority: a low answer has been paused for", log.getvalue())   # it says so, once
         self.assertEqual(log.getvalue().count("has been paused for"), 1)
         self.assertEqual(out["long one"][0], LONG)                    # and it went on to its end: waiting ends
         self.assertEqual(out["other one"][0], other)                  #   nothing, and promotes nothing
@@ -415,7 +415,7 @@ class ServicePreempts(Env):
         self.svc.fifo.set_capacity(2)                   # two conversations at once, both places taken
         out, threads = {}, []
         for user in longs:
-            th = threading.Thread(target=ask, args=(self.svc, user, 4096, out, PRIORITY_BACKGROUND))
+            th = threading.Thread(target=ask, args=(self.svc, user, 4096, out, PRIORITY_LOW))
             th.start()
             threads.append(th)
         while len(self.svc.current_requests) < 2:
@@ -446,7 +446,7 @@ class ReadsPreempt(Env):
         svc = Service(engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
         out, log = {}, io.StringIO()
         with contextlib.redirect_stdout(log):
-            a = threading.Thread(target=ask, args=(svc, "long one", 4096, out, PRIORITY_BACKGROUND))
+            a = threading.Thread(target=ask, args=(svc, "long one", 4096, out, PRIORITY_LOW))
             a.start()
             while sum(engine.ticks.values()) < 2:
                 time.sleep(0.001)                       # it is in the middle of reading its prompt
@@ -467,9 +467,9 @@ class ReadsPreempt(Env):
         long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
         self.assertEqual(len(long_calls), 2)
         self.assertEqual(long_calls[1][0], long_calls[0][0])          # the same prompt: nothing written yet
-        self.assertIn("priority: a background prompt read paused", log)
+        self.assertIn("priority: a low prompt read paused", log)
         self.assertIn("prompt tokens for a high-priority request", log)
-        self.assertIn("priority: the background prompt read continues", log)
+        self.assertIn("priority: the low prompt read continues", log)
 
     def test_a_glm_read_pauses_by_its_pause(self):
         engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
@@ -541,7 +541,7 @@ class AcrossThePause(Env):
 
         def low():
             text = ""
-            for kind, val in svc.run(ids, True, None, max_new, {"_priority": PRIORITY_BACKGROUND},
+            for kind, val in svc.run(ids, True, None, max_new, {"_priority": PRIORITY_LOW},
                                      threading.Event()):
                 if kind == "event" and val.kind == "content":
                     text += val.text
@@ -577,7 +577,7 @@ class AcrossThePause(Env):
             out, log = {}, io.StringIO()
             with contextlib.redirect_stdout(log):
                 if interrupted:
-                    a = threading.Thread(target=ask, args=(svc, "long one", 4096, out, PRIORITY_BACKGROUND))
+                    a = threading.Thread(target=ask, args=(svc, "long one", 4096, out, PRIORITY_LOW))
                     a.start()
                     while svc.latest_request not in svc.current_requests:
                         time.sleep(0.001)
@@ -587,13 +587,13 @@ class AcrossThePause(Env):
                     a.join(30)
                     b.join(30)
                 else:
-                    ask(svc, "long one", 4096, out, PRIORITY_BACKGROUND)
+                    ask(svc, "long one", 4096, out, PRIORITY_LOW)
             return out["long one"][0], log.getvalue()
 
         plain, plog = run_both(False)
         self.assertIn("loop guard", plog)              # the guard acted: this answer really loops
         cut, clog = run_both(True)
-        self.assertIn("priority: a background answer paused", clog)
+        self.assertIn("priority: a low answer paused", clog)
         self.assertIn("loop guard", clog)
         self.assertEqual(cut, plain)                   # the same answer, and the same guard actions, across it
 
@@ -724,7 +724,7 @@ class WaitKeepAlive(Env):
 
     def test_a_paused_nonstream_answer_gets_its_headers_at_once(self):
         os.environ["SAGUARO_WAIT_SPACE_S"] = "30"        # only the pause starts it, not the waiting
-        body = {"model": "m", "stream": False, "priority": "background",
+        body = {"model": "m", "stream": False, "priority": "low",
                 "messages": [{"role": "user", "content": "block one"}]}
         plain = json.loads(self.post("/v1/chat/completions", body)[1])
         log = io.StringIO()
@@ -768,10 +768,10 @@ class RequestFields(Env):
 
     def test_every_api_takes_the_field(self):
         chat = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-        for path, req in (("/v1/chat/completions", {**chat, "stream": False, "priority": "background"}),
+        for path, req in (("/v1/chat/completions", {**chat, "stream": False, "priority": "low"}),
                           ("/v1/messages", {**chat, "max_tokens": 64, "priority": "high"}),
                           ("/v1/responses", {"model": "m", "input": "hi", "stream": False,
-                                             "priority": "background"})):
+                                             "priority": "low"})):
             s, b = self.post(path, req)
             self.assertEqual(s, 200, f"{path}: {b[:200]!r}")
         s, b = self.post("/v1/chat/completions", {**chat, "stream": False}, {"X-Saguaro-Priority": "high"})
@@ -781,27 +781,27 @@ class RequestFields(Env):
         chat = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": False}
         s, b = self.post("/v1/chat/completions", {**chat, "priority": "urgent"})
         self.assertEqual(s, 400)
-        self.assertIn('priority: "high", "normal" or "background"', json.loads(b)["error"]["message"])
+        self.assertIn('priority: "high", "normal" or "low"', json.loads(b)["error"]["message"])
         s, b = self.post("/v1/chat/completions", chat, {"X-Saguaro-Priority": "5"})
         self.assertEqual(s, 400)
         self.assertIn("X-Saguaro-Priority", json.loads(b)["error"]["message"])
 
     def test_the_body_wins_the_header_loses_and_the_config_default_applies(self):
         svc = self.svc
-        req = {"messages": [], "priority": "normal", "_priority_header": "background"}
+        req = {"messages": [], "priority": "normal", "_priority_header": "low"}
         svc.check_request(req)
         self.assertEqual(req["_priority"], PRIORITY_NORMAL)        # the body wins the header
-        req = {"messages": [], "_priority_header": "background"}
+        req = {"messages": [], "_priority_header": "low"}
         svc.check_request(req)
-        self.assertEqual(req["_priority"], PRIORITY_BACKGROUND)
+        self.assertEqual(req["_priority"], PRIORITY_LOW)
         req = {"messages": []}
         svc.check_request(req)
         self.assertEqual(req["_priority"], PRIORITY_NORMAL)        # nothing said anywhere: normal
-        svc.priority_default = PRIORITY_BACKGROUND                 # the run config's "priority"
+        svc.priority_default = PRIORITY_LOW                 # the run config's "priority"
         try:
             req = {"messages": []}
             svc.check_request(req)
-            self.assertEqual(req["_priority"], PRIORITY_BACKGROUND)
+            self.assertEqual(req["_priority"], PRIORITY_LOW)
             req = {"messages": [], "priority": "high"}
             svc.check_request(req)
             self.assertEqual(req["_priority"], PRIORITY_HIGH)      # a request still overrides the config
@@ -818,7 +818,7 @@ class RequestFields(Env):
             a = threading.Thread(target=self.post,
                                  args=("/v1/chat/completions",
                                        {"model": "m", "messages": [{"role": "user", "content": "hi"}],
-                                        "stream": False, "priority": "background"}))
+                                        "stream": False, "priority": "low"}))
             a.start()
             time.sleep(0.5)
             with urllib.request.urlopen(self.base + "/metrics", timeout=15) as r:
@@ -826,15 +826,15 @@ class RequestFields(Env):
             a.join(30)
             rows = m["live"]["chats"]
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["priority"], "background")     # the "Right now" row's tag
+            self.assertEqual(rows[0]["priority"], "low")     # the "Right now" row's tag
             self.assertFalse(rows[0]["paused_for_priority"])
-            self.assertEqual(m["live"]["priority"], "background")   # and the live state's fields
+            self.assertEqual(m["live"]["priority"], "low")   # and the live state's fields
             self.assertFalse(m["live"]["paused_for_priority"])
         finally:
             self.svc.engine = self.engine
         with urllib.request.urlopen(self.base + "/metrics", timeout=15) as r:
             m = json.loads(r.read())
-        self.assertEqual(m["requests"][0]["priority"], "background")   # the finished request's row says it too
+        self.assertEqual(m["requests"][0]["priority"], "low")   # the finished request's row says it too
 
 
 if __name__ == "__main__":
