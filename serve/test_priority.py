@@ -1281,3 +1281,38 @@ class StopReachesTheEngine(unittest.TestCase):
             gen.close()                               # (`gen` stays referenced, as in Service._sliced)
             self.assertEqual(got, [1, 2, 3])
             self.assertIn("STOP", eng.proc.stdin.sent, "the engine was not told to stop when the answer closed")
+
+
+class ClosingTheOtherWrappersClosesTheirRun(unittest.TestCase):
+    """The same 3.12 shape in the two wrappers P124c's audit found still bare: openai_chunks (the plain
+    chat/completions and ollama routes) closed its run only when its frame was GC'd - a client gone mid-answer left
+    the engine's STOP + drain for the NEXT request to trip over. response_events already closed its run in a
+    try/finally; its test keeps that true. (On 3.13 both pass either way: the manager runs these on 3.12.)"""
+
+    @staticmethod
+    def run_events(log):
+        try:
+            for i in range(1000):
+                yield "ping", None
+        finally:
+            log.append("closed")
+
+    def test_closing_the_openai_answer_closes_its_run_before_close_returns(self):
+        from serve.server import openai_chunks
+        svc = unittest.mock.Mock()
+        svc.model = "m"
+        log = []
+        gen = openai_chunks(svc, {}, [1, 2], None, None, 100, threading.Event(), run=self.run_events(log))
+        got = [next(gen) for _ in range(4)]
+        self.assertEqual((got[0]["object"], got[-1]), ("chat.completion.chunk", None))
+        gen.close()                                   # (`gen` stays referenced, as in the routes' finally)
+        self.assertEqual(log, ["closed"], "openai_chunks left its run to the frame GC")
+
+    def test_closing_the_response_answer_closes_its_run_before_close_returns(self):
+        from serve.responses import response_events
+        log = []
+        gen = response_events("m", {}, self.run_events(log))
+        got = [next(gen) for _ in range(4)]
+        self.assertEqual([got[0][0], got[1][0], got[-1]], ["response.created", "response.in_progress", None])
+        gen.close()                                   # (`gen` stays referenced, as in _response_work's finally)
+        self.assertEqual(log, ["closed"], "response_events left its run to the frame GC")
