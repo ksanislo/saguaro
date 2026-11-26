@@ -383,24 +383,37 @@ def priority_level(value, field="priority") -> int:
     raise ValueError(f'{field}: "high", "normal" or "low"')
 
 
+_ENV_S: dict = {}      # name -> (the raw env string, what it parsed to): see _env_seconds
+
+
+def _env_seconds(name: str, default: float) -> float:
+    """A seconds setting from the environment, parsed only when its raw string changed - the queue checks read
+    them under the FIFO's lock, once per waiter per grant check, and re-parsing there is pure noise. Unset,
+    empty or unparseable: the default; nothing under these goes below 0."""
+    raw = os.environ.get(name)
+    hit = _ENV_S.get(name)
+    if hit is not None and hit[0] == raw:
+        return hit[1]
+    try:
+        value = max(0.0, float(raw))
+    except (TypeError, ValueError):
+        value = float(default)
+    _ENV_S[name] = (raw, value)
+    return value
+
+
 def priority_age_seconds() -> float:
     """SAGUARO_PRIORITY_AGE_S (0 = off): a low waiter that has waited this many seconds counts as normal.
     Off by default (Ken's rule): a low request waits as long as a higher-priority one uses or waits for the
     model, however long - it is never dropped or errored for waiting, only by its client, a stop or a shutdown."""
-    try:
-        return max(0.0, float(os.environ.get("SAGUARO_PRIORITY_AGE_S", "0") or 0))
-    except ValueError:
-        return 0.0
+    return _env_seconds("SAGUARO_PRIORITY_AGE_S", 0.0)
 
 
 def priority_idle_seconds() -> float:
     """SAGUARO_PRIORITY_IDLE_S (30): the idle rule (R122) - a low request starts, or resumes after a pause, only
     when nothing normal or high runs or waits AND none finished in the last this many seconds (0 = no grace):
     a person's follow-up a few seconds after an answer finds the model where they left it."""
-    try:
-        return max(0.0, float(os.environ.get("SAGUARO_PRIORITY_IDLE_S", "") or 30))
-    except ValueError:
-        return 30.0
+    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 30.0)
 
 
 class FairLock:
