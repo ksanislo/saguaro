@@ -369,6 +369,10 @@ class OpenRouterPrices(unittest.TestCase):
                          {"DeepSeek": (0.15, 0.003, 0.6), "Z.ai": (0.15, 0.03, 0.5),
                           "MiniMax": (0.075, 0.0075, 0.3), "Tencent": (0.035, 0.0015, 0.1405),
                           "Qwen": (0.15, 0.016, 0.47), "Thinking Machines": (0.075, 0.015, 0.3)})
+        # (a family the shipped file does not name is keyed by the built-in's api name, which its match regex does
+        # not fit: the peak factor still has to come through - the price shown is the one the shipped table gives)
+        self.assertEqual(doc["prices"]["DeepSeek"]["peak"], 2.0)
+        self.assertIsNone(doc["prices"]["Z.ai"].get("peak"))
         # with the shipped file read, the families carry the file's names (and its DeepSeek peak factor stays)
         fam = SV.price_families(SV.parse_price_file((ROOT / "data" / SV.PRICE_FILE).read_text(encoding="utf-8"))[0])
         doc, why = SV.parse_openrouter(json.dumps(self.SAMPLE), fam)
@@ -381,6 +385,25 @@ class OpenRouterPrices(unittest.TestCase):
         self.assertEqual({v["openrouter"] for v in doc["prices"].values()},
                          {r["openrouter"] for r in SV.REFERENCES})            # (the mapping, end to end)
         self.assertEqual(doc["as_of"], time.strftime("%Y-%m-%d", time.gmtime()))
+
+    def test_deepseeks_peak_survives_a_shipped_file_that_cannot_be_read(self):
+        """Live on with data/api-prices.json gone: the DeepSeek family is keyed by the built-in's api name, and the
+        price counted is still the one the shipped table gives - peak hours and all."""
+        import io
+        from contextlib import redirect_stdout
+        self.repo_file.write_text("{not json")                            # (the shipped file cannot be read)
+        out = io.StringIO()
+        with mock.patch.object(SV.urllib.request, "urlopen",
+                               return_value=answered(json.dumps(self.SAMPLE))), redirect_stdout(out):
+            led = SV.Ledger(self.save / SV.FILE, "maya-ds.json", "deepseek-v4.1-flash",
+                            prices=SV.PriceBook(self.save, self.repo_file, live=True))
+            led.book.thread.join(10)
+        self.assertEqual(out.getvalue().count("ignored"), 1)               # (the one line for the broken file)
+        ref = led.price("deepseek-v4.1-flash")
+        self.assertEqual((ref["input"], ref["output"]), (0.15, 0.60))      # (OpenRouter's, from the sample)
+        self.assertEqual(ref["peak"], 2.0)                                 # (the shipped table's peak factor stays)
+        led.add(1_000_000, 0, 0, now=TUE_PEAK)
+        self.assertAlmostEqual(led.summary()["start_usd"], 2 * 0.15, places=6)   # (peak hours: counted twice)
 
     def test_a_list_that_holds_none_of_ours_is_refused(self):
         doc, why = SV.parse_openrouter(json.dumps({"data": [{"id": "other/thing", "pricing": {}}]}),

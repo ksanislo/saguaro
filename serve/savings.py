@@ -81,7 +81,8 @@ PRICE_KEYS = ("input", "cached", "output")
 
 
 def check_price(model: str, p: dict) -> dict:
-    """A price the page set for `model`: three numbers of dollars per 1M tokens (and DeepSeek's peak factor), checked."""
+    """A price the page set for `model`: three numbers of dollars per 1M tokens, and the peak factor of an entry that
+    has one (DeepSeek's peak hours) - checked."""
     if not isinstance(p, dict):
         raise ValueError("a price is input, cached and output, in dollars per 1M tokens")
     out = {}
@@ -91,10 +92,12 @@ def check_price(model: str, p: dict) -> dict:
             raise ValueError(f"{k}: a number of dollars per 1M tokens, from 0 to 1000")
         out[k] = float(v)
     base = reference(model)
-    if base and base.get("peak"):                      # (DeepSeek's peak hours: only where they are its own)
-        f = p.get("peak", base["peak"])
-        if isinstance(f, bool) or not isinstance(f, (int, float)) or not 1 <= f <= 10:
-            raise ValueError("peak hours: a factor from 1 to 10")
+    f = p.get("peak")
+    if f is None:
+        f = base.get("peak") if base else None         # (DeepSeek's peak hours: only where they are its own)
+    if f is not None:                                  # (an entry that carries one keeps it: the live fetch builds
+        if isinstance(f, bool) or not isinstance(f, (int, float)) or not 1 <= f <= 10:   #  its entries by the api
+            raise ValueError("peak hours: a factor from 1 to 10")                          #  name, which may not match)
         out["peak"] = float(f)
     if p.get("api") is not None:
         out["api"] = str(p["api"]).strip()[:40]
