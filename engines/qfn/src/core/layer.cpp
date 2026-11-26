@@ -908,7 +908,13 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
             (void) cudaHostUnregister(p.base + p.off[i]);
             (void) cudaGetLastError();
         }
-        int64_t kept = p.backed;
+        // P124e r3 finding 3: on the TRIM path (pages < what was backed) the walk-down starts at `pages`, not at
+        // the old backed count.  The trim already MADV_DONTNEED'd the run between the wanted prefix and the old
+        // one (above, per array), so starting at old_backed re-registered the run this call had just discarded:
+        // it re-faulted its zero pages into RAM (re-pinning the room the park came to give back) and answered a
+        // prefix whose tail was now zeros, while the bytes past `keep` were nobody's data any more.  `pages` > 0
+        // here (the pages <= 0 path returned above), and on the grow path min() keeps the old start.
+        int64_t kept = pages < p.backed ? pages : p.backed;
         for (int64_t pg = kept; pg > 0; pg = pg > p.unit ? pg - p.unit : 0) {   // step by step back down
             bool fits = true;
             std::vector<uint8_t*> rd(p.per.size(), nullptr);
