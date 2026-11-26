@@ -393,6 +393,16 @@ def priority_age_seconds() -> float:
         return 0.0
 
 
+def priority_idle_seconds() -> float:
+    """SAGUARO_PRIORITY_IDLE_S (30): the idle rule (R122) - a low request starts, or resumes after a pause, only
+    when nothing normal or high runs or waits AND none finished in the last this many seconds (0 = no grace):
+    a person's follow-up a few seconds after an answer finds the model where they left it."""
+    try:
+        return max(0.0, float(os.environ.get("SAGUARO_PRIORITY_IDLE_S", "") or 30))
+    except ValueError:
+        return 30.0
+
+
 class FairLock:
     """The service's FIFO: waiters get the engine in the order they asked (threading.Lock promises no order), and the
     holder can see that someone is waiting (`waiting()`, the fair slices).  acquire/release/with as threading.Lock.
@@ -405,8 +415,9 @@ class FairLock:
     Entries carry a priority (`enqueue(units, priority)`, `acquire(priority=...)`, high 2 / normal 1 / low 0,
     normal the default): the highest priority is granted first, FIFO inside one priority, and an all-places waiter
     holds back the ones behind it of its own or a lower priority - with equal priorities the order is the plain
-    FIFO's, unchanged.  A low waiter older than SAGUARO_PRIORITY_AGE_S counts as normal (aging);
-    `waiting(above=p)` counts the waiters that would step ahead of a runner at level p."""
+    FIFO's, unchanged.  A low waiter older than SAGUARO_PRIORITY_AGE_S counts as normal (aging), and a low one
+    starts or resumes only while the model is idle (SAGUARO_PRIORITY_IDLE_S, `_idle_wait`); `waiting(above=p)`
+    counts the waiters that would step ahead of a runner at level p."""
 
     def __init__(self, capacity: int = 1):
         self._cv = threading.Condition(threading.Lock())
@@ -415,6 +426,11 @@ class FairLock:
         self._used = 0
         self._yields = 0                                       # runners that decided to give their place up (claim_yield)
         self._one = False                                      # one holder at a time, whatever the capacity (Turbo)
+        self._held: list = []                                  # one entry per grant: the priority it was taken at -
+        #  the idle rule's "nothing normal or high runs" (a release without a level pops the newest, which is its own:
+        #  an all-places holder can only have it while the list is otherwise empty)
+        self._last_finish = 0.0                                # when the last normal or high request ended (release
+        #  with its priority): the idle rule's grace counts from here; 0: since before the process started
 
     def set_one(self, on: bool):
         """One holder at a time while on (places and their sizes stay the capacity's, so a flip mid-run is safe)."""
@@ -472,9 +488,11 @@ class FairLock:
         p = PRIORITY_NORMAL if priority is None else priority
         with self._cv:
             # the fast path only when nobody of an equal or higher priority waits: a new normal request may step
-            # over a queued low one, but never over its own kind or above a high one
-            if self._fits(k) and not any(self._eff(e) >= p for e in self._queue):
+            # over a queued low one, but never over its own kind or above a high one; and a low one takes it only
+            # while the model is idle (the idle rule, `_idle_wait`)
+            if self._fits(k) and not any(self._eff(e) >= p for e in self._queue) and self._idle_wait(p) == 0.0:
                 self._used += k
+                self._held.append(p)                      # (running at p: the idle rule counts it)
                 return True
             if not blocking:
                 return False
@@ -483,6 +501,21 @@ class FairLock:
             return True
         self.leave(me)
         return False
+
+    def _idle_wait(self, p: int) -> float:
+        """Seconds a request at level p still waits under the idle rule (R122) - 0: it may start or resume now.
+        A LOW one runs only while the model is idle: nothing normal or high holds a place, and none of them
+        finished in the last SAGUARO_PRIORITY_IDLE_S seconds (0 = no grace), so a person's follow-up a few
+        seconds after an answer finds the model where they left it.  -1: a normal or high request has the
+        engine - its release wakes the line.  Waiters are not looked at: the grant order already keeps a low
+        one behind every normal or high one in line.  Called under the lock; `self._held` carries one entry per
+        live grant, and a release naming no level is a context manager or a maintenance path - it holds every
+        place, so nothing else can have a grant to lose."""
+        if p > PRIORITY_LOW:
+            return 0.0
+        if PRIORITY_HIGH in self._held or PRIORITY_NORMAL in self._held:
+            return -1.0
+        return max(0.0, priority_idle_seconds() - (time.monotonic() - self._last_finish))
 
     def enqueue(self, units: int | None = None, priority: int | None = None) -> object:
         """A place in line (wait_turn waits for it, leave gives it up): a waiter that wakes up now and then (to send
@@ -525,10 +558,13 @@ class FairLock:
         claim it had before it gave way, so a high-priority answer cut for a person's question does not land behind
         the agents' low queue."""
         k = self._units(units)
-        me = [object(), k, time.monotonic(), True, PRIORITY_NORMAL if priority is None else priority]
+        p = PRIORITY_NORMAL if priority is None else priority
+        me = [object(), k, time.monotonic(), True, p]
         with self._cv:
             self._queue.append(me)
             self._used -= min(k, self._used)
+            if p in self._held:                           # (waiting in line again, not running: the idle rule)
+                self._held.remove(p)
             self._yields = max(0, self._yields - 1)
             self._cv.notify_all()
         return me
@@ -536,21 +572,28 @@ class FairLock:
     def wait_turn(self, me, timeout: float = -1) -> bool:
         """Wait until `me` is first in line and its places are free, then hold them (True); False after `timeout`,
         still in line - and False at once when `me` was given up (leave) or is no longer in the line: a wedged FIFO
-        (waiting for a place that never comes free) is what a queue that stops moving was."""
+        (waiting for a place that never comes free) is what a queue that stops moving was.  A low entry (R122)
+        also waits out the idle rule (`_idle_wait`): the sleep is capped by what is left of its grace, since
+        only time clears that part."""
         with self._cv:
             end = None if timeout is None or timeout < 0 else time.monotonic() + timeout
             while True:
                 if me not in self._queue:
                     return False
-                if self._first(me) and self._fits(min(me[1], self.capacity)):
+                p = me[4] if len(me) > 4 else PRIORITY_NORMAL
+                grace = self._idle_wait(p)
+                if grace == 0.0 and self._first(me) and self._fits(min(me[1], self.capacity)):
                     self._queue.remove(me)
                     me[1] = min(me[1], self.capacity)
                     self._used += me[1]
+                    self._held.append(p)                    # (running at p: the idle rule counts it)
                     self._cv.notify_all()                   # the next in line may fit in what is left
                     return True
                 left = None if end is None else end - time.monotonic()
                 if left is not None and left <= 0:
                     return False
+                if grace > 0:                               # grace left: sleep no longer than that, then look again
+                    left = grace if left is None else min(left, grace)
                 self._cv.wait(left)
 
     def leave(self, me):
@@ -559,7 +602,10 @@ class FairLock:
                 self._queue.remove(me)
                 self._cv.notify_all()                   # the next one may now be first in line
 
-    def release(self, units: int | None = None):
+    def release(self, units: int | None = None, priority: int | None = None):
+        """Giving a place back.  `priority` (R122): the level the place was taken at - the request path passes it,
+        and a normal or high request that ends here starts the idle rule's grace (`_idle_wait`); a release
+        without it (an encode, a reload, the context manager) is no request that finished and starts none."""
         k = self._units(units)
         with self._cv:
             if self._used < k:
@@ -570,6 +616,13 @@ class FairLock:
                       f"{self.capacity}): the engine's conversations changed while it ran", flush=True)
                 k = self._used
             self._used -= k
+            if priority is None:
+                if self._held:                            # (no level given: it gives back its own newest grant)
+                    self._held.pop()
+            elif priority in self._held:
+                self._held.remove(priority)
+            if priority is not None and priority > PRIORITY_LOW:
+                self._last_finish = time.monotonic()      # (a person's answer finished: the low grace starts)
             self._cv.notify_all()
 
     def locked(self) -> bool:
@@ -5293,7 +5346,8 @@ class Service:
                 self.fifo.leave(place)
             if hold[0]:
                 hold[0] = False
-                self.fifo.release(units=units)
+                self.fifo.release(units=units, priority=priority)   # (R122: its level - a normal or high request
+                #  that ends here is a finished answer: the idle rule's grace for the low queue starts with it)
 
     def _queue_wait(self, hold, cancel, units=1, priority=None) -> Iterator[tuple[str, object]]:
         """A request's wait in the FIFO for its first turn, as ("ping", None) every QUEUE_PING_S - the streams write
@@ -8434,7 +8488,7 @@ SERVER_ENV = ("SAGUARO_ENGINE_STALL_S", "SAGUARO_REQUEST_QUIET_S", "SAGUARO_DRAI
               "SAGUARO_MAX_BODY_MIB", "SAGUARO_FAIR_SLICE_S", "SAGUARO_FAIR_READ_S", "SAGUARO_FAIR_READ_YIELD_S",
               "SAGUARO_DS4_KEEP_THINKING",
               "SAGUARO_SERVER_LOG", "SAGUARO_GLM_THINK_RESERVE", "SAGUARO_LOOP_GUARD", "SAGUARO_QUEUE_PING_S",
-              "SAGUARO_PRIORITY_AGE_S", "SAGUARO_WAIT_EVENT_S", "SAGUARO_WAIT_SPACE_S",
+              "SAGUARO_PRIORITY_AGE_S", "SAGUARO_PRIORITY_IDLE_S", "SAGUARO_WAIT_EVENT_S", "SAGUARO_WAIT_SPACE_S",
               "SAGUARO_UPDATE_CHECK", "SAGUARO_PACK_TEMPLATE") + RESPONSE_ENV_KEYS + \
     ("SAGUARO_DS4_RESTORE_POINTS", "SAGUARO_DS4_RESTORE_TAIL")
 

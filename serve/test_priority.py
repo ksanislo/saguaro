@@ -53,12 +53,14 @@ def ask(svc, user: str, max_new: int, out: dict, prio: int | None = None, cancel
 
 
 class Env(unittest.TestCase):
-    NAMES = ("SAGUARO_FAIR_SLICE_S", "SAGUARO_FAIR_READ_S", "SAGUARO_PRIORITY_AGE_S")
+    NAMES = ("SAGUARO_FAIR_SLICE_S", "SAGUARO_FAIR_READ_S", "SAGUARO_PRIORITY_AGE_S", "SAGUARO_PRIORITY_IDLE_S")
 
     def setUp(self):
         self.env = {k: os.environ.get(k) for k in self.NAMES}
         for k in self.NAMES:
             os.environ.pop(k, None)
+        os.environ["SAGUARO_PRIORITY_IDLE_S"] = "0"      # the preemption races below cut and continue at once:
+        #  the idle rule's grace has its own class (IdleRule) - nowhere else does anything wait for it
 
     def tearDown(self):
         for k, v in self.env.items():
@@ -270,6 +272,43 @@ class FairLockPriority(Env):
         self.assertFalse(lock.claim_yield(0.0, above=PRIORITY_LOW))
 
 
+class IdleRule(Env):
+    """low = "only while idle" (Ken's 11-25): a low request starts, or resumes after a pause, only when nothing
+    normal or high runs or waits AND none finished in the last SAGUARO_PRIORITY_IDLE_S (0 = no grace).  The
+    releases pass the level, the way _turn does: a finished answer is what starts the grace."""
+
+    def test_a_low_request_waits_for_the_running_normal_and_the_grace_after_it(self):
+        os.environ["SAGUARO_PRIORITY_IDLE_S"] = "0.3"
+        lock = FairLock()
+        lock.acquire()                                    # a normal request has the engine
+        low = lock.enqueue(priority=PRIORITY_LOW)
+        self.assertFalse(lock.wait_turn(low, timeout=0.05))      # it runs: a low one starts only while idle
+        lock.release(priority=PRIORITY_NORMAL)            # it finished: the grace starts here
+        self.assertFalse(lock.wait_turn(low, timeout=0.05))      # the last answer is only that old: still waits
+        self.assertTrue(lock.wait_turn(low, timeout=2))          # the grace is over - time woke it - it starts
+        lock.release(priority=PRIORITY_LOW)
+
+    def test_a_normal_arriving_inside_the_grace_keeps_the_low_waiting(self):
+        os.environ["SAGUARO_PRIORITY_IDLE_S"] = "0.4"
+        lock = FairLock()
+        lock.acquire()
+        lock.release(priority=PRIORITY_NORMAL)            # an answer ended: the grace runs until +0.4 s
+        low = lock.enqueue(priority=PRIORITY_LOW)
+        self.assertFalse(lock.wait_turn(low, timeout=0.1))       # mid-grace: the low one waits
+        lock.acquire()                                      # a person asks again in the meantime (the fast path)
+        lock.release(priority=PRIORITY_NORMAL)              # and finishes: the grace starts over
+        self.assertFalse(lock.wait_turn(low, timeout=0.2))       # of the new one only 0.1 s elapsed: still waiting
+        lock.leave(low)
+
+    def test_grace_zero_the_low_one_starts_the_moment_it_is_next(self):
+        os.environ["SAGUARO_PRIORITY_IDLE_S"] = "0"
+        lock = FairLock()
+        lock.acquire()
+        lock.release(priority=PRIORITY_NORMAL)            # an answer ended a heartbeat ago: grace 0 = no grace
+        self.assertTrue(lock.acquire(timeout=0.5, priority=PRIORITY_LOW))   # nothing runs or waits: straight in
+        lock.release(priority=PRIORITY_LOW)
+
+
 class ServicePreempts(Env):
     def setUp(self):
         super().setUp()
@@ -435,6 +474,15 @@ class ServicePreempts(Env):
         self.assertLess(out["short one"][1], out["long B"][1])
         self.assertFalse(self.svc.fifo.locked())
         self.assertEqual(self.svc.fifo._yields, 0)
+
+    def test_a_low_request_waits_the_idle_grace_after_an_answer(self):
+        os.environ["SAGUARO_PRIORITY_IDLE_S"] = "0.4"     # the rule through run() and _turn, not just the lock
+        out = {}
+        ask(self.svc, "short one", 4096, out)             # a normal answer ends: the grace starts
+        t0 = time.monotonic()
+        ask(self.svc, "short one", 4096, out, PRIORITY_LOW)      # the engine is free - the grace is not over yet
+        self.assertGreaterEqual(time.monotonic() - t0, 0.3)      # it waited it out (with keep-alives), then ran
+        self.assertEqual(out["short one"][0], SHORT)
 
 
 class ReadsPreempt(Env):
