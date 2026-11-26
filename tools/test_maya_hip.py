@@ -419,11 +419,12 @@ class HipSetupTests(unittest.TestCase):
         return path
 
     def run_bench(self, path):
-        # (the --bench standard, tools/maya_bench.py: a warm-up answer, 3 answers, the 2K and 8K prompts 3 times each)
+        # (the --bench standard, tools/maya_bench.py: a warm-up answer, 3 answers, the 2K and 8K prompts 3 times
+        #  each, then the several-at-once rounds - one at a time here: this config has no places to parallel in)
         proc = MagicMock()
         proc.poll.side_effect = [None, 0]
         proc.stdout.readline.side_effect = ["READY\n", "DONE 32 2048 1000 2000\n"] + ["DONE 256 0 1000 2000\n"] * 3 + \
-            ["DONE 1 2048 1000 1\n", "DONE 1 8192 1000 1\n"] * 3
+            ["DONE 1 2048 1000 1\n", "DONE 1 8192 1000 1\n"] * 3 + ["DONE 8 2048 1000 100\n"]
         tok = MagicMock()
         tok.encode.return_value = list(range(20000))
         # Exercise the real server's engine_args/child_env without optional tokenizer/template packages.
