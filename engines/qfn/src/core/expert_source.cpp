@@ -3531,8 +3531,11 @@ uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
                                                                     std::memory_order_relaxed);
             }
             runs.push_back({lo, hi});
+            // P124e r2 finding 9: `gave` counts the bytes this call DISCARDS (the header's promise, and what the
+            // grow retry needs freed) - a slot whose bytes sit on shared boundary pages leaves no interior run to
+            // discard, and counting its whole blob reported relief that freed nothing while the grow retried.
+            gave += hi - lo;
         }
-        gave += s.len;
     }
     if (gave == 0) return 0;
     if (!runs.empty()) {
