@@ -2290,6 +2290,8 @@ def choose_model(a, models: Path, inst: dict) -> tuple:
     own = Path(inst["model_dir"]) if inst.get("model_dir") else None
     if own is not None and own.is_dir() and all(
             (own / n).is_file() for n in ("config.json", "tokenizer.json", "tokenizer_config.json")):
+        if metal:   # (the recorded folder is an EXL3 quant: as --model-dir above, it runs on NVIDIA GPUs only)
+            fail("an EXL3 quant runs on NVIDIA GPUs only", f"a GGUF quant runs on Metal: {ME} --setup --model {next(iter(MODELS))}")
         return "exl3", own
     opts = [q for q in MODELS if (q not in MODELS_BY_HAND or q == inst.get("quant"))
             and not (metal and is_exl3(q))]   # (a chosen-by-hand download: only where it is installed; Metal: GGUFs)
