@@ -3,17 +3,19 @@
 Every model Maya runs adds a row to the release checks. Three tools keep a release from getting slower as that list
 grows: only the models a change can reach get the full checks, the expected answers are saved once per release instead
 of being re-derived, and the long part runs unattended every night, so on release day the table is already there.
+A fourth (section 4) keeps a load from holding memory that no context is using.
 
 | Tool | What it answers | Needs a GPU |
 |---|---|---|
 | `tools/maya_changed.py <previous release tag>` | which models need the FULL checks, which a SMOKE check, what to build | no |
 | `tools/maya_golden.py` | are this build's greedy answers the ones the release gave, and if not, where they part | yes (one `--bench`) |
 | `tools/maya_nightly.py` | per machine and model, every night: answers and speed against the previous release | yes |
+| `tools/mem_vs_ctx.py <config>` | does the model hold the same memory at load whatever `--max-context` says | yes (two loads) |
 
-All three sit on `./saguaro.sh --bench` (the speed-test standard: quiet machine, GPU lock, warm-up, 3 answers of 256
-tokens, the 2K / 8K prompts, greedy, thinking off, and after them 1 / 2 / 4 different 2K prompts sent together within
-the config's places - the total tok/s and each answer's own, queueing included, `--bench-parallel off` skips that
-section) and on the config the setup wrote - never a hand-written one.
+The first three sit on `./saguaro.sh --bench` (the speed-test standard: quiet machine, GPU lock, warm-up, 3 answers of
+256 tokens, the 2K / 8K prompts, greedy, thinking off, and after them 1 / 2 / 4 different 2K prompts sent together
+within the config's places - the total tok/s and each answer's own, queueing included, `--bench-parallel off` skips
+that section) and on the config the setup wrote - never a hand-written one.
 
 ## 1. What changed -> what to test
 
@@ -171,6 +173,33 @@ Windows, Task Scheduler (one line, from an administrator prompt; adjust the fold
 schtasks /Create /TN "Maya nightly" /SC DAILY /ST 03:30 /TR "cmd /c cd /d C:\maya && git pull -q --ff-only && cmake --build build --config Release && .venv\Scripts\python.exe tools\maya_nightly.py --once >> saguaro-nightly-task.log 2>&1"
 ```
 
+## 4. Memory at load must not depend on --max-context (1.2.4)
+
+Context not in use costs nothing: starting the same model at two context sizes must hold the same memory.
+QFN broke it - it pinned host K/V for the whole max at load - and only a box short on RAM made it visible, so
+this check runs **per engine on the smallest-RAM machine available that still runs the model - never only on
+a big one** that would absorb the problem:
+
+```
+python3 tools/mem_vs_ctx.py saguaro-inkling-2-mini.json                     # 32768 vs 262144
+python3 tools/mem_vs_ctx.py saguaro-qfn-1m.json --contexts 262144,1048576   # the sizes that broke QFN
+```
+
+For each context the tool starts the server from a copy of the config (its own port, session dir and engine
+log, no api key, `--max-context` set to that value), waits for `/health` ok, and records the process tree's
+pinned/locked RAM and RSS (`VmLck`+`VmPin`, `VmRSS` of the server and its engine child), the GPU memory used
+(nvidia-smi or rocm-smi, whichever the box has, over the config's cards) and the engine's own K/V and expert
+budget lines; then it stops the run and starts the next. PASS when every figure differs by less than
+max(2%, 256 MiB) between the contexts, FAIL naming the biggest difference; the run copies (config, logs) stay
+under `scratch/mem-vs-ctx/<config>/` for the person to read. Run it on a **quiet machine** like every bench
+above: the GPU row is the *total* memory used on the card, so a neighbour job that starts between the two loads
+can move it and flip the verdict. One side effect: every load records "the config
+that worked last", so after a run a later failed start on that machine offers `scratch/mem-vs-ctx/<config>/...`
+as the config to start again - starting your own config overwrites the note.
+
+**QFN fails this check until the elastic K/V work (P124e) lands** - its FAIL line is the known state, not a
+new regression; record its figures either way. Every other engine must PASS on every machine it releases on.
+
 ## How a release uses it
 
 1. `python tools/maya_changed.py <previous tag>` -> the FULL / SMOKE plan, the builds, the suites.
@@ -197,6 +226,8 @@ What still needs a person:
   llama-swap holding it loaded (the page only answers while the Saguaro runs); `--key-file <the install's key file>`
   proves the install's key against `/v1/models` too (the page renders without it - the app asks inside). A PC with
   no chromium prints SKIP and exits 0: open that page by hand there.
+- The load-memory check: `python3 tools/mem_vs_ctx.py <config>` per engine, on the smallest-RAM machine that
+  runs the model - never only on a big one (section 4; QFN's FAIL is the known state until P124e lands).
 - Sampling: the saved answers are greedy; nothing here checks the sampler.
 - Machines without a nightly yet, AMD on Windows, and any layout a machine's list does not name.
 - The release decision itself.
