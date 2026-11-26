@@ -1053,6 +1053,13 @@ class DeepTok(Tok):
     special_ids = {"eos": 256 + len(SPECIALS) - 1}     # (DS_EOS: the engine's --eos, default the tokenizer's)
 
 
+class MiniTok(DeepTok):
+    """DeepTok, with MiniMax-M3.1's end-of-thinking tag as one token too (what the server looks up as its
+    think_end_id, serve/server.py; the plain "</think>" held too, as that vocabulary may have it)."""
+
+    SPECIALS = DeepTok.SPECIALS + ["</mm:think>"]
+
+
 class SeqEngine:
     """Answer k of a request (its k-th engine call) is seqs[k] (the last one again after that), then the turn's end.
     Records every call's prompt."""
@@ -1077,11 +1084,11 @@ class ThinkingMarkers(unittest.TestCase):
     (THINK_RESTARTS times).  In the answer it is text too when quoted in code or inside a tool call's body; spelled
     out in ordinary pieces or in plain prose it ends the turn as always."""
 
-    def answer(self, *seqs, tok=None, stop=None, budget=None, token_only_end=False, kind=None):
+    def answer(self, *seqs, tok=None, stop=None, budget=None, token_only_end=False, kind=None, template=None):
         from serve.frontend import openai_to_messages
         tok = tok or DeepTok()
         eng = SeqEngine(tok, *seqs)
-        svc = Server().service(eng)
+        svc = Service(eng, tok, template) if template is not None else Server().service(eng)
         if budget is not None:
             svc.think_budget = budget
         if token_only_end:
@@ -1143,6 +1150,50 @@ class ThinkingMarkers(unittest.TestCase):
                 self.assertIn("```python", reason)
             else:                                       # (today's text search, the other engines': the quote ends it)
                 self.assertNotEqual(text.strip(), "ANSWER OK")
+
+    def test_a_quoted_end_tag_stays_text_for_the_other_token_rule_engines(self):
+        # P124q: the QFN case above, for the three engines the token rule just reached - the GLM, MiniMax and Hy4
+        # models hold a single end-of-thinking token too (GLM's </think>, the one the budget's forced close sends;
+        # MiniMax's </mm:think>; Hy4's suffixed tag, named plain </think> in what the server reads), so a quote of
+        # the tag spelled out of ordinary pieces is text: the thinking goes on to the REAL token, and the tool call
+        # written after it is kept.  (The engine_kind-less branch of the QFN case pins the text rule that is left.)
+        mm3 = ChatTemplate(ROOT / "tools" / "mm3" / "chat_template.jinja")
+        hy4 = ChatTemplate(ROOT / "serve" / "fixtures" / "hy4_flash" / "chat_template.jinja")
+        for kind, template, tag in (("glm", None, "</think>"), ("minimax", mm3, "</mm:think>"),
+                                    ("hy4", hy4, "</think>")):     # (Hy4's vocab check falls back to the plain name)
+            with self.subTest(kind):
+                t = MiniTok() if kind == "minimax" else DeepTok()
+                quote = t.encode('the edit: MockEngine(tok, "</think>\n\nhello")\n```python\nx = 1\n',
+                                 parse_special=False)
+                end = t.encode(tag, parse_special=True)
+                seq = quote + end + t.encode("\n\nHere it is.\n", parse_special=True) + \
+                    t.encode(call_text("ls -la"), parse_special=True)
+                svc, eng, text, reason, calls, done = self.answer(seq, tok=t, kind=kind, template=template)
+                self.assertEqual((len(eng.prompts), done["finish"]), (1, "stop"))
+                self.assertIsNotNone(svc.think_end_id)          # (the vocabulary has the single token to close on)
+                self.assertIn("Here it is.", text)              # (the answer followed the real token)
+                self.assertNotIn("```python", text)             # (the quote stayed in the thinking, not the answer)
+                self.assertIn('"</think>', reason)
+                self.assertIn("```python", reason)
+                self.assertEqual(calls, ["bash"])               # (the call written after it: kept)
+
+    def test_minimax_closes_on_a_plain_end_tag_token_too(self):
+        # a MiniMax vocabulary may hold a plain "</think>" beside its </mm:think> (serve/server.py): a model that
+        # samples THAT token closed nothing once the text rule went - the whole answer ran on as reasoning, the call
+        # after it was never read out and the turn ended with the stop note (REVIEW-RESULT finding 2).  The plain
+        # token ends the reasoning just the same (think_end_id_alt); the engine's forced close keeps the canonical.
+        tok = MiniTok()
+        seq = tok.encode("thinking.", parse_special=True) + tok.encode("</think>", parse_special=True) + \
+            tok.encode("\n\nHere it is.\n", parse_special=True) + tok.encode(call_text("ls -la"), parse_special=True)
+        svc, eng, text, reason, calls, done = self.answer(
+            seq, tok=tok, kind="minimax", template=ChatTemplate(ROOT / "tools" / "mm3" / "chat_template.jinja"))
+        self.assertEqual((len(eng.prompts), done["finish"]), (1, "stop"))
+        self.assertEqual(svc.think_end_id_alt, tok.encode("</think>", parse_special=True)[0])
+        self.assertIn("Here it is.", text)
+        self.assertNotIn("thinking.", text)                     # (the answer is the answer, not the reasoning)
+        self.assertIn("thinking.", reason)
+        self.assertEqual(calls, ["bash"])                       # (the call after it: read out, as the answer's)
+        self.assertNotIn(THINK_STOP_NOTE, text)
 
     def test_the_engine_eos_in_the_thinking_resumes_it(self):
         tok = DeepTok()
