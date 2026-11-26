@@ -1020,6 +1020,11 @@ uint64_t qsa_host_trim(const QsaState& st, int64_t cells) {
         const uint64_t before = g_kv_host_bytes.load();
         bool ok = false;
         (void) host_prefix_reregister_locked(p, keep, ok);
+        if (!ok)   // the smaller prefix was refused: the fallback left the copy standing on MORE pages than the
+                   // park needs (or none) - the conversation keeps running, but the room did not come back (nit)
+            std::fprintf(stderr, "saguaro: KV streaming: giving K/V pages back failed to re-register the smaller "
+                                 "prefix; the copy keeps what it could (%.2f GiB pinned for K/V in all)\n",
+                         (double) g_kv_host_bytes.load() / 1073741824.0);
         return before - g_kv_host_bytes.load();
     }
     bool more = false;
