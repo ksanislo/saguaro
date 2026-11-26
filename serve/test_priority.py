@@ -401,6 +401,29 @@ class ServicePreempts(Env):
         self.assertEqual(out["long one"][0], LONG)
         self.assertIn("priority: a low answer paused", log.getvalue())
 
+    def test_turbo_one_at_a_time_respects_the_priorities(self):
+        # (the review's nit 7): a Turbo engine keeps one answer at a time whatever the places (set_one):
+        # a free second place is no shield in either direction - a running low gives its place up for a
+        # waiting high, and a fresh normal does not take it beside a running low either, it steps the low
+        # aside and runs first (one_at_a_time is the FIFO's _fits, the priorities ride on top of it)
+        self.svc.fifo.set_capacity(2)
+        self.svc.fifo.set_one(True)
+        for above in (PRIORITY_HIGH, PRIORITY_NORMAL):
+            with self.subTest(above=above):
+                self.engine.calls.clear()
+                self.engine.bases.clear()
+                log = io.StringIO()
+                with contextlib.redirect_stdout(log):
+                    out = self.race(low_prio=PRIORITY_LOW, high_prio=above)
+                self.assertEqual(out["long one"][0], LONG)            # resumed intact either way
+                self.assertEqual(out["short one"][0], SHORT)
+                self.assertLess(out["short one"][1], out["long one"][1])
+                self.assertGreaterEqual(len(self.long_calls()), 2)    # cut: a free place is no shield
+                self.assertIn("[saguaro] priority: a low answer paused", log.getvalue())
+                self.assertEqual(self.svc.fifo._yields, 0)
+                self.assertFalse(self.svc.fifo.locked())
+                self.assertEqual(self.svc.fifo.waiting(), 0)
+
     def test_a_cancel_while_paused_leaves_the_line(self):
         out, log = {}, io.StringIO()
         cancel = threading.Event()
