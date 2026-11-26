@@ -189,7 +189,9 @@ pinned/locked RAM and RSS (`VmLck`+`VmPin`, `VmRSS` of the server and its engine
 (nvidia-smi or rocm-smi, whichever the box has, over the config's cards) and the engine's own K/V and expert
 budget lines; then it stops the run and starts the next. PASS when every figure differs by less than
 max(2%, 256 MiB) between the contexts, FAIL naming the biggest difference; the run copies (config, logs) stay
-under `scratch/mem-vs-ctx/<config>/` for the person to read.
+under `scratch/mem-vs-ctx/<config>/` for the person to read. One side effect: every load records "the config
+that worked last", so after a run a later failed start on that machine offers `scratch/mem-vs-ctx/<config>/...`
+as the config to start again - starting your own config overwrites the note.
 
 **QFN fails this check until the elastic K/V work (P124e) lands** - its FAIL line is the known state, not a
 new regression; record its figures either way. Every other engine must PASS on every machine it releases on.
