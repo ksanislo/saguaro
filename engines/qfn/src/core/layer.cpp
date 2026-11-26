@@ -914,8 +914,18 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
         // it re-faulted its zero pages into RAM (re-pinning the room the park came to give back) and answered a
         // prefix whose tail was now zeros, while the bytes past `keep` were nobody's data any more.  `pages` > 0
         // here (the pages <= 0 path returned above), and on the grow path min() keeps the old start.
-        int64_t kept = pages < p.backed ? pages : p.backed;
-        for (int64_t pg = kept; pg > 0; pg = pg > p.unit ? pg - p.unit : 0) {   // step by step back down
+        // P124e r3 finding 4: the GROW path gets exactly ONE step - the old prefix itself.  Its conversation is
+        // LIVE at p.backed: a fallback that stepped down to a smaller prefix would stand it on a mapping that
+        // ends below its own cells (the next read writes past a dead device base), and the pieces path's
+        // rollback-to-`had` never drops a failed step below the old pinned prefix either.  So grow retries the
+        // old size once (RAM the failed target attempt held is back by now, so this usually succeeds - the copy
+        // then stands exactly where it did before the failed grow and only the grow is reported); if even the
+        // old, already-populated run is refused (relief has failed - a driver limit, not transient RAM), nothing
+        // can stand and the nulling below is the honest answer: the caller's line says so, ram_reclaim parks
+        // what can park, and a later grow re-registers the still-populated pages whole.
+        const bool trimming = pages < old_backed;
+        int64_t kept = trimming ? pages : old_backed;
+        for (int64_t pg = kept; pg > 0 && (trimming || pg == kept); pg = pg > p.unit ? pg - p.unit : 0) {   // step by step back down
             bool fits = true;
             std::vector<uint8_t*> rd(p.per.size(), nullptr);
             uint64_t rb = 0;
