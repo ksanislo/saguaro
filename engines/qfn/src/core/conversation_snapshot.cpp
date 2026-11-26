@@ -329,7 +329,8 @@ namespace {
 // After the authoritative pools were rewritten: the VRAM slots of a streamed state still hold the outgoing
 // conversation, so resolve must refill them before any attention reads (shared by restore and direct copy).
 bool refresh_residency(const QsaState& st, const ModelGeometry& g, int64_t upto, std::string& error) {
-    if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, nullptr);
+    // P124e: a follow pool's page table is written only where it is mapped (the fresh chunks are -1 filled)
+    if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, nullptr, qsa_table_backed_pages(st));
     if (st.kv_mode == 2 && upto > 0) {
         auto shapes = strata::kernels::qsa_real_shapes();
         shapes.n_head_kv = g.n_head_kv; shapes.head_dim = g.head_dim;
