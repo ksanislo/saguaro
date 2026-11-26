@@ -9,6 +9,7 @@ of being re-derived, and the long part runs unattended every night, so on releas
 | `tools/maya_changed.py <previous release tag>` | which models need the FULL checks, which a SMOKE check, what to build | no |
 | `tools/maya_golden.py` | are this build's greedy answers the ones the release gave, and if not, where they part | yes (one `--bench`) |
 | `tools/maya_nightly.py` | per machine and model, every night: answers and speed against the previous release | yes |
+| `tools/refresh_prices.py` | before cutting the release: refill the shipped Saved-line price fallback `data/api-prices.json` from OpenRouter's public model list (the file's `match`, `api`, `peak` and ids stay as written; docs/SETTINGS.md) | no |
 
 All three sit on `./saguaro.sh --bench` (the speed-test standard: quiet machine, GPU lock, warm-up, 3 answers of 256
 tokens, the 2K / 8K prompts, greedy, thinking off) and on the config the setup wrote - never a hand-written one.
