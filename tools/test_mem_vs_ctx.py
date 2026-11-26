@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tools")]
@@ -247,7 +248,18 @@ class TableAndVerdictTests(unittest.TestCase):
         self.assertIn("nothing", why)
 
 
-@unittest.skipIf(os.name == "nt", "/proc and SIGTERM: Linux/macOS")
+class PlatformTests(unittest.TestCase):
+    def test_has_proc_here_yes_in_a_fake_root_no(self):
+        self.assertTrue(MV.has_proc())
+        with tempfile.TemporaryDirectory() as t:
+            self.assertFalse(MV.has_proc(str(Path(t) / "no-proc-here")))
+
+    def test_main_refuses_a_box_without_proc(self):
+        with mock.patch.object(MV, "has_proc", lambda *a, **k: False):
+            self.assertEqual(MV.main(["no-such-config.json", "--contexts", "32768,262144"]), 2)
+
+
+@unittest.skipUnless(Path("/proc/self/status").is_file(), "the real /proc (VmRSS, the port's owner): Linux only")
 class MockEngineCycleTests(unittest.TestCase):
     """One real start/stop through the tool's own functions, against the scripted mock engine - no GPU, no model."""
 

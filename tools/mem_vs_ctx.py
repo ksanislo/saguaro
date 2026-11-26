@@ -12,15 +12,18 @@ the config's cards), and the engine's own log lines that state a K/V or expert b
 "pinned RAM", "resident" or "KV").  Then it stops the run - kill by the port's owner - and starts the next.
 
 A table of every figure per context, the budget lines, and the verdict: PASS when every figure differs by less
-than max(2%, 256 MiB) between the contexts, FAIL naming the biggest difference.  Exit 0 PASS, 1 FAIL, 2 a port
-already in use.  A PC with no GPU reader prints "-" for the GPU row and leaves it out of the rule.
+than max(2%, 256 MiB) between the contexts, FAIL naming the biggest difference.  Exit 0 PASS, 1 FAIL, 2 nothing
+could be measured: a port already in use, or no /proc here.  A PC with no GPU reader prints "-" for the GPU row
+and leaves it out of the rule.
 
     python3 tools/mem_vs_ctx.py saguaro-inkling-2-mini.json
     python3 tools/mem_vs_ctx.py saguaro-qfn.json --contexts 262144,1048576 --port 8093
 
 The run copies live under scratch/mem-vs-ctx/<config>/ (one folder per context: the config copy, the engine log,
-the server's own output).  Needs a GPU and the model to load - it is a release check, not a unit test;
-tools/test_mem_vs_ctx.py covers the parsing, the table and the verdict, and the start/stop cycle on the mock.
+the server's own output).  Needs Linux (/proc/self/status is checked before anything starts: a box without /proc
+would read zeros for every figure and PASS on nothing) and a GPU and the model to load - it is a release check,
+not a unit test; tools/test_mem_vs_ctx.py covers the parsing, the table and the verdict, and the start/stop cycle
+on the mock.
 """
 from __future__ import annotations
 
@@ -73,6 +76,16 @@ def read_proc_status(pid: int, proc="/proc") -> dict:
             return parse_proc_status(f.read())
     except (OSError, ValueError):
         return {"VmLck": 0.0, "VmPin": 0.0, "VmRSS": 0.0}
+
+
+def has_proc(proc: str = "/proc") -> bool:
+    """Whether /proc is really there: every reader above swallows its absence into zeros, so without this
+    check a box with no /proc (a Mac, some containers) would print 0.0 for everything and PASS on nothing."""
+    try:
+        with open(os.path.join(proc, "self", "status"), encoding="ascii", errors="replace"):
+            return True
+    except OSError:
+        return False
 
 
 def ppid_of(pid: int, proc="/proc") -> int | None:
@@ -412,6 +425,10 @@ def main(argv=None) -> int:
                       "32768,262144; any two or more, e.g. 262144,1048576)")
     ap.add_argument("--port", type=int, default=8093, help="the first port to start on (one per context)")
     a = ap.parse_args(argv)
+    if not has_proc():
+        print("this check reads the process tree through /proc (Linux): /proc/self/status cannot be read "
+              "here, so every figure would be 0.0 and the verdict a PASS on nothing - not run", file=sys.stderr)
+        return 2
     contexts = [int(x) for x in a.contexts.replace(" ", "").split(",") if x.strip()]
     if len(contexts) < 2:
         ap.error("--contexts needs at least two sizes to compare")

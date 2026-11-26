@@ -31,7 +31,9 @@ it was only seen on a 96 GB box. This task builds the CHECK for every engine; it
   difference that broke the limit. Exit 0 PASS, 1 FAIL (a run that never got to `/health` ok too - the line
   names the run's log folder), 2 a port already in use before anything started.
 
-Pure stdlib, Linux/macOS (`/proc`); no imports from `serve/`, so the tests and the tool share one file.
+Pure stdlib, Linux (`/proc` — `main` checks `/proc/self/status` before anything starts and exits 2 when it cannot
+be read, rather than printing zeros and PASSing on nothing; macOS and Windows have no `/proc`); no imports from
+`serve/`, so the tests and the tool share one file.
 
 ### 2. `tools/test_mem_vs_ctx.py` (new) — the tests
 
@@ -97,7 +99,9 @@ person".
 - **AMD boxes**: the `rocm-smi --showmeminfo vram` parser expects the classic `GPU[N] : VRAM Total Used
   Memory (B):` lines; a ROCm that prints its newer table would read None (GPU left out of the rule) until
   its format is added - unmeasured here, this box has no GPU tools to run.
-- **Windows has no `/proc`**: the check is Linux/macOS (the process-tree and port-owner reading); a Windows
-  release check would need psutil or `Get-NetTCPConnection` - out of the plan's scope, untested.
+- **No `/proc`, no check**: macOS and Windows have no `/proc` (the process-tree and port-owner reading), so the
+  check is Linux-only - it refuses to start when `/proc/self/status` cannot be read, and the mock-cycle test
+  skips there; a release check on those boxes would need psutil or `Get-NetTCPConnection` - out of the plan's
+  scope, untested.
 - Whether the nightly should ever run this automatically (two loads per model per night) - the plan puts it
   in the per-machine (person) list only.
