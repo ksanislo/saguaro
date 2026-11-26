@@ -916,8 +916,8 @@ class RequestFields(Env):
             self.assertEqual(req["_priority"], PRIORITY_HIGH)      # a request still overrides the config
         finally:
             svc.priority_default = None
-        for bad in ("urgent", 5, True, {"p": 1}):
-            with self.assertRaises(ValueError, msg=repr(bad)):
+        for bad in ("urgent", "background", "idle", 5, True, {"p": 1}):    # the old names: refused like any
+            with self.assertRaises(ValueError, msg=repr(bad)):             #  other wrong value (ONE name)
                 svc.check_request({"messages": [], "priority": bad})
 
     def test_the_metrics_rows_and_the_live_state_carry_it(self):
