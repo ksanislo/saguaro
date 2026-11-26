@@ -1521,6 +1521,8 @@ class StrataEngine:
                 self.multi = next((int(x[6:]) for x in f[2:] if x.startswith("multi=") and x[6:].isdigit()), 0)
                 # P124h: GLM keeps a cancelled prompt read (#573), so solo reads can pause too; maya-metal drops one, so it does not
                 self.keeps_stopped_read = self.can_pause and Path(exe).name.lower() != "maya-metal"
+                if self.info.get("engine_kind") == "mm3":   # P124j: MM3 keeps a cancelled read too (solo and multi), so a cut read resumes
+                    self.keeps_stopped_read = True
                 break
         loading.set()
         if self.max_context <= 0:
