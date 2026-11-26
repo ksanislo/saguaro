@@ -6632,25 +6632,27 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
     messages = list(messages)
     while True:
         text, reasoning, calls, own_calls = [], [], [], 0
-        for kind, x in svc.run(ids, thinking, tools, max_new, sampling, cancel):
-            if kind == "done":
-                done = x
-                continue
-            if kind == "event":
-                ev: Event = x
-                if ev.call is not None and ev.call.name in mcp_names:
-                    if ev.kind == "tool_start":          # the model has started writing a call: say so at once
-                        yield "mcp", {"event": "start", "id": ev.call.id, "name": ev.call.name}
-                    elif ev.kind == "tool_call":
-                        calls.append(ev.call)
-                    continue                             # its argument pieces are not streamed to the client
-                if ev.kind == "tool_call":
-                    own_calls += 1
-                elif ev.kind == "content":
-                    text.append(ev.text)
-                elif ev.kind == "reasoning":
-                    reasoning.append(ev.text)
-            yield kind, x
+        with contextlib.closing(svc.run(ids, thinking, tools, max_new, sampling, cancel)) as _inner:
+            # (closed on any exit: Python 3.12 ran the inner STOP + drain only when the outer one was freed)
+            for kind, x in _inner:
+                if kind == "done":
+                    done = x
+                    continue
+                if kind == "event":
+                    ev: Event = x
+                    if ev.call is not None and ev.call.name in mcp_names:
+                        if ev.kind == "tool_start":          # the model has started writing a call: say so at once
+                            yield "mcp", {"event": "start", "id": ev.call.id, "name": ev.call.name}
+                        elif ev.kind == "tool_call":
+                            calls.append(ev.call)
+                        continue                             # its argument pieces are not streamed to the client
+                    if ev.kind == "tool_call":
+                        own_calls += 1
+                    elif ev.kind == "content":
+                        text.append(ev.text)
+                    elif ev.kind == "reasoning":
+                        reasoning.append(ev.text)
+                yield kind, x
         total += done["completion_tokens"]
         run_them = calls and not own_calls and done["finish"] == "stop" and not cancel.is_set()
         if run_them and rounds >= max_rounds:
@@ -6990,60 +6992,62 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
         return ("content_block_stop", {"type": "content_block_stop", "index": index})
 
     streamed = set()
-    for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel):
-        if kind == "ping":
-            yield None
-            continue
-        if kind == "event":
-            ev: Event = x
-            if ev.kind == "tool_args":
-                yield "content_block_delta", {"type": "content_block_delta", "index": index,
-                                              "delta": {"type": "input_json_delta", "partial_json": ev.text}}
+    with contextlib.closing(svc.run(ids, thinking, tools, max_new, req, cancel)) as _inner:
+        # (closed on any exit: Python 3.12 ran the inner STOP + drain only when the outer one was freed)
+        for kind, x in _inner:
+            if kind == "ping":
+                yield None
                 continue
-            if ev.kind == "tool_call" and ev.call.id in streamed:
-                continue
-            want = {"reasoning": "thinking", "content": "text", "tool_call": "tool_use", "tool_start": "tool_use"}[ev.kind]
-            if ev.kind not in ("tool_call", "tool_start") and not ev.text:
-                continue
-            if ev.kind == "tool_start":
-                streamed.add(ev.call.id)
-                used_tool = True
-            if open_kind != want or want == "tool_use":
+            if kind == "event":
+                ev: Event = x
+                if ev.kind == "tool_args":
+                    yield "content_block_delta", {"type": "content_block_delta", "index": index,
+                                                  "delta": {"type": "input_json_delta", "partial_json": ev.text}}
+                    continue
+                if ev.kind == "tool_call" and ev.call.id in streamed:
+                    continue
+                want = {"reasoning": "thinking", "content": "text", "tool_call": "tool_use", "tool_start": "tool_use"}[ev.kind]
+                if ev.kind not in ("tool_call", "tool_start") and not ev.text:
+                    continue
+                if ev.kind == "tool_start":
+                    streamed.add(ev.call.id)
+                    used_tool = True
+                if open_kind != want or want == "tool_use":
+                    if open_kind is not None:
+                        yield close()
+                    index += 1
+                    open_kind = want
+                    block = {"thinking": {"type": "thinking", "thinking": "", "signature": ""},
+                             "text": {"type": "text", "text": ""},
+                             "tool_use": {"type": "tool_use", "id": ev.call.id if ev.call else "", "name":
+                                          ev.call.name if ev.call else "", "input": {}}}[want]
+                    yield "content_block_start", {"type": "content_block_start", "index": index, "content_block": block}
+                if want == "thinking":
+                    yield "content_block_delta", {"type": "content_block_delta", "index": index,
+                                                  "delta": {"type": "thinking_delta", "thinking": ev.text}}
+                elif want == "text":
+                    yield "content_block_delta", {"type": "content_block_delta", "index": index,
+                                                  "delta": {"type": "text_delta", "text": ev.text}}
+                elif ev.kind == "tool_start":
+                    pass                                # its input follows as tool_args pieces
+                else:
+                    used_tool = True
+                    yield "content_block_delta", {"type": "content_block_delta", "index": index, "delta": {
+                        "type": "input_json_delta", "partial_json": json.dumps(ev.call.arguments, ensure_ascii=False)}}
+            else:
                 if open_kind is not None:
                     yield close()
-                index += 1
-                open_kind = want
-                block = {"thinking": {"type": "thinking", "thinking": "", "signature": ""},
-                         "text": {"type": "text", "text": ""},
-                         "tool_use": {"type": "tool_use", "id": ev.call.id if ev.call else "", "name":
-                                      ev.call.name if ev.call else "", "input": {}}}[want]
-                yield "content_block_start", {"type": "content_block_start", "index": index, "content_block": block}
-            if want == "thinking":
-                yield "content_block_delta", {"type": "content_block_delta", "index": index,
-                                              "delta": {"type": "thinking_delta", "thinking": ev.text}}
-            elif want == "text":
-                yield "content_block_delta", {"type": "content_block_delta", "index": index,
-                                              "delta": {"type": "text_delta", "text": ev.text}}
-            elif ev.kind == "tool_start":
-                pass                                # its input follows as tool_args pieces
-            else:
-                used_tool = True
-                yield "content_block_delta", {"type": "content_block_delta", "index": index, "delta": {
-                    "type": "input_json_delta", "partial_json": json.dumps(ev.call.arguments, ensure_ascii=False)}}
-        else:
-            if open_kind is not None:
-                yield close()
-            stop = "tool_use" if used_tool and x["finish"] == "stop" else \
-                "stop_sequence" if x.get("stop_sequence") else \
-                {"stop": "end_turn", "length": "max_tokens", "cancel": "end_turn"}[x["finish"]]
-            # the final counts, Anthropic's way: input_tokens leaves out what the conversation cache already held,
-            # which is cache_read_input_tokens (message_start could only say the whole prompt)
-            reused = min(x.get("reused") or 0, len(ids))
-            yield "message_delta", {"type": "message_delta", "delta": {"stop_reason": stop,
-                                                                       "stop_sequence": x.get("stop_sequence")},
-                                    "usage": {"input_tokens": len(ids) - reused, "cache_read_input_tokens": reused,
-                                              "output_tokens": x["completion_tokens"]}}
-            yield "message_stop", {"type": "message_stop"}
+                stop = "tool_use" if used_tool and x["finish"] == "stop" else \
+                    "stop_sequence" if x.get("stop_sequence") else \
+                    {"stop": "end_turn", "length": "max_tokens", "cancel": "end_turn"}[x["finish"]]
+                # the final counts, Anthropic's way: input_tokens leaves out what the conversation cache already held,
+                # which is cache_read_input_tokens (message_start could only say the whole prompt)
+                reused = min(x.get("reused") or 0, len(ids))
+                yield "message_delta", {"type": "message_delta", "delta": {"stop_reason": stop,
+                                                                           "stop_sequence": x.get("stop_sequence")},
+                                        "usage": {"input_tokens": len(ids) - reused, "cache_read_input_tokens": reused,
+                                                  "output_tokens": x["completion_tokens"]}}
+                yield "message_stop", {"type": "message_stop"}
 
 
 def anthropic_collect(events) -> dict:
@@ -9551,47 +9555,49 @@ def _qfn_engine_class():
             seen, base = 0, None
             hb_seen = 0.0                                # (U5 heartbeat: the last solo RHB line's time)
             solo = not int(getattr(self, "batch", 0) or 0)
-            for t in super().generate(ids, max_new, sampling, cancel, embeddings):
-                hb = (getattr(self, "read_live", None) or {}).get("solo")   # U5 read heartbeat: the solo read's
-                if hb and (self._reader == me or solo) and hb.get("t", 0.0) > hb_seen:   #  own, once per RHB
-                    hb_seen = hb["t"]                    # line (~1 per s; the line itself wakes this loop)
-                    hcb = getattr(self._tls, "on_hb", None)
-                    if hcb is not None:
-                        hcb(hb)
-                if (self._reader == me or solo) and self.progress:
-                    new = getattr(self, "progress_new", None)
-                    rms = getattr(self, "progress_read_ms", None)
-                    if new is not None:
-                        # PLAN-qfn-per-request-read-stats: the engine counts THIS request's read itself - PP's
-                        # new_read= from where the read started (a restored conversation's positions never look
-                        # like reads) and read_ms= the time that read has actually run.  No RESUME base needed:
-                        # this chat's row and the engine-total window both take the engine's own figures.
-                        rate = new / (rms / 1000.0) if new and rms and rms > 0 else self.prefill_tok_s_mean
-                        self._tls.own_pp = (self.progress, rate)
-                        if new > seen:
-                            seen = new
-                            if cb:
-                                cb(new, rate, False, False, rms if rms and rms > 0 else None)
-                    else:                                # (an engine before the fields: the old RESUME base)
-                        self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
-                        if cb and self.progress[0] > seen:   # the PP line's steps, counted from where this read starts:
-                            if base is None:                # only from RESUME's reused prefix: without it (a restored
-                                r = int(getattr(self, "reused", 0) or 0)   # conversation) where the read starts is
-                                if not 0 < r <= self.progress[0]:          # unknown - count nothing until the exact
-                                    continue_count = False                 # figures at its end (Service._read_exact)
-                                else:
-                                    base, continue_count = r, True
-                            if base is not None:
-                                seen = self.progress[0]
-                                cb(max(0, seen - base))
-                rd = getattr(self, "read_done", None)    # RDONE: this solo read ended with its exact figures
-                if rd is not None and (self._reader == me or solo):
-                    self.read_done = None                # (consume: never the next request's)
-                    if cb:
-                        n_done, ms_done = rd
-                        cb(n_done, n_done / (ms_done / 1000.0) if n_done and ms_done else None,
-                           True, False, ms_done if ms_done and ms_done > 0 else None)
-                yield t
+            with contextlib.closing(super().generate(ids, max_new, sampling, cancel, embeddings)) as _inner:
+                # (closed on any exit: Python 3.12 ran the inner STOP + drain only when the outer one was freed)
+                for t in _inner:
+                    hb = (getattr(self, "read_live", None) or {}).get("solo")   # U5 read heartbeat: the solo read's
+                    if hb and (self._reader == me or solo) and hb.get("t", 0.0) > hb_seen:   #  own, once per RHB
+                        hb_seen = hb["t"]                    # line (~1 per s; the line itself wakes this loop)
+                        hcb = getattr(self._tls, "on_hb", None)
+                        if hcb is not None:
+                            hcb(hb)
+                    if (self._reader == me or solo) and self.progress:
+                        new = getattr(self, "progress_new", None)
+                        rms = getattr(self, "progress_read_ms", None)
+                        if new is not None:
+                            # PLAN-qfn-per-request-read-stats: the engine counts THIS request's read itself - PP's
+                            # new_read= from where the read started (a restored conversation's positions never look
+                            # like reads) and read_ms= the time that read has actually run.  No RESUME base needed:
+                            # this chat's row and the engine-total window both take the engine's own figures.
+                            rate = new / (rms / 1000.0) if new and rms and rms > 0 else self.prefill_tok_s_mean
+                            self._tls.own_pp = (self.progress, rate)
+                            if new > seen:
+                                seen = new
+                                if cb:
+                                    cb(new, rate, False, False, rms if rms and rms > 0 else None)
+                        else:                                # (an engine before the fields: the old RESUME base)
+                            self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
+                            if cb and self.progress[0] > seen:   # the PP line's steps, counted from where this read starts:
+                                if base is None:                # only from RESUME's reused prefix: without it (a restored
+                                    r = int(getattr(self, "reused", 0) or 0)   # conversation) where the read starts is
+                                    if not 0 < r <= self.progress[0]:          # unknown - count nothing until the exact
+                                        continue_count = False                 # figures at its end (Service._read_exact)
+                                    else:
+                                        base, continue_count = r, True
+                                if base is not None:
+                                    seen = self.progress[0]
+                                    cb(max(0, seen - base))
+                    rd = getattr(self, "read_done", None)    # RDONE: this solo read ended with its exact figures
+                    if rd is not None and (self._reader == me or solo):
+                        self.read_done = None                # (consume: never the next request's)
+                        if cb:
+                            n_done, ms_done = rd
+                            cb(n_done, n_done / (ms_done / 1000.0) if n_done and ms_done else None,
+                               True, False, ms_done if ms_done and ms_done > 0 else None)
+                    yield t
 
         def _admission_wait(self, slot, cancel, live):
             """SAGUARO_SLOT_ADMIT: the admission reads beside the decoding slots, on its own lines: BRP <slot>

@@ -1244,3 +1244,40 @@ class PicturesNotStreamed(Env):
                         self.assertTrue(engine.seen and engine.seen[0], f"{path}: the engine got no picture")
             finally:
                 httpd.shutdown()
+
+
+class StopReachesTheEngine(unittest.TestCase):
+    """Paul's box (Python 3.12): closing the QFN engine's generate() left the driver's own generator open - its
+    finally (STOP + drain to DONE) ran only when the outer generator was freed - so a cut answer (a priority pause,
+    a client gone) never stopped, and the NEXT request read the old answer's tokens. The wrapper closes it now."""
+
+    class Stdin:
+        def __init__(self, eng):
+            self.eng, self.sent = eng, []
+
+        def write(self, s):
+            self.sent.append(s.strip())
+            if s.startswith("STOP"):
+                self.eng.lines.put("DONE 3 3 1.0 1.0 cancel")
+
+        def flush(self):
+            pass
+
+    def test_closing_the_answer_stops_the_engine_before_close_returns(self):
+        import queue
+        from serve.server import _qfn_engine_class
+        cls = _qfn_engine_class()
+        eng = cls.__new__(cls)
+        eng.lines, eng.batch, eng.can_stop, eng.silence_s = queue.Queue(), 0, True, 0
+        eng.proc = unittest.mock.Mock()
+        eng.proc.stdin = self.Stdin(eng)
+        eng.alive = lambda: True
+        eng.info, eng.progress, eng._tls, eng._reader, eng.read_live = {}, None, threading.local(), None, None
+        for i in range(1, 200):
+            eng.lines.put(f"T {i}")
+        with unittest.mock.patch("serve.qfn_engine.bias_api.validate_request", lambda *a, **k: None):
+            gen = eng.generate([1, 2, 3], 500, {}, threading.Event())
+            got = [next(gen) for _ in range(3)]
+            gen.close()                               # (`gen` stays referenced, as in Service._sliced)
+            self.assertEqual(got, [1, 2, 3])
+            self.assertIn("STOP", eng.proc.stdin.sent, "the engine was not told to stop when the answer closed")

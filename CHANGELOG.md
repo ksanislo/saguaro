@@ -19,6 +19,15 @@ older multi-GPU hardware (NVIDIA Turing T4 - sm_75 tensor cores, Xeon AVX1 CPUs)
 - **Credits:** built on Project Maya ([mw00/project-maya](https://github.com/mw00/project-maya)) and Strata (MIT) -
    see NOTICE.md. Everything below the next section is upstream Project Maya history.
 
+### Saguaro 1.2.3 (2026-11-26)
+
+Based on Project Maya v1.1.78. A fix release: update now if you run Saguaro on Python 3.12 (Ubuntu 24.04's).
+
+- **A stopped answer stops the engine at once on every Python:** on Python 3.12 a Qwen3.8-Flash-Next answer that
+  was cut short - its client went away or pressed stop, or (1.2.2) a higher-priority request paused it - was not
+  stopped in the engine: it ran on to its token limit, and the next request could receive the end of the previous
+  answer as its own. Python 3.13 was not affected. The server now closes the engine's request itself.
+
 ### Saguaro 1.2.2 (2026-11-26)
 
 Based on Project Maya v1.1.78.
