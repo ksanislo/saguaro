@@ -1,3 +1,15 @@
+# MANAGER: FIX-FIRST - the card test on mortar FAILS the acceptance (overrides the verdict below)
+Card test 2026-11-26, mortar (RX 9070 XT, 96 GB), the Q4 config (--parallel 2, MTP drafters), 1.2.3 engine vs this branch:
+- ctx 262144: base pins 9.54 GiB host K/V; new 6.64 GiB "(the solo session 0.46 GiB, the batch slots and the drafters 6.18)".
+- ctx 1048576: base 38.16 GiB; new 25.21 GiB "(the solo session 0.46 GiB, the batch slots and the drafters ~24.7)";
+  expert tier 54.36 GiB (base 41.34, 262144: 68.00); a 76K-token prompt read TIMED OUT at 900 s on both base and new.
+So the SOLO session is elastic (good: 0.46 GiB at load either way, growth steps 1-2 ms), but the BATCH SLOTS and the
+DRAFTERS still pin their host K/V for the whole --max-context at load. Acceptance (PLAN, Ken): at load 262144 and 1048576
+must pin the SAME small start for EVERY conversation holder - solo, each batch slot, each drafter (~32K cells each) - and
+the expert tier the same 68 GiB. Fix: make the batch slots' and the drafters' host K/V grow with use exactly like the
+solo session's (same helper, same chunking, given back on park/reset/end). Then the card script must show the load
+lines equal at both contexts. Keep the solo path as it is.
+
 # REVIEW-RESULT - P124e elastic host K/V (`git diff 88809c4e..397d1f852`, third round)
 
 MERGE-WITH-NITS

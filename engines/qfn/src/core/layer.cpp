@@ -677,6 +677,9 @@ constexpr uint64_t kHostPiece = strata::kernels::kSplitCopyBytes;
 std::mutex g_host_mu;
 std::vector<std::unique_ptr<HostPool>> g_host_pools;
 bool g_host_main = false;   // qsa_set_host_elastic_main: the solo sessions' streamed states too
+bool g_host_slot = false;   // qsa_set_host_elastic_slots: the --serve --batch slot states' host copies too
+                            // (P124e manager card test: the slots and their drafters must pin the small start at
+                            // load and grow with their conversations, whatever the VRAM ring does)
 bool g_vram_main = false;   // qsa_set_vram_elastic_main: their VRAM pools and pooled keys in slot pools too
 bool g_host_prefix = false;   // host_elastic_on's decision: prefix mode instead of pieces (see above)
 std::atomic<bool> g_host_failed{false};   // qsa_host_pin_failed: the last qsa_host_grow ran out of RAM
@@ -1110,6 +1113,30 @@ bool qsa_host_elastic_prefix() {
     return false;   // (elastic host copies are not made on Windows: its states pin whole)
 #endif
 }
+int64_t qsa_host_backed_cells(const QsaState& st) {
+#ifndef _WIN32
+    if (st.host_elastic < 0) return -1;   // pinned whole: there is no "backed so far"
+    std::lock_guard<std::mutex> lk(g_host_mu);
+    const HostPool& p = *g_host_pools[(size_t) st.host_elastic];
+    int64_t pages = p.pages;
+    if (p.prefix) pages = p.backed;
+    else   // pieces: the run every array has pinned, in whole pages (the arrays grow in lockstep; a failed
+           // step rolls them back equal, so the min is what every array backs)
+        for (size_t i = 0; i < p.per.size(); ++i)
+            pages = std::min(pages, p.per[i] > 0 ? (int64_t) ((uint64_t) p.pinned[i] * kHostPiece / p.per[i]) : (int64_t) 0);
+    return pages * p.page_size;
+#else
+    (void) st;
+    return -1;
+#endif
+}
+int64_t qsa_host_step_cells() {
+#ifndef _WIN32
+    return host_step_pages(4) * 4;   // (the streamed copy's page is 4 cells, as qsa_host_grow's `page_size`)
+#else
+    return std::numeric_limits<int64_t>::max();   // (nothing elastic: nothing past the start step)
+#endif
+}
 
 namespace {
 // ---- the elastic K/V (--kv-grow): one VMM range per state, each pool array at a chunk boundary in it
@@ -1537,6 +1564,13 @@ bool qsa_host_pin_failed() {
 void qsa_set_host_elastic_main(bool on) {
 #ifndef _WIN32
     g_host_main = on;
+#else
+    (void) on;
+#endif
+}
+void qsa_set_host_elastic_slots(bool on) {
+#ifndef _WIN32
+    g_host_slot = on;
 #else
     (void) on;
 #endif
@@ -2001,7 +2035,12 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     st.host = strata::kernels::KvHostPools{};
     uint8_t* hel[4] = {};   // SAGUARO_KV_HOST_ELASTIC: an elastic slot's host arrays, addresses only until pinned
 #ifndef _WIN32
-    if (((p.mode == 1 && (slot_G > 0 || g_host_main)) || (p.mode == 2 && host_elastic)) && host_elastic_on())
+    // P124e (manager card test, 11-26): `g_host_slot` extends this to the --batch slots' states too - the slots'
+    // "own rule" used to be the VRAM rule (`slot_G`), which left every slot and slot drafter pinning its host K/V
+    // for the whole --max-context at load while only the solo session grew (262144: 6.18 GiB pinned for them,
+    // 1048576: ~24.7).  An elastic host copy is orthogonal to the VRAM ring: the same helper, the same step,
+    // given back on park/reset/end, ring carved or elastic alike.
+    if (((p.mode == 1 && (slot_G > 0 || g_host_main || g_host_slot)) || (p.mode == 2 && host_elastic)) && host_elastic_on())
         st.host_elastic = host_pool_make(kv_per_slot(s, st.kv_hybrid, st.kv_q4, st.kv_int8), pages, s.page_size, hel, st);
 #endif
     if (st.host_elastic >= 0) {   // (kv_per_slot's order, as the carve below)

@@ -330,6 +330,15 @@ uint64_t qsa_kv_host_reserved_bytes();
 /// SAGUARO_KV_HOST_ELASTIC: the states qsa_state_init makes from now on with a streamed host copy (not only the elastic
 /// slots') get one that grows (session_host_fit); --serve sets it around the solo session and the stages' sessions.
 void qsa_set_host_elastic_main(bool on);
+/// ... and around the --batch slot sessions and their drafters (P124e manager card test: at load every conversation
+/// holder pins the small start, not the whole --max-context - the slots' host copies grow with their conversations
+/// whatever the VRAM ring does).  Off again once the slots are built: later states pin whole as before.
+void qsa_set_host_elastic_slots(bool on);
+/// Cells an elastic host copy is pinned for now (-1: not elastic - pinned whole).  Together with
+/// qsa_host_step_cells() (the step in cells; INT64_MAX where elastic host copies do not exist) this answers
+/// "is this copy already backed for `cells` / does it hold more than its start" without growing anything.
+int64_t qsa_host_backed_cells(const QsaState& st);
+int64_t qsa_host_step_cells();
 /// ... and their VRAM K/V pools and pooled indexer keys in a slot pool of their own (backed as the context grows:
 /// session_vram_fit; the first cells at once, from new chunks: they are used before a slot budget exists).
 void qsa_set_vram_elastic_main(bool on);

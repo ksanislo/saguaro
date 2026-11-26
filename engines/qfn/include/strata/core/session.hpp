@@ -115,7 +115,8 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
                       int64_t layer_lo = 0, int64_t layer_hi = -1, int slot = 0, const QsaState* share_rope = nullptr);
 /// An elastic slot session: backs `cells` cells in all its states, all or nothing (false: its device's slot budget is
 /// short).  `trim` first gives back what `cells` does not need - only with no window touching the session in flight.
-/// Does nothing for any other session.
+/// Not an elastic-VRAM slot (`slot_cells` < 0) but with SAGUARO_KV_HOST_ELASTIC host copies (qsa_set_host_elastic_slots):
+/// the same for the host copies only (false: no RAM to pin).  Does nothing for any other session.
 bool session_slot_fit(SessionState& s, int64_t cells, bool trim);
 /// Chunks an elastic slot session still lacks to hold `cells` cells (0 for any other session).
 int64_t session_slot_need(const SessionState& s, int64_t cells);
@@ -124,6 +125,11 @@ uint64_t session_slot_backed(const SessionState& s);
 uint64_t session_slot_reserved(const SessionState& s);
 /// SAGUARO_KV_HOST_ELASTIC: the RAM pinned for the session's host copies (0 for a host copy pinned whole).
 uint64_t session_host_backed(const SessionState& s);
+/// ... whether ANY of them grows with the session at all (its own states or its `host_follow`), and the fewest
+/// cells they are all pinned for now (-1: none is elastic - pinned whole, always "backed").  This is what lets a
+/// slot whose VRAM ring is carved whole still follow its conversation's memory (session_slot_fit's host half).
+bool session_host_elastic(const SessionState& s);
+int64_t session_host_backed_cells(const SessionState& s);
 /// ... grown (never trimmed) for `cells` cells: the solo session's, before anything writes them (a request's prompt and
 /// its max_new, a restored conversation).  False: no RAM to pin.
 bool session_host_fit(SessionState& s, int64_t cells);

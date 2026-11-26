@@ -5929,6 +5929,11 @@ int main(int argc, char** argv) {
                              "one group\n", o.batch_groups, o.batch);
         o.batch_groups = 1;
     }
+    // SAGUARO_KV_HOST_ELASTIC (P124e manager card test, 11-26): the slots' host K/V is now the slots' OWN rule,
+    // separate from the VRAM one made below - under --serve every batch slot and its drafter pins the small start
+    // at load and grows with its conversation, whatever --max-context says and whatever the VRAM ring does.
+    // Without --serve the slots keep today's pinned-whole copies (the CLI path is byte-identical).
+    strata::core::qsa_set_host_elastic_slots(o.serve && o.batch > 0);
     uint64_t slot_bytes0 = 0, slot_budget0 = 0;   // CUDA0's: each slot session's carve, and the elastic slots' budget
     if (o.batch > 0) {
         bslot_ss.resize(1 + stages.size());
@@ -6203,6 +6208,7 @@ int main(int argc, char** argv) {
             }
         }
     }
+    strata::core::qsa_set_host_elastic_slots(false);   // (later states pin whole again - nothing else builds slots here)
     // SAGUARO_KV_HOST_ELASTIC: the solo session's host copies (every stage, its drafter) pinned for `cells` before anything
     // writes them: a request's prompt and max_new, a restored conversation.  They only grow (the conversation they hold
     // is parked from them after a new request has started).  P124e: `cells` 1 pins one growth step (about 32768 cells) -
@@ -6217,6 +6223,18 @@ int main(int argc, char** argv) {
     if (!solo_host_fit(1)) {
         std::fprintf(stderr, "saguaro generate: no RAM to pin the first cells of the solo session's K/V copy\n");
         return 1;
+    }
+    // P124e (manager card test, 11-26): the SAME start step for every conversation holder - each batch slot's own
+    // states and, through its `host_follow`, its drafter - before the line below counts it and before the expert
+    // tier sizes itself from the free RAM.  A slot with a pinned-whole host copy (no --serve) says false here:
+    // it pinned everything at session_init already, as today.
+    for (size_t k = 0; k < bslot_ss.size(); ++k) {
+        const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
+        for (auto& u : bslot_ss[k])
+            if (strata::core::session_host_elastic(*u) && !strata::core::session_host_fit(*u, 1)) {
+                std::fprintf(stderr, "saguaro generate: no RAM to pin the first cells of a batch slot's K/V copy\n");
+                return 1;
+            }
     }
     if (const uint64_t all = strata::core::qsa_kv_host_reserved_bytes(); all > 0) {   // (the line after the main session counts its first stage only)
         const uint64_t now = strata::core::qsa_kv_host_bytes();
@@ -13484,13 +13502,30 @@ vs.d_skip_usage = gs.d_skip_usage;
             for (const auto& v : bslot_ss) if (!v.empty() && v[0]->slot_cells >= 0) return true;
             return false;
         }();
+        // SAGUARO_KV_HOST_ELASTIC (P124e manager card test): the slots whose HOST copies grow with their conversations,
+        // VRAM-elastic or not - `efit_on` is every place the old code fitted the slots, now including the host-only
+        // kind.  `ehost_step`: past this many cells backed a slot holds more than its start step, so parking it gives
+        // RAM back (what `ram_reclaim` and the admit-time drops look for, beside the VRAM `slot_cells > 1`).
+        const bool ehost_on = !bslot_ss.empty() && [&] {
+            for (const auto& v : bslot_ss) if (!v.empty() && strata::core::session_host_elastic(*v[0])) return true;
+            return false;
+        }();
+        const bool efit_on = eslots_on || ehost_on;
+        const int64_t ehost_step = strata::core::qsa_host_step_cells();
         auto eslot_dev = [&](size_t k) { return k == 0 ? 0 : stages[k - 1]->dev; };
         // per card: MiB the slot's elastic arrays hold, and the budget's free MiB
         auto slot_mem_note = [&](int b) {
             std::string r;
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 const strata::core::SessionState& u = *bslot_ss[k][(size_t) b];
-                if (u.slot_cells < 0) continue;
+                if (u.slot_cells < 0) {   // host copies only (the ring is carved whole): what the K/V copy is pinned for
+                    if (!strata::core::session_host_elastic(u)) continue;
+                    char x[96];
+                    std::snprintf(x, sizeof x, "%sCUDA%d %.0f MiB (host K/V)", r.empty() ? "" : ", ", eslot_dev(k),
+                                  (double) strata::core::session_host_backed(u) / 1048576.0);
+                    r += x;
+                    continue;
+                }
                 uint64_t bt = 0, bf = 0;
                 strata::core::qsa_slot_budget(eslot_dev(k), bt, bf);
                 char x[96];
@@ -13859,10 +13894,16 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t target = strata::core::slot_grow_target(need, eslot_step, o.max_context);
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 strata::core::SessionState& u = *bslot_ss[k][(size_t) b];
-                if (u.slot_cells < 0 || (!trim && need <= u.slot_cells)) continue;
+                // P124e (manager card test): a slot can now be elastic in either half - the VRAM ring (slot_cells)
+                // or its host copies (hc >= 0) - and it is fitted while either one trails the conversation.
+                const int64_t hc = strata::core::session_host_backed_cells(u);   // -1: host copy pinned whole
+                if (u.slot_cells < 0 && hc < 0) continue;   // nothing elastic about this slot: nothing to back
+                if (!trim && (u.slot_cells < 0 || need <= u.slot_cells) && (hc < 0 || need <= hc)) continue;
                 const strata::core::OnDevice on_k(eslot_dev(k));
                 if (strata::core::session_slot_fit(u, target, trim) || strata::core::session_slot_fit(u, need, false))
                     continue;
+                if (u.slot_cells < 0) return 1;   // host copies only: no VRAM budget to hand over - the RAM give-way
+                                                  // (the expert tier) already ran inside the failed qsa_host_grow
                 if (!give_on || gv[k].lo <= give_floor) return 1;
                 if (!quiet(k)) return 2;
                 int64_t fr = 0;
@@ -14138,7 +14179,8 @@ vs.d_skip_usage = gs.d_skip_usage;
         std::function<void(int, const char*)> kv_check_hook;   // SAGUARO_KV_VERIFY (debug; set below)
         std::function<void(int, const char*)> slot_drop_save;   // --session-dir: a kept conversation saved before it is dropped
         auto slot_admit_fit = [&](int b, int64_t upto, std::string& e) -> bool {
-            if (!eslots_on) return true;
+            if (!efit_on) return true;   // (P124e: elastic VRAM ring OR elastic host copies - the slots' memory follows
+                                         // their conversations in both kinds; pinned-whole slots keep the old fast return)
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 const strata::core::OnDevice on_k(eslot_dev(k));
                 if (strata::core::device_sync() != cudaSuccess) { e = "elastic slots: device sync failed"; return false; }
@@ -14148,12 +14190,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                 for (int j = 0; !ok && j < (int) bs.size(); ++j) {
                     BSlot& sj = bs[(size_t) j];
                     bool big = false;
-                    for (const auto& v : bslot_ss) big = big || v[(size_t) j]->slot_cells > 1;
+                    for (const auto& v : bslot_ss)
+                        big = big || v[(size_t) j]->slot_cells > 1 ||
+                              strata::core::session_host_backed_cells(*v[(size_t) j]) > ehost_step;
                     if (j == b || j == admit_slot || sj.active || sj.reading || sj.partial != (pass == 1) || !big) continue;
                     if (slot_drop_save) slot_drop_save(j, "it gives its memory to another slot");
                     for (size_t k = 0; k < bslot_ss.size(); ++k) {
                         strata::core::SessionState& u = *bslot_ss[k][(size_t) j];
-                        if (u.slot_cells < 0) continue;
+                        if (u.slot_cells < 0 && !strata::core::session_host_elastic(u)) continue;
                         const strata::core::OnDevice on_k(eslot_dev(k));
                         (void) strata::core::session_slot_fit(u, 1, true);
                         strata::core::session_zero(u, g, nullptr, nullptr);   // its K/V map named the slots given back
@@ -14169,7 +14213,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             // after this, or a pad row when the admission fails)
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 strata::core::SessionState& u = *bslot_ss[k][(size_t) b];
-                if (u.slot_cells < 0) continue;
+                if (u.slot_cells < 0 && !strata::core::session_host_elastic(u)) continue;
                 const strata::core::OnDevice on_k(eslot_dev(k));
                 strata::core::session_zero(u, g, nullptr, nullptr);
                 if (strata::core::device_sync() != cudaSuccess) { e = "elastic slots: device sync failed"; return false; }
@@ -14199,7 +14243,12 @@ vs.d_skip_usage = gs.d_skip_usage;
         auto slot_grow_or_end = [&](int b, int64_t need, const std::function<bool(size_t)>& quiet) -> int {
             BSlot& sl = bs[(size_t) b];
             bool backed = true;
-            for (const auto& v : bslot_ss) backed = backed && (v[(size_t) b]->slot_cells < 0 || need <= v[(size_t) b]->slot_cells);
+            for (const auto& v : bslot_ss) {   // P124e: behind in EITHER half (ring or host copy) and the window would
+                                               // touch memory the slot does not hold yet
+                const strata::core::SessionState& u = *v[(size_t) b];
+                const int64_t hc = strata::core::session_host_backed_cells(u);   // -1: host copy pinned whole
+                backed = backed && (u.slot_cells < 0 || need <= u.slot_cells) && (hc < 0 || need <= hc);
+            }
             if (backed) return 0;
             int r = slot_fit(b, need, false, quiet);
             while (r == 1 && strata::core::qsa_host_pin_failed() && ram_reclaim) {   // RAM: idle conversations give theirs
@@ -14447,7 +14496,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             for (int b = 0; b < (int) bs.size(); ++b)
                 if (bs[(size_t) b].active)
                     e_hold[(size_t) b] = slot_yarn(b, bs[(size_t) b].p + (batch_mtp ? 3 : 2), in_prompt_read ? none : all_quiet) == 2;
-            if (eslots_on) {
+            if (efit_on) {
                 for (int b = 0; b < (int) bs.size(); ++b)
                     if (bs[(size_t) b].active && !e_hold[(size_t) b])
                         e_hold[(size_t) b] = slot_grow_or_end(b, bs[(size_t) b].p + (batch_mtp ? 3 : 2),
@@ -15489,7 +15538,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                             if (bs[(size_t) gm(pick, t)].active) wait = slot_yarn(gm(pick, t), g_need(t), stage_quiet) == 2 || wait;
                         if (wait || !group_active(pick)) continue;
                     }
-                    if (eslots_on) {
+                    if (efit_on) {
                         bool wait = false;
                         for (int t = 0; t < GS; ++t)
                             if (bs[(size_t) gm(pick, t)].active) wait = slot_grow_or_end(gm(pick, t), g_need(t), stage_quiet) == 2 || wait;
@@ -16570,7 +16619,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             {   // (the note covers this block only)
             const auto t_fit = Clock::now();
             struct FitNote { std::function<void()> f; ~FitNote() { f(); } } fit_note{[&] { note("room made for the slot (queued reads waited for, groups drained)", t_fit); }};
-            if (eslots_on) {
+            if (efit_on) {
                 const std::function<bool(size_t)> busy = [](size_t) { return false; };
                 if (slot_fit(b, n + 1, false, busy) != 0) {
                     std::string fe;
@@ -17132,7 +17181,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                                  fl_lane_row_ms, fl_fixed, (long long) (n >> 16), fl_extend ? "the lane" : "the queued way");
                 if (!fl_extend) return false;
             }
-            if (eslots_on) {   // backed for the whole read now, or the queued way (which may make room)
+            if (efit_on) {   // backed for the whole read now, or the queued way (which may make room)
                 const std::function<bool(size_t)> busy = [](size_t) { return false; };
                 if (slot_fit(b, n + 1 + strata::kernels::kVerifyMaxT, false, busy) != 0) return false;
             }
@@ -18465,8 +18514,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (b == keep || b == admit_slot || sl.active || sl.reading || sl.partial || adm_queued[(size_t) b] ||
                     adm_paused[(size_t) b] || adm_reading == b || adm_stop_of[(size_t) b] != nullptr)
                     continue;
-                bool big = false;
-                for (const auto& v : bslot_ss) big = big || v[(size_t) b]->slot_cells > 1;
+                bool big = false;   // (P124e: VRAM-ring cells or host-copy cells past the start step - parking gives both back)
+                for (const auto& v : bslot_ss)
+                    big = big || v[(size_t) b]->slot_cells > 1 ||
+                          strata::core::session_host_backed_cells(*v[(size_t) b]) > ehost_step;
                 if (big && (j < 0 || sl.t0 < bs[(size_t) j].t0)) j = b;
             }
             const double pinned0 = (double) strata::core::qsa_kv_host_bytes() / 1073741824.0;
@@ -18476,7 +18527,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (sj.cached) (void) persist_slot(j, false, {}, false, "it gives its pinned RAM to another conversation", true);
                 for (size_t k = 0; k < bslot_ss.size(); ++k) {
                     strata::core::SessionState& u = *bslot_ss[k][(size_t) j];
-                    if (u.slot_cells < 0) continue;
+                    if (u.slot_cells < 0 && !strata::core::session_host_elastic(u)) continue;   // P124e: host copies count too
                     const strata::core::OnDevice on_k(eslot_dev(k));
                     (void) strata::core::session_slot_fit(u, 1, true);
                     strata::core::session_zero(u, g, nullptr, nullptr);   // its K/V map named the page slots given back
@@ -21097,7 +21148,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         return true;
                     }
                 // SAGUARO_ELASTIC_SLOTS: each slot backed for the prompt first (their conversations are dropped anyway)
-                for (int b = 0; b < N && eslots_on; ++b)
+                for (int b = 0; b < N && efit_on; ++b)
                     if (!slot_admit_fit(b, len, err)) return false;
                 // the first stage's PLE for the slots' sessions: the main one's table, weights and consts, each slot's own
                 // history and predecessors, and a scratch of the reads' own (as SAGUARO_SLOT_ADMIT wires it)

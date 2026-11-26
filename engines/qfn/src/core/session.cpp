@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 // `_mm_pause` for the doorbell spin.  Guarded because it is x86-only; a target without it still builds, the
@@ -158,8 +159,41 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     return used;
 }
 
+bool session_host_elastic(const SessionState& s) {
+    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
+        if (s.qsa_states[s.qsa_ord0 + j].host_elastic >= 0) return true;
+    return s.host_follow != nullptr && s.host_follow->host_elastic >= 0;
+}
+
+int64_t session_host_backed_cells(const SessionState& s) {
+    if (!session_host_elastic(s)) return -1;   // every copy pinned whole: always backed
+    int64_t n = std::numeric_limits<int64_t>::max();
+    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j) {
+        const int64_t c = qsa_host_backed_cells(s.qsa_states[s.qsa_ord0 + j]);
+        if (c >= 0) n = std::min(n, c);
+    }
+    if (s.host_follow != nullptr) {
+        const int64_t c = qsa_host_backed_cells(*s.host_follow);
+        if (c >= 0) n = std::min(n, c);
+    }
+    return n;
+}
+
 bool session_slot_fit(SessionState& s, int64_t cells, bool trim) {
-    if (s.slot_cells < 0) return true;
+    if (s.slot_cells < 0) {
+        // P124e (manager card test, 11-26): not an elastic-VRAM slot (SAGUARO_ELASTIC_SLOTS off, or no VMM on the
+        // card) - but its HOST copies can still grow with the conversation (qsa_set_host_elastic_slots): the same
+        // helper and the same step as the solo session's, given back on trim.  The VRAM half has nothing to do;
+        // `slot_cells` stays -1 - it counts the ring, which never moves here.
+        if (!session_host_elastic(s)) return true;
+        cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
+        if (trim) {
+            for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
+                qsa_host_trim(s.qsa_states[s.qsa_ord0 + j], cells);
+            if (s.host_follow != nullptr) qsa_host_trim(*s.host_follow, cells);
+        }
+        return session_host_fit(s, cells);
+    }
     cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
     if (!trim && cells <= s.slot_cells) return true;
     std::vector<const QsaState*> sts;
