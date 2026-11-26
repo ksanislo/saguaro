@@ -19819,7 +19819,6 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::printf("ERR the K/V cannot grow to the parked conversation: no VRAM is left\n");
                 return 1;
             }
-            strata::core::conversation_snapshot_reset_split();   // (PLAN-p124a: the restore line counts this switch only)
             if (borrow) {
                 const auto t0 = Clock::now();
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked
@@ -19869,6 +19868,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                              conversations.size(), conversations.bytes(), conversations.borrowed());
             }
             if (incoming) {
+                // (PLAN-p124a: the restore line's split counts this restore only - reset at its own start, so a
+                //  borrow's copies or a slot copy before it cannot land in it (F7: no split over its printed total))
+                strata::core::conversation_snapshot_reset_split();
                 const auto t0 = Clock::now();
                 if (strata::core::conversation_snapshot_restore(*incoming, ss, g,
                         use_mtp && (stages.empty() || mtp_first) ? &mtp.kv_state() : nullptr, err) !=
@@ -19929,15 +19931,16 @@ vs.d_skip_usage = gs.d_skip_usage;
                 incoming.reset(); // Running-state/checkpoint copies are no longer needed.
                 lent_slot = -1;   // (the main session holds the parked conversation now)
                 // the server's log: a conversation coming back in, from RAM or (read before) from disk
+                const double restore_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 std::printf("INFO sess_event=restored sess_tokens=%lld sess_bytes=%zu sess_ms=%.0f sess_why=%s\n",
-                            (long long) resume, incoming_bytes,
-                            std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                            (long long) resume, incoming_bytes, restore_ms,
                             ctx_from ? ctx_from : "ram");
                 std::fflush(stdout);
-                const std::string r_split = strata::core::conversation_snapshot_take_split();   // (read-stall instrumentation)
+                // (read-stall instrumentation; wait = outside the split, as on the park line - the split of a
+                //  restore can no longer exceed the total printed with it, review F7)
+                const std::string r_split = strata::core::conversation_snapshot_take_split(restore_ms);
                 std::fprintf(stderr, "saguaro serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu; %s\n",
-                             (long long) resume, from_live ? "live" : "checkpoint",
-                             std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                             (long long) resume, from_live ? "live" : "checkpoint", restore_ms,
                              conversations.size(), conversations.bytes(), r_split.c_str());
             }
             if (want_cvec != cvec_cached) {
