@@ -855,6 +855,13 @@ class TheReadKeepDriver(Env):
         finally:
             eng.close()
 
+    def test_the_mm3_driver_reports_keeps_stopped_read(self):
+        eng = self.start("mm3")                        # P124j: its INFO engine_kind=mm3 line gives it the flag
+        try:
+            self.assertTrue(eng.keeps_stopped_read)
+        finally:
+            eng.close()
+
     def test_another_line_engine_is_not_given_it(self):
         eng = self.start("ik2")                        # Inkling 2 drops a cut read in multi (audit 8.5): not given it
         try:                                           #   (hy4 by P124i, mm3 by P124j are)
