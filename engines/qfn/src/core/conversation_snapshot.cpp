@@ -245,9 +245,20 @@ size_t conversation_kv_bytes(const QsaState& st, const ModelGeometry& g, int64_t
     return conversation_kv_capture_bytes({}, st, g, upto, index, bytes, error) ? bytes : 0;
 }
 
-std::string conversation_snapshot_take_split() {
-    return conversation_detail::snapshot_split_note(conversation_detail::take_snapshot_split());
+std::string conversation_snapshot_take_split(double total_ms) {
+    const conversation_detail::SnapshotSplit s = conversation_detail::take_snapshot_split();
+    std::string note = conversation_detail::snapshot_split_note(s);
+    if (total_ms >= 0.0) {   // (PLAN-p124a: what the split's clocks did not reach is said, not hidden)
+        const double covered = s.alloc_ms + s.copy_ms + s.sync_ms + s.ckpt_ms;
+        const double wait = total_ms > covered ? total_ms - covered : 0.0;
+        char b[48];
+        std::snprintf(b, sizeof b, ", wait %.0f ms", wait);
+        note += b;
+    }
+    return note;
 }
+
+void conversation_snapshot_reset_split() { (void) conversation_detail::take_snapshot_split(); }
 
 bool conversation_kv_save(ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                           int64_t upto, bool index, std::string& error,

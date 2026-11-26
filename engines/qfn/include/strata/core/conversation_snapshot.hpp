@@ -24,9 +24,15 @@ bool conversation_kv_capture_bytes(const ConversationKv& image, const QsaState& 
 bool conversation_kv_validate(const ConversationKv& image, const QsaState& state, const ModelGeometry& g,
                               int64_t upto, bool include_index, std::string& error);
 // The read-stall split (output only): what the snapshot save/restore calls on this thread spent their time in -
-// buffer growth (alloc), the copies, the device syncs they wait behind, and the checkpoint tree.  Takes and resets
-// the thread's record: call it once after a whole park or restore, and log what it returns.
-std::string conversation_snapshot_take_split();
+// buffer growth (alloc), the copies, the device syncs they wait behind, and the checkpoints (the tree's host
+// copies and the live session's running state).  Takes and resets the thread's record: call it once after a whole
+// park or restore, and log what it returns.  `total_ms` >= 0 also appends the part of the caller's whole
+// operation the split did not cover ("wait N ms", PLAN-p124a), so one line times the park end to end.
+std::string conversation_snapshot_take_split(double total_ms = -1.0);
+// Discard whatever the thread's record holds without printing it (PLAN-p124a): the park and the restore take it
+// at their end; the steps that print no split (a turn save's syncs, a borrow's copies) must not add their time
+// to the next park's, or the split can exceed the whole it claims to break down.
+void conversation_snapshot_reset_split();
 bool conversation_kv_restore(const ConversationKv& image, const QsaState& state, const ModelGeometry& g,
                              int64_t upto, bool include_index, std::string& error);
 // conversation_kv_save(from) + conversation_kv_restore(to) without a host image, for two states of the same layout.

@@ -77,6 +77,34 @@ int main() {
         off.free_bytes = 0;
         check(plan(four, parked, 90 * G, 0, low, off, true, true).empty(), "SAGUARO_PARK_FREE_MIB=0 turns the floor off");
     }
+    // PLAN-p124a (mortar, 2026-11-25): the resident RAM mode pins 68 GiB of experts + the K/V pool and the host is
+    // wide open - the reading counts our own tier as used, and the old rule dropped every park seconds after it
+    // landed while `free` showed 81 GB.  The engine's own pinned RAM is credited for the release decision.
+    Memory mortar{8 * G, 0.0};           // what the sampler reads with the 68 GiB charged against the limit
+    mortar.own_pinned = 68 * G;          // the tier + pool: ours, and no release gives them back
+    check(pressure_need(mortar, lim) == 0, "the engine's own pinned RAM is credited: 8 GiB free of a 96 GB host is not pressure");
+    check(plan(four, parked, 90 * G, 0, mortar, lim, true, true).empty(), "mortar's figures: the parks stay, nothing is released");
+    {
+        Memory raw = mortar;
+        raw.own_pinned = 0;   // the old reading, or an engine pinning nothing of its own
+        check(pressure_need(raw, lim) == 10 * G && !plan(four, parked, 90 * G, 0, raw, lim, true, true).empty(),
+              "without the credit the same 8 GiB under the 16 GiB floor is still pressure (8 + an eighth asked)");
+    }
+    {
+        // the credit stops at the hard floor (review F1): the old check only asserted `severe` and never called
+        // plan(), while the credited pressure_need kept `pressed` false forever and no release ever ran
+        Memory deep = mortar;
+        deep.available = 1 * G;   // the host genuinely full: under the hard floor the raw reading decides
+        check(pressure_need(deep, lim) == 17 * G && severe(deep, lim),
+              "a raw 1 GiB under the hard floor asks the raw shortfall back (16 - 1 + an eighth): the credit does not silence it");
+        check(said(plan(four, parked, 90 * G, 0, deep, lim, true, true)) == "1d:pressure 3d:pressure 2u:unsaved ",
+              "and plan() releases at raw 1 GiB with 68 GiB pinned: on disk first, the unwritten one dropped unsaved");
+        Memory above = mortar;
+        above.available = 3 * G;   // back above the hard floor: the credit works again
+        check(pressure_need(above, lim) == 0 && !severe(above, lim) &&
+              plan(four, parked, 90 * G, 0, above, lim, true, true).empty(),
+              "1 GiB over the hard floor is the resident mode working again, not pressure");
+    }
     // memory stalls with RAM above the floor: one entry a round, only when the caller says a round is due
     const Memory stalled{40 * G, 23.5};
     check(said(plan(four, parked, 90 * G, 0, stalled, lim, true, true)) == "1d:pressure ", "memory stalls: the oldest entry on disk");
