@@ -747,10 +747,27 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
     std::printf("INFO logit_bias=1\n");   // (GEN logit_bias=<id>:<bias>,...: added to the logits of every pick)
     // (#1026: this start came out short of --reserve-mib - the server starts the engine once more, which keeps it)
     if (m.reserve_short_mib() > 0) std::printf("INFO reserve_short=%d\n", m.reserve_short_mib());
+    // keepread (P124c's item 4): a prompt read that a STOP ends keeps its conversation live at the deepest state the
+    // read already stores - the end of its last whole piece, which its keep checkpoints as the read goes, or the last
+    // restore point at or before the run that was stopped - and says it as the DONE's reused, so the next request of
+    // the same prompt shares it and reads the rest, as it shares a finished turn's conversation.  READY says keepread
+    // only where this keep is real; SAGUARO_DS4_KEEP_READ=0 drops both the behaviour and the word.  The step is how
+    // many tokens a run reads before its end stands as the keep point (0: no points of its own - the read keeps only
+    // what the request's marks and its base checkpoint hold).
+    static const bool keep_read = [] {
+        const char* v = std::getenv("SAGUARO_DS4_KEEP_READ");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    static const size_t keep_step = [] {
+        const char* v = std::getenv("SAGUARO_DS4_KEEP_READ_STEP");
+        const long long n = v != nullptr ? std::atoll(v) : 8192;
+        return n > 0 ? (size_t) n : (size_t) 0;
+    }();
+    const char* const keep_word = keep_read ? " keepread" : "";
     if (m.seq_count() > 1)   // (--parallel: n conversations at once, GEN rid=<id>)
-        std::printf("READY %lld stop multi=%d\n", (long long) m.max_context(), m.seq_count());
+        std::printf("READY %lld stop multi=%d%s\n", (long long) m.max_context(), m.seq_count(), keep_word);
     else
-        std::printf("READY %lld stop\n", (long long) m.max_context());
+        std::printf("READY %lld stop%s\n", (long long) m.max_context(), keep_word);
     std::fflush(stdout);
     start_watchdog(m);
     std::fprintf(stderr, "saguaro ds4 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <pictures> <ids>; STOP, QUIT\n");
@@ -1454,6 +1471,8 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
         maya::ds4::Stats s0;   // (the request's own CPU lane share)
         size_t from = 0;         // the tokens the state already held
         size_t done = 0;         // the prompt's tokens in the state so far
+        size_t run_start = 0;    // (the run in flight: where it began - a run stopped inside leaves the state past it
+                                 //  unusable, so the keep lands on the deepest point stored at or before here)
         size_t next_pp = 0;      // (the next PP line's)
         bool continued = false;  // (the conversation goes on - its anchor stays)
         std::vector<Pic> pics;
@@ -1723,18 +1742,21 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
             // (a restore point: the read stops there, and a piece tells the model of the prompt only up to it - the
             //  state kept at the point is the one a whole read up to it leaves)
             const size_t upto = P.next_cut < P.cuts.size() ? (size_t) P.cuts[P.next_cut].pos : total;
-            size_t n = std::min<size_t>({(size_t) m.feed_unit(), upto - P.done, piece - (P.done - start)});
+            // (keepread: runs of at most `keep_step` tokens, so the piece ends their runs leave stand as keep points)
+            size_t n = std::min<size_t>({(size_t) m.feed_unit(), upto - P.done, piece - (P.done - start),
+                                         keep_read && keep_step > 0 ? keep_step : (size_t) -1});
             // (the rest of the prompt in one read that keeps the restore points left on the way, where that costs
             //  at most a chunk's rows more than stopping at each - a run of chunks has a fixed cost of its own, the
             //  CPU lane's experts streamed for it: a point near the prompt's tail read alone cost as much as the rest)
             std::vector<std::pair<int64_t, bool>> inner;
             const size_t rest = total - P.done;
             // (not past a shared start a read from token 0 reaches first: the read stops there, and its state is kept
-            //  apart for new conversations - prefix_keep keeps the state the model holds then)
+            //  apart for new conversations - prefix_keep keeps the state the model holds then; not as one run at all
+            //  where the keep splits the read - a run stopped inside keeps nothing of the points it was carrying)
             const bool start_kept = prefix_max > 0 && P.from == 0 && P.next_cut == 0 && P.next_cut < P.cuts.size() &&
                                     P.cuts[0].shared && (size_t) P.cuts[0].pos >= prefix_min;
-            if (P.next_cut < P.cuts.size() && !last_window && !start_kept && rest <= (size_t) m.feed_unit() &&
-                rest <= piece - (P.done - start)) {
+            if (P.next_cut < P.cuts.size() && !last_window && !start_kept && !(keep_read && keep_step > 0) &&
+                rest <= (size_t) m.feed_unit() && rest <= piece - (P.done - start)) {
                 std::vector<int64_t> rel;
                 for (size_t j = P.next_cut; j < P.cuts.size(); ++j) rel.push_back(P.cuts[j].pos - (int64_t) P.done);
                 if (m.marks_inside((int) rest, rel))
@@ -1744,6 +1766,7 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
             // (the prompt's end: the last token in the same run, the checkpoint before it kept on the way)
             const bool fin = P.done + n == total;
             size_t took = n;   // (fewer: a yield - the model ended the run early, the rest a later piece's)
+            P.run_start = P.done;                          // (where this run began: a Stop inside it lands at or here)
             P.feed_t0 = now_ms();                          // (the run begins: its time is the read's own)
             const double f0 = P.tail_at >= 0 ? P.feed_t0 : 0.0;   // (TailCost: the run's wall time)
             if (!inner.empty()) {
@@ -1791,6 +1814,9 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
                 if (sh && P.from == 0 && P.next_cut == 0 && !pic) prefix_keep();
                 ++P.next_cut;
             }
+            // (keepread: the whole piece's end stands as the conversation's checkpoint 0: a Stop inside the run that
+            //  follows leaves the state past its start unusable, and this is the deepest point stored behind that run)
+            if (ok && keep_read && keep_step > 0 && took == n && P.done < total) m.checkpoint(0);
             if (ok && (P.done >= P.next_pp || P.done == total)) {
                 const double ms = P.read_ms;   // (the read's own running time, parity 2)
                 std::printf("PP%s %zu %zu %.1f %.1f %zu\n", tag.c_str(), P.done, total, ms,
@@ -1804,6 +1830,40 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
         m.set_progress(nullptr);
         if (stopped || (!ok && m.cancelled())) {
             m.set_images({});
+            // (keepread: the stopped read keeps its conversation live at the deepest state it already stores - the end
+            //  of its last whole piece where the run that was going finished whole, else the deepest restore point at
+            //  or before the stopped run's own start (the read's last mark, or the checkpoint its keep left at a piece
+            //  end) - and says it as the DONE's reused, so the next request of the same prompt shares it and reads the
+            //  rest, exactly as it shares a finished turn's conversation)
+            if (keep_read) {
+                const bool mid = !ok;   // (stopped inside a run: past its start the state of a stopped run is not usable)
+                std::vector<std::pair<int64_t, int64_t>> spans;
+                for (const Pic& q : P.pics) spans.push_back({q.start, (int64_t) q.len});
+                for (const Pic& x : held) spans.push_back({(int64_t) x.start, (int64_t) x.len});
+                const int64_t stored = m.restorable((int64_t) (mid ? P.run_start : P.done));
+                const int64_t land = maya::ds4::read_stop_landing(mid, (int64_t) P.done, stored, (int64_t) from, spans);
+                const bool live = !mid && land == (int64_t) P.done;   // (the state stands there: the last run left it)
+                if (land > 0 && (live || m.restore(land)) && (size_t) m.pos() == (size_t) land) {
+                    const size_t keep = (size_t) land;
+                    {   // the pictures the kept state holds: the spans read whole short of it (prompt_end's, at `keep`)
+                        std::vector<Pic> nh;
+                        for (const Pic& x : held)
+                            if (x.len > 0 && (size_t) x.start + x.len <= keep && !pic_same(P.pics, x)) nh.push_back(x);
+                        for (const Pic& x : P.pics)
+                            if (x.len > 0 && (size_t) x.start + x.len <= keep) nh.push_back(x);
+                        held = std::move(nh);
+                    }
+                    m.checkpoint(0);   // (the kept position stands as the conversation's checkpoint, as a prompt's end does)
+                    std::fprintf(stderr,
+                                 "saguaro ds4 serve: stopped while reading the prompt of %zu tokens, after %.0f ms: the "
+                                 "conversation is kept live at %zu tokens%s\n",
+                                 total, now_ms() - P.t0, keep, keep > from ? " (its read of the prompt included)" : "");
+                    end_note();
+                    std::printf("DONE%s 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", tag.c_str(), total, P.read_ms, keep);
+                    std::fflush(stdout);
+                    return false;
+                }
+            }
             const bool back = from > 0 && m.restore((int64_t) from) && (size_t) m.pos() == from;
             if (!back) {
                 m.reset();
