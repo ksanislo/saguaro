@@ -37,7 +37,7 @@ BROWSER_PATHS = (                   # the usual installs when the name is not on
 
 # one chromium stderr line that carries a console message, in both formats it has written: the new
 # "[pid:tid:stamp:INFO:CONSOLE:1] "msg", source: url (1)" and the old "[stamp:INFO:CONSOLE(34)] "msg", source: url".
-CONSOLE_LINE = re.compile(r':[A-Z]+:CONSOLE[(:]\d*\]\s+"((?:[^"\\]|\\.)*)"')
+CONSOLE_LINE = re.compile(r':[A-Z]+:CONSOLE[(:]\d*\)?\]\s+"((?:[^"\\]|\\.)*)"')
 
 
 def find_browser() -> str | None:
