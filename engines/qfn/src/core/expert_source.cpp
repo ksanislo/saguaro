@@ -3476,6 +3476,12 @@ uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
     return 0;   // (the complement's pages are VirtualLock'ed whole: giving a slice back waits for a Windows rig)
 #else
     const uint64_t page = 4096;
+    // P124e r2 finding 4: the run/page arithmetic below rounds relative to complement_host_, which is only
+    // page-aligned on the posix_memalign arenas.  The pageable fallback (pin refused by cudaHostAlloc,
+    // std::malloc) hands back an arbitrary address: madvise(MADV_DONTNEED) on a non-page boundary is EINVAL
+    // (swallowed), munlock's rounding stops matching complement_locked_, and the give-way would report GiBs
+    // it never freed - a park bought with a lie and a retry that fails again.  Decline that arena.
+    if (((uintptr_t) complement_host_ & (page - 1)) != 0) return 0;
     const uint64_t keep_below = complement_registered_ ? complement_pin_limit_ : 0;   // the registered prefix stays
     struct Slot {
         size_t index;
