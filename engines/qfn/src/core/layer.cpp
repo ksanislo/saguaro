@@ -1640,14 +1640,9 @@ int64_t follow_start_cells() {
     const int64_t s = qsa_host_step_cells();
     return s > 0 ? s : 32768;
 }
-// Maps the chunks `cells` cells need in every follow array.  The chunks are the driver's (map_range's own fresh
-// chunks); when the card says no, the card's relief (its expert cache giving way, the plan's take-from-experts in
-// VRAM) is asked ONCE for the whole shortfall and the probe retried.  Fills what it maps; false: the VRAM is not
-// there (mapped-and-filled chunks stay mapped - a page table never reads past its live blocks).
-bool follow_grow_locked(SlotPool& p, int64_t cells) {
+// Chunks every follow array still lacks for `cells` cells.  With the pool's lock held.
+int64_t follow_need_locked(SlotPool& p, int64_t cells) {
     const uint64_t G = p.range.granularity();
-    const int dev = p.range.device();
-    const strata::core::OnDevice on(dev);
     int64_t need = 0;
     for (size_t ai = 0; ai < p.arr.size(); ++ai) {
         if (!follow_array(p.arr[ai])) continue;
@@ -1656,22 +1651,17 @@ bool follow_grow_locked(SlotPool& p, int64_t cells) {
         const int64_t c1 = c0 + strata::core::slot_chunks(a, strata::core::slot_units(a, cells, p.page_size, p.idx_block), G);
         for (int64_t c = c0; c < c1; ++c) need += !p.range.mapped(c);
     }
-    if (need == 0) return true;
-    // can the card hand out `need` chunks right now (the relief asked once for the shortfall when it cannot)?
-    bool room = true;
-    for (int64_t i = 0; i < need && room; ++i) {
-        strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
-        if (h == 0) {
-            vram_relief(dev, (uint64_t) (need - i) * G);
-            h = strata::core::vmm_chunk_new(dev);
-        }
-        if (h == 0) room = false;
-        else strata::core::vmm_chunk_free(h);
-    }
-    if (!room) {
-        g_dev_failed.store(true);
-        return false;
-    }
+    return need;
+}
+// Maps the chunks `cells` cells need in every follow array, from the driver's own fresh chunks, and fills them
+// (-1 / the ring formula).  With the pool's lock held - and NEVER the relief caller: the relief hook runs on a
+// thread that takes this very lock through the slot budget, so the room is probed OUTSIDE the lock first
+// (`follow_room`).  false: the driver refused (what landed stays landed - a page table never reads past its
+// live blocks, so half a grow is harmless; nothing is stepped down).
+bool follow_map_locked(SlotPool& p, int64_t cells) {
+    const uint64_t G = p.range.granularity();
+    const int dev = p.range.device();
+    const strata::core::OnDevice on(dev);
     for (size_t ai = 0; ai < p.arr.size(); ++ai) {
         if (!follow_array(p.arr[ai])) continue;
         const auto& a = p.arr[ai];
@@ -1686,19 +1676,61 @@ bool follow_grow_locked(SlotPool& p, int64_t cells) {
                          cudaGetErrorString(cudaGetLastError()));
             for (const int64_t c : fresh)   // what the probe promised but the map still could not take
                 if (const strata::core::VmmChunk h = p.range.unmap(c)) strata::core::vmm_chunk_free(h);
-            g_dev_failed.store(true);
             return false;
         }
         if (!follow_fill_locked(p, ai, fresh, nullptr)) {
             std::fprintf(stderr, "saguaro: filling the context's device state failed on CUDA%d\n", dev);
-            g_dev_failed.store(true);
             return false;
         }
     }
-    g_dev_failed.store(false);
+    return true;
+}
+// Can `dev` hand out `n` chunks of G bytes right now?  Asks the card's relief ONCE for the shortfall (the expert
+// cache giving way, the plan's take-from-experts in VRAM) and retries.  NO layer lock may be held: the relief's
+// give path takes the slot budget's lock.  Chunks are probed and given straight back; the map re-takes them.
+bool follow_room(int dev, int64_t n, uint64_t G, bool may_relief) {
+    const strata::core::OnDevice on(dev);
+    for (int64_t i = 0; i < n; ++i) {
+        strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
+        if (h == 0 && may_relief) {
+            vram_relief(dev, (uint64_t) (n - i) * G);
+            h = strata::core::vmm_chunk_new(dev);
+        }
+        if (h == 0) return false;
+        strata::core::vmm_chunk_free(h);
+    }
     return true;
 }
 }  // namespace
+
+// The grow, in its three steps (measure - probe/relief, lock-free - map), so no lock is carried into the relief.
+bool qsa_follow_grow_at(const QsaState& st, int64_t cells) {
+    if (st.follow_elastic < 0 || !g_follow_live.load()) return true;
+    int64_t need = 0;
+    uint64_t G = 0;
+    int dev = -1;
+    {
+        std::lock_guard<std::mutex> lk(g_slot_mu);
+        SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+        if (!p.follow) return true;
+        need = follow_need_locked(p, cells);
+        G = p.range.granularity();
+        dev = p.range.device();
+    }
+    if (need == 0) {
+        g_dev_failed.store(false);
+        return true;
+    }
+    if (!follow_room(dev, need, G, true)) {
+        g_dev_failed.store(true);
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+    const bool ok = p.follow && follow_map_locked(p, cells);
+    g_dev_failed.store(!ok);
+    return ok;
+}
 
 bool qsa_vram_follow_wanted() {
 #ifndef _WIN32
@@ -1750,11 +1782,13 @@ int64_t qsa_follow_backed_cells(const QsaState& st) {
     return n;
 }
 bool qsa_follow_grow(const QsaState& st, int64_t cells) {
-    if (st.follow_elastic < 0 || !g_follow_live.load()) return true;
+    return qsa_follow_grow_at(st, std::max<int64_t>(cells, follow_start_cells()));
+}
+bool qsa_follow_start(const QsaState& st) {   // (init: the driver's own room, no relief asked - none is installed yet)
+    if (st.follow_elastic < 0) return true;
     std::lock_guard<std::mutex> lk(g_slot_mu);
     SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
-    if (!p.follow) return true;
-    return follow_grow_locked(p, std::max<int64_t>(cells, follow_start_cells()));
+    return follow_map_locked(p, follow_start_cells());
 }
 uint64_t qsa_follow_trim(const QsaState& st, int64_t cells) {
     if (st.follow_elastic < 0 || !g_follow_live.load()) return 0;
@@ -1783,7 +1817,7 @@ bool qsa_follow_back_whole(const QsaState& st) {
     if (st.follow_elastic < 0) return true;
     std::lock_guard<std::mutex> lk(g_slot_mu);
     SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
-    return !p.follow || follow_grow_locked(p, st.max_cells);
+    return !p.follow || follow_map_locked(p, st.max_cells);
 }
 bool qsa_dev_pin_failed() { return g_dev_failed.load(); }
 uint64_t qsa_follow_reserved_bytes(const QsaState& st) {
@@ -1822,36 +1856,25 @@ struct ScoresPool {
 };
 std::vector<std::unique_ptr<ScoresPool>> g_scores_pools;
 std::mutex g_scores_mu;
-bool scores_grow_locked(ScoresPool& sp, int64_t cells, bool ask_relief) {
+bool scores_grow_locked(ScoresPool& sp, int64_t cells) {
     const uint64_t G = sp.range.granularity();
-    const int dev = sp.range.device();
-    const strata::core::OnDevice on(dev);
+    const strata::core::OnDevice on(sp.range.device());
     const int64_t c1 = (int64_t) (((uint64_t) std::max<int64_t>(cells, 1) * sp.unit + G - 1) / G);
-    int64_t need = 0;
-    for (int64_t c = 0; c < c1; ++c) need += !sp.range.mapped(c);
-    if (need == 0) return true;
-    if (ask_relief) {   // the driver first, the card's relief once when it says no (as the follow pools)
-        bool room = true;
-        for (int64_t i = 0; i < need && room; ++i) {
-            strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
-            if (h == 0) {
-                vram_relief(dev, (uint64_t) (need - i) * G);
-                h = strata::core::vmm_chunk_new(dev);
-            }
-            if (h == 0) room = false;
-            else strata::core::vmm_chunk_free(h);
-        }
-        if (!room) {
-            g_dev_failed.store(true);
-            return false;
-        }
-    }
     if (!sp.range.map_range(0, c1, [] { return (strata::core::VmmChunk) 0; })) {
         g_dev_failed.store(true);
         return false;
     }
     g_dev_failed.store(false);
     return true;
+}
+// Chunks the scratch still lacks for `cells` (the room probed OUTSIDE the lock, as the follow pools' - the relief
+// hook runs threads that take the slot budget's lock, and the give path can end up here).
+int64_t scores_need_locked(const ScoresPool& sp, int64_t cells) {
+    const uint64_t G = sp.range.granularity();
+    const int64_t c1 = (int64_t) (((uint64_t) std::max<int64_t>(cells, 1) * sp.unit + G - 1) / G);
+    int64_t need = 0;
+    for (int64_t c = 0; c < c1; ++c) need += !sp.range.mapped(c);
+    return need;
 }
 }  // namespace
 
@@ -1860,7 +1883,9 @@ bool scores_grow_locked(ScoresPool& sp, int64_t cells, bool ask_relief) {
 int32_t qsa_scores_make(int64_t cells) {
     auto sp = std::make_unique<ScoresPool>();
     if (!sp->range.reserve((uint64_t) cells * (uint64_t) sp->unit) ||
-        !scores_grow_locked(*sp, follow_start_cells(), false)) return -1;
+        !follow_room(sp->range.device(), scores_need_locked(*sp, follow_start_cells()), sp->range.granularity(),
+                     false) ||
+        !scores_grow_locked(*sp, follow_start_cells())) return -1;
     std::lock_guard<std::mutex> lk(g_scores_mu);
     g_scores_pools.push_back(std::move(sp));
     return (int32_t) g_scores_pools.size() - 1;
@@ -1872,8 +1897,23 @@ float* qsa_scores_base(int32_t i) {
 }
 bool qsa_scores_grow(int32_t i, int64_t cells) {
     if (i < 0 || !g_follow_live.load()) return true;
+    int64_t need = 0;
+    uint64_t G = 0;
+    int dev = -1;
+    {
+        std::lock_guard<std::mutex> lk(g_scores_mu);
+        ScoresPool& sp = *g_scores_pools[(size_t) i];
+        need = scores_need_locked(sp, cells);
+        G = sp.range.granularity();
+        dev = sp.range.device();
+    }
+    if (need == 0) return true;
+    if (!follow_room(dev, need, G, true)) {
+        g_dev_failed.store(true);
+        return false;
+    }
     std::lock_guard<std::mutex> lk(g_scores_mu);
-    return scores_grow_locked(*g_scores_pools[(size_t) i], cells, true);
+    return scores_grow_locked(*g_scores_pools[(size_t) i], cells);
 }
 uint64_t qsa_scores_trim(int32_t i, int64_t cells) {
     if (i < 0 || !g_follow_live.load()) return 0;
@@ -1893,7 +1933,7 @@ uint64_t qsa_scores_trim(int32_t i, int64_t cells) {
 bool qsa_scores_back_whole(int32_t i, int64_t cells) {
     if (i < 0) return true;
     std::lock_guard<std::mutex> lk(g_scores_mu);
-    return scores_grow_locked(*g_scores_pools[(size_t) i], cells, false);
+    return scores_grow_locked(*g_scores_pools[(size_t) i], cells);
 }
 uint64_t qsa_scores_reserved_bytes(int32_t i) {
     if (i < 0) return 0;
@@ -2030,11 +2070,20 @@ bool rope_map(RopeGrow& r, int64_t cells, const std::function<strata::core::VmmC
 }  // namespace
 
 bool qsa_rope_grow(const QsaState& st, int64_t cells) {
-    std::lock_guard<std::mutex> lk(g_rope_mu);
-    RopeGrow* r = st.cos_tab != nullptr ? rope_grow_of(st.cos_tab) : nullptr;
-    if (r == nullptr || rope_target(*r, cells) <= r->cells) return true;
-    const int dev = r->cos.device();
-    const int64_t need = rope_need(*r, cells);
+    // P124e (round 4): the relief it may ask runs threads that take the rope lock (the give path's low-water
+    // check counts the RoPE chunks), so nothing is held across it: measure, get the chunks, then map.
+    RopeGrow* r = nullptr;
+    int64_t need = 0;
+    uint64_t G = 0;
+    int dev = -1;
+    {
+        std::lock_guard<std::mutex> lk(g_rope_mu);
+        r = st.cos_tab != nullptr ? rope_grow_of(st.cos_tab) : nullptr;
+        if (r == nullptr || rope_target(*r, cells) <= r->cells) return true;
+        need = rope_need(*r, cells);
+        G = r->cos.granularity();
+        dev = r->cos.device();
+    }
     std::vector<strata::core::VmmChunk> got;
     int64_t from_budget = 0;
     if (need > 0) from_budget = qsa_slot_budget_take(dev, need, got);   // (what the budget has; a solo card has none)
@@ -2043,7 +2092,7 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
     for (int64_t i = from_budget; i < need; ++i) {
         strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
         if (h == 0) {
-            vram_relief(dev, (uint64_t) (need - i) * r->cos.granularity());
+            vram_relief(dev, (uint64_t) (need - i) * G);
             h = strata::core::vmm_chunk_new(dev);
         }
         if (h == 0) break;
@@ -2055,11 +2104,17 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
         return false;
     }
     const strata::core::OnDevice on(dev);
+    std::lock_guard<std::mutex> lk(g_rope_mu);
     size_t i = 0;
     const int64_t had = r->cells;
-    if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) return false;
-    std::fprintf(stderr, "saguaro: CUDA%d's RoPE table covers %lld positions now (was %lld)\n", dev, (long long) r->cells,
-                 (long long) had);
+    if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) {
+        for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);   // (never handed to the map)
+        return false;
+    }
+    for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);       // (the map needed fewer than measured)
+    if (r->cells > had)
+        std::fprintf(stderr, "saguaro: CUDA%d's RoPE table covers %lld positions now (was %lld)\n", dev,
+                     (long long) r->cells, (long long) had);
     return true;
 }
 int64_t qsa_rope_need(const QsaState& st, int64_t cells) {
@@ -2592,7 +2647,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         std::lock_guard<std::mutex> lk(g_slot_mu);
         st.follow_elastic = (int32_t) g_slot_pools.size();
         g_slot_pools.push_back(std::move(fpool));
-        if (!follow_grow_locked(*g_slot_pools[(size_t) st.follow_elastic], follow_start_cells())) {
+        if (!follow_map_locked(*g_slot_pools[(size_t) st.follow_elastic], follow_start_cells())) {
             std::fprintf(stderr, "saguaro: KV streaming: backing a state's first context cells failed\n");
             return 0;
         }

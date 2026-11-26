@@ -374,6 +374,10 @@ int64_t qsa_follow_backed_cells(const QsaState& st);
 /// Backs `cells` cells from new chunks; the card's relief once when the driver refuses.  False: the VRAM is not
 /// there (nothing of the failed step stays mapped); sets the "VRAM, not RAM" flag (qsa_dev_pin_failed).
 bool qsa_follow_grow(const QsaState& st, int64_t cells);
+/// ... at an explicit extent (qsa_follow_grow floors at the start step; the give-back on trim calls it directly).
+bool qsa_follow_grow_at(const QsaState& st, int64_t cells);
+/// The state's first start step, from the driver's own room (no relief: called while the card is being built).
+bool qsa_follow_start(const QsaState& st);
 /// Unmaps what `cells` cells do not need, the chunks freed to the driver (no budget); returns the bytes.
 uint64_t qsa_follow_trim(const QsaState& st, int64_t cells);
 /// Backs the whole context now (the fallback when no relief can come: the give path is off).
