@@ -1219,8 +1219,8 @@ def check_request_sampling(req: dict) -> None:
         else:
             raise ValueError("loop_guard: true or false")
     # PLAN-turbo-live: this request's lossy options (serve/turbo_live.py): {"drop": N, "skip": "off"|"ssd"|"ram"}
-    # (OpenAI's extra-body form: a top-level field), checked and kept in its canonical form; absent = the model's
-    # live Turbo setting (Service.check_request), off = today's exact request
+    # (OpenAI's extra-body form: a top-level field), checked and kept in its canonical form; absent = exact
+    # (PLAN-p124s: only the app's own chats take the model's live Turbo - Service.check_request), off = exact too
     if "turbo" in req:
         req["turbo"] = turbo_live.normalize_turbo(req.get("turbo"))
 
@@ -3381,9 +3381,10 @@ class Service:
             req["_priority"] = priority_level(want, where)
         else:
             req["_priority"] = self.priority_default if self.priority_default is not None else PRIORITY_NORMAL
-        # PLAN-turbo-live: a request without its own Turbo takes the model's live one (the control panel's, no
-        # config rewrite); one that says off keeps off - it overrides the global setting for itself
-        if not isinstance(req.get("turbo"), dict):
+        # PLAN-p124s: the model's live Turbo (control panel, sidecar) is the web app's own chats' setting only - an
+        # API request (_api is the handler's own marker, never the client's word) runs exact unless its OWN `turbo`
+        # field asks; one of the app's chats that says off keeps off - it overrides the panel's setting for itself
+        if req.get("_api") == "web" and not isinstance(req.get("turbo"), dict):
             default = self.turbo_default   # (read once: a concurrent POST /api/turbo/options stores None between two reads and dict(None) is a 500)
             req["turbo"] = dict(default) if default else None
         if getattr(self, "engine_kind", None) in NO_LIVE_TURBO:   # (no Turbo in these engines: the request runs exact)
@@ -3464,9 +3465,10 @@ class Service:
         return self.shared
 
     def set_turbo_default(self, value) -> dict:
-        """The model's live Turbo (PLAN-turbo-live, the control panel's per-model setting): lossy options every
-        request that carries none of its own runs with (agents included).  It applies at once - no config rewrite,
-        no reload - and is kept in a sidecar file for the next start; the engine's run config is not touched."""
+        """The model's live Turbo (PLAN-turbo-live, the control panel's per-model setting): lossy options the
+        web app's own chats run with while they carry none of their own (PLAN-p124s: an API request gets Turbo
+        only from its own fields).  It applies at once - no config rewrite, no reload - and is kept in a sidecar
+        file for the next start; the engine's run config is not touched."""
         t = turbo_live.normalize_turbo(value)
         if getattr(self, "engine_kind", None) in NO_LIVE_TURBO and turbo_live.turbo_on(t):
             raise ValueError(f"Turbo: {NO_LIVE_TURBO[self.engine_kind]}'s engine has none - its requests run exact")
@@ -7999,7 +8001,8 @@ def make_handler(svc: Service):
                     self._json(200, svc.turbo_info())
             elif path == "/api/turbo/options":
                 # the live per-request Turbo (PLAN-turbo-live): the model's global setting (the control panel's),
-                # what requests without their own `turbo` run with - changes apply at once, no config rewrite
+                # what the app's own chats without their own `turbo` run with (PLAN-p124s) - changes apply at
+                # once, no config rewrite
                 if self._authorized():
                     self._json(200, {"turbo": dict(svc.turbo_default) if svc.turbo_default else None,
                                      "turbo_skip": svc.turbo_skip_supported(),   # (PLAN-p5: false only where the
@@ -8357,8 +8360,9 @@ def make_handler(svc: Service):
 
         def _turbo_options(self):
             # The live per-request Turbo (PLAN-turbo-live): the model's global options in the control panel.  It
-            # changes what every request without its own `turbo` runs with - so the app's own page only - but it is
-            # engine state only: applied at once, no config rewrite, no reload, and it works under llama-swap
+            # changes what the app's own chats without their own `turbo` run with (PLAN-p124s: API requests run
+            # exact unless they ask) - engine state only: applied at once, no config rewrite, and it works under
+            # llama-swap
             body = self._body()
             if not self._own_page("Turbo's options can be changed"):
                 return
@@ -8372,7 +8376,7 @@ def make_handler(svc: Service):
                 return
             print("[saguaro] live Turbo for this model: "
                   + (f"drop {out['drop']}, skip {out['skip']}" if out else "off")
-                  + " (every request without its own, from the next one)", flush=True)
+                  + " (the app's own chats without their own, from the next one)", flush=True)
             self._json(200, {"turbo": out})
 
         def _update(self):
@@ -10060,7 +10064,7 @@ def main() -> int:
                 json.loads(Path(svc.turbo_path).read_text(encoding="utf-8"))))
             if svc.turbo_default:
                 print(f"[saguaro] live Turbo for this model: drop {svc.turbo_default['drop']}, "
-                      f"skip {svc.turbo_default['skip']} (requests without their own)", flush=True)
+                      f"skip {svc.turbo_default['skip']} (the app's own chats without their own)", flush=True)
         except (OSError, ValueError):
             svc.turbo_default = None
     if hub is not None:
