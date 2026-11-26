@@ -1185,3 +1185,62 @@ class RequestFields(Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PicturesNotStreamed(Env):
+    """1.2.2 gate (9070 XT box): a non-streaming answer runs on _collect_wait's side thread, and the request's
+    picture embeddings live in a thread-local (Service.embeddings) - the side thread saw none, so the engine got the
+    picture's pad tokens with no picture and GLM described one that was not there. Every API, not streamed."""
+
+    class Vision:
+        owed = False
+
+        def __init__(self, d):
+            self.dir = Path(d)
+            self.rows = self.dir / "img.sve"
+            self.rows.write_bytes(b"rows")
+
+        def encode(self, source):
+            return self.rows, 3
+
+        def active(self):
+            return contextlib.nullcontext(self)
+
+    class Engine(MockEngine):
+        def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+            self.seen.append(embeddings)
+            yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+    def test_every_api_hands_the_picture_to_the_engine(self):
+        import tempfile
+        tok = ByteTokenizer()
+        red = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        bodies = {
+            "/v1/chat/completions": {"model": "x", "max_tokens": 4, "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": red}}, {"type": "text", "text": "colour?"}]}]},
+            "/v1/messages": {"model": "x", "max_tokens": 4, "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": red.split(",")[1]}},
+                {"type": "text", "text": "colour?"}]}]},
+            "/v1/responses": {"model": "x", "max_output_tokens": 4, "input": [{"role": "user", "content": [
+                {"type": "input_image", "image_url": red}, {"type": "input_text", "text": "colour?"}]}]},
+            "/api/chat": {"model": "x", "stream": False, "options": {"num_predict": 4}, "messages": [
+                {"role": "user", "content": "colour?", "images": [red.split(",")[1]]}]},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            engine = self.Engine(tok, "ok", max_context=1 << 16)
+            engine.seen = []
+            svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=self.Vision(d))
+            svc.model_management = True                  # (/api/chat is gated on model management)
+            httpd = serve(svc, port=0)
+            try:
+                for path, body in bodies.items():
+                    with self.subTest(api=path):
+                        engine.seen.clear()
+                        req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}{path}",
+                                                     data=json.dumps(body).encode(),
+                                                     headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=60) as r:
+                            self.assertEqual(r.status, 200)
+                        self.assertTrue(engine.seen and engine.seen[0], f"{path}: the engine got no picture")
+            finally:
+                httpd.shutdown()

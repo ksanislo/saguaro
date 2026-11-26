@@ -7223,9 +7223,11 @@ def make_handler(svc: Service):
             spaces, and an error keeps its real status however long the answer took. From the headers out an error
             cannot change the status any more - the log says so once, and the error's JSON rides as the body."""
             box = {}
+            emb = getattr(svc.embeddings, "path", None)    # (thread-local: this thread prepared the prompt's pictures)
 
             def work():
-                try:
+                svc.embeddings.path = emb                  # (the answer runs here: without it a picture went to the
+                try:                                       #  engine as bare pad tokens - see carry_embeddings)
                     box["body"] = make()
                 except Exception as e:                     # any of them (a GpuBusy or a QueueWaitExpired is a plain
                     box["error"] = e                       #  RuntimeError): the thread must not die with the box
