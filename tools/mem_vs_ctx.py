@@ -366,7 +366,9 @@ def stop_server(port: int, proc: subprocess.Popen | None = None, wait_s: float =
 
 def measure_context(cfg: dict, context: int, port: int, run_dir, python=sys.executable,
                     health_timeout: float = HEALTH_S, settle: float = SETTLE_S) -> dict:
-    """One run of the check: start at this context, wait for /health ok, read what it holds, stop it."""
+    """One run of the check: start at this context, wait for /health ok, read what it holds, stop it. A stop
+    that leaves the port held raises, so the next context never dies at the bind and gets its FAIL mis-
+    attributed to "the server ended before /health was ok" when the truth is a stale port."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     run_cfg = run_config(cfg, run_dir, context)
@@ -383,7 +385,10 @@ def measure_context(cfg: dict, context: int, port: int, run_dir, python=sys.exec
         except OSError:
             log_text = ""
     finally:
-        stop_server(port, proc)
+        freed = stop_server(port, proc)
+    if not freed:
+        raise RuntimeError(f"port {port} is still held after the stop - free it before the next context "
+                           "starts (our server is stopped, so whoever holds the port is not ours)")
     return {"context": context, "pinned_mib": m["VmLck"] + m["VmPin"], "rss_mib": m["VmRSS"],
             "gpu_mib": gpu, "budget": budget_lines(log_text)}
 
