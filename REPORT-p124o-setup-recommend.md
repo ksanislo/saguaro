@@ -57,13 +57,13 @@ own quant are accuracy picks, never a fit-based default; they stay out of the la
 
 ## Step 3 - the new rule (saguaro.py)
 
-- `QFN_RECOMMEND = (QFN_DEFAULT_QUANT, Q.GSQ_IQ3_S, Q.GSQ_CODER_IQ1_M)` - saguaro.py:728 - the ladder, the largest
+- `QFN_RECOMMEND = (QFN_DEFAULT_QUANT, Q.GSQ_IQ3_S, Q.GSQ_CODER_IQ1_M)` - saguaro.py:729 - the ladder, the largest
   that runs first; Q8_0 and CYBER-FROST's own quant are accuracy picks and stay out of it.
-- `qfn_recommended_quant(cards, ram, backend)` - saguaro.py:7719 - the largest ladder quant whose `qfn_quant_fit`
+- `qfn_recommended_quant(cards, ram, backend)` - saguaro.py:7722 - the largest ladder quant whose `qfn_quant_fit`
   (the setup's own fit check, experts streamed: refused only under the true minimum) passes, priced on the cards the
   QFN setup would take from these (AMD: the largest RDNA GPU that is not an APU - its setup runs on one GPU; NVIDIA:
   `qfn_fit.best_gpus` over the cards at MIN_CC and newer); None where none of the three runs at all.
-- `family_fit` - saguaro.py:8619 - tries **QFN first** where the QFN engine exists for the backend, every card is
+- `family_fit` - saguaro.py:8609 - tries **QFN first** where the QFN engine exists for the backend, every card is
   24 GB or less (the line GLM's own Maya-S24 note uses: "cards of 24 GB or less", so the P40 box is now covered),
   NVIDIA one or two cards / AMD its one GPU, and `qfn_recommended_quant` finds a quant that runs. Inkling's branch
   stands and is now reached only where no QFN quant runs - Inkling stays offered, not the default. The four-equal-
@@ -71,9 +71,9 @@ own quant are accuracy picks, never a fit-based default; they stay out of the la
   no-recommendation path (GLM / DS4 / MM3 for the bigger PCs) are untouched.
 - Reason lines, kept and updated: the model question's QFN row prints
   "recommended for this PC (UD-Q4_K_XL)" - the quant of it this PC would get (saguaro.py:2253); the quant menu marks
-  and defaults to the largest quant that RUNS instead of the hardcoded UD-Q4_K_XL (saguaro.py:7733-7761,
+  and defaults to the largest quant that RUNS instead of the hardcoded UD-Q4_K_XL (saguaro.py:7736-7764,
   `rec` over QFN_RECOMMEND); Inkling's about-line now says it is "the model for one or two 16 GB cards where
-  Qwen3.8-Flash-Next does not run" (saguaro.py:8683).
+  Qwen3.8-Flash-Next does not run" (saguaro.py:8672).
 
 | machine | before | now (family_fit / quant) |
 |---|---|---|
