@@ -479,6 +479,26 @@ class MiniMaxExl3Folder(Tmp):
         prev["installer"].pop("own")                                           # (the pinned setup before: as it was)
         self.assertEqual(maya.mm3_dir(self.a, self.root / "models", prev, "exl3"), d)
 
+    def test_set_up_mm3_wires_the_recorded_own_folder_to_its_steps(self):
+        """P124r (REVIEW-p124f finding 1): the wiring line itself is tested, not only mm3_dir - set_up_mm3
+        takes the installer's own + model_dir as the `own` folder every later step runs on, without
+        --model-dir named again; a config without the record: the own stays None and the pinned flow follows."""
+        d = self.own()
+        self.a.model_dir = None
+
+        def memory(quant, own=None):     # the first step after the wiring: capture the folder and stop there
+            seen.append(own)
+            raise Stop("stop after the own folder")
+        for inst, want in (({"mm3_quant": "exl3", "own": True, "model_dir": str(d)}, Path(str(d))),
+                           ({"mm3_quant": "exl3"}, None)):                # (the pinned setup before: as it was)
+            seen = []
+            with patch.object(maya, "choose_mm3_quant", return_value="exl3"), \
+                    patch.object(maya, "mm3_own_dir", return_value=None), \
+                    patch.object(maya, "mm3_memory_gb", memory):
+                with self.assertRaises(Stop):
+                    maya.set_up_mm3(self.a, {"args": ["--pack", str(d / "maya-mm3")], "installer": inst})
+            self.assertEqual(seen, [want])
+
     def test_the_config_has_the_folders_sampling_and_a_name_of_its_own(self):
         d = self.own(gen={"bos_token_id": 1, "do_sample": True, "temperature": 0.5, "top_p": 0.8})
         pack = d / "maya-mm3"

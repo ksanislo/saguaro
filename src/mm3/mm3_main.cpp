@@ -758,7 +758,11 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
             continue;
         }
         if (cancel) {
-            std::printf("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", r.ids.size(), t1 - t0, from);
+            // (P124r nit 3: the cancelled read reports its OWN expert counters, as the normal DONE reports the
+            //  decode's - what its forwards routed, in VRAM and all; the literal 0 0 hid them)
+            const auto& se = m.stats();
+            const long long look = se.profiled - s_pre.profiled, cpu = se.cpu_experts - s_pre.cpu_experts;
+            std::printf("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu %lld %lld\n", r.ids.size(), t1 - t0, from, look - cpu, look);
             std::fflush(stdout);
             continue;
         }
@@ -1017,7 +1021,6 @@ int serve(mm3::Model& m, const std::vector<int>& eos, int chunk, bool spec_on, f
                      r.ids.size(), from, r.ids.size() - from, t1 - t0,
                      t1 > t0 ? 1000.0 * (double) (r.ids.size() - from) / (t1 - t0) : 0.0, produced, t2 - t1,
                      t2 > t1 ? 1000.0 * (double) produced / (t2 - t1) : 0.0, look > 0 ? 100.0 * cpu / look : 0.0);
-        (void) s_pre;
     }
     return 0;
 }
@@ -1431,6 +1434,7 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
         m.bind(best);
         m.set_images(std::move(rows));
         const int C = std::max(1, m.chunk() > 0 ? m.chunk() : chunk);
+        const auto s_pre = m.stats();   // (the read's routing base: a cancelled read reports it, as finish() the decode's)
         bool ok = true, cancel = false;
         for (size_t a = bfrom2; a < ids.size();) {
             const int T = (int) std::min<size_t>((size_t) C, ids.size() - a);
@@ -1475,7 +1479,12 @@ int serve_multi(mm3::Model& m, const std::vector<int>& eos, int chunk, const std
             return;
         }
         if (cancel) {
-            std::printf("DONE %d 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0\n", g.rid, ids.size(), g.t1 - g.t0 - g.gap_ms, bfrom2);
+            // (P124r nit 3: the cancelled read reports its OWN expert counters, as finish() reports the decode's -
+            //  what its forwards routed, in VRAM and all; the literal 0 0 hid them)
+            const auto& se = m.stats();
+            const long long look = se.profiled - s_pre.profiled, cpu = se.cpu_experts - s_pre.cpu_experts;
+            std::printf("DONE %d 0 %zu %.1f 0.0 cancel 0 0 %zu %lld %lld\n", g.rid, ids.size(),
+                        g.t1 - g.t0 - g.gap_ms, bfrom2, look - cpu, look);
             std::fflush(stdout);
             release(best);
             in.forget(g.rid);

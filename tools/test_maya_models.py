@@ -557,6 +557,32 @@ class SetupAgainOfAnExistingModel(unittest.TestCase):
                 got = maya.model_step(a, models, ("local", first))
             self.assertEqual((got[0], got[1], got[2]), (folder, [folder / n for n in names], "Maya-M"))
 
+    def test_a_recorded_exl3_folder_is_not_taken_on_metal(self):
+        """P124r (REVIEW-p124f finding 2): a setup again of a config that recorded an EXL3 model_dir with
+        --backend metal fails like --model-dir does ("an EXL3 quant runs on NVIDIA GPUs only") instead of
+        taking the folder; a recorded GGUF folder is still taken there."""
+        with tempfile.TemporaryDirectory() as d:
+            models, folder = Path(d), Path(d) / "exl3"
+            folder.mkdir()
+            for n in ("config.json", "tokenizer.json", "tokenizer_config.json"):
+                (folder / n).write_text("{}", encoding="utf-8")
+            inst = {"models_dir": str(models), "model_dir": str(folder)}
+            a = SimpleNamespace(gguf_dir=None, model=None, model_dir=None, yes=True, backend="metal")
+            with patch.object(maya.S, "gpus", return_value=[]), patch.object(maya, "fail",
+                                                                             side_effect=SystemExit(1)) as stop:
+                with self.assertRaises(SystemExit):
+                    maya.choose_model(a, models, inst)
+            self.assertIn("an EXL3 quant runs on NVIDIA GPUs only", stop.call_args.args[0])
+            names = maya.shard_names(maya.MODELS["Maya-M"])              # (a recorded GGUF folder: fine on Metal)
+            ggufs = Path(d) / "ggufs"
+            ggufs.mkdir()
+            first = self.whole_gguf(ggufs / names[0])
+            for n in names[1:]:
+                self.whole_gguf(ggufs / n)
+            inst = {"models_dir": str(models), "quant": "Maya-M", "gguf": str(first), "gguf_dir": str(ggufs)}
+            with patch.object(maya.S, "gpus", return_value=[]):
+                self.assertEqual(maya.choose_model(a, models, inst), ("local", first))
+
     def test_a_missing_shard_is_the_only_one_offered(self):
         """The existing config's Maya-M download has shard 3 gone: the setup again keeps Maya-M as the default
         and its download names exactly that shard, no other file."""

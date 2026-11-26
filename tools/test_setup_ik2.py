@@ -712,6 +712,36 @@ class Steps(unittest.TestCase):
         with patch.object(maya, "offer_download", side_effect=AssertionError("nothing to download here")):
             self.assertEqual(maya.ik2_model_step(a, d), own)
 
+    def test_set_up_ik2_hands_the_recorded_file_to_its_steps(self):
+        """P124r (REVIEW-p124f finding 1): the wiring line itself is tested, not only ik2_local_gguf -
+        set_up_ik2 puts the installer's ik2_file onto the args (a.ik2_prev_file) BEFORE ik2_local_gguf runs,
+        so a setup again finds its own GGUF without --model-dir named again; a config without the record:
+        the same line hands it None."""
+        class Wired(Exception):
+            """Ends set_up_ik2 right after the line under test (its steps 2-8 need a PC and a build)."""
+        d = self.root / "own-folder"
+        d.mkdir()
+        own = d / "Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf"
+        own.write_bytes(b"GGUF")
+        for inst, want in (({"family": "ik2", "ik2_quant": Q.IK2_QUANT, "ik2_file": own.name,
+                             "model_dir": str(d), "models_dir": str(self.root / "models")}, own.name),
+                           ({"family": "ik2", "ik2_quant": Q.IK2_QUANT,
+                             "models_dir": str(self.root / "models")}, None)):   # (the pinned setup: as it was)
+            seen = []
+
+            def local(a, dd):
+                seen.append((id(a), dd, getattr(a, "ik2_prev_file", "never set")))
+                raise Wired("the wiring is what this test drives")
+            a = args(download_model=False)
+            with patch.object(maya, "check_pc", return_value={"backend": "cuda", "gpus": [card(24)]}), \
+                    patch.object(maya, "choose_ik2_quant", return_value=Q.IK2_QUANT), \
+                    patch.object(maya, "ik2_dir", return_value=d), \
+                    patch.object(maya, "ik2_local_gguf", local):
+                with self.assertRaises(Wired):
+                    maya.set_up_ik2(a, {"installer": inst})
+            self.assertEqual(seen, [(id(a), d, want)])
+            self.assertEqual(a.ik2_prev_file, want)
+
     def test_a_setup_again_offers_only_the_file_that_is_missing(self):
         """P124f the other half: the recorded folder, its published UD-Q4_K_XL gone: the download offered names
         exactly that file."""
