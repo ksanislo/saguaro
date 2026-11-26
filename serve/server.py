@@ -5760,9 +5760,12 @@ class Service:
                 with self.status_lock:
                     self.status["queued"] -= 1
             if preempt:                                 # R122: its turn again - the answer goes on from exactly the
-                stat.paused_for_priority = False        #  token it reached, nothing the engine holds re-read
+                stat.paused_for_priority = False        #  token it reached, nothing the engine holds re-read. The
+                #  read's line says where the engine kept it, not where the tick saw it: the engine cannot report
+                #  more over the pipe, and a stop between two windows may quietly keep less than the tick printed
                 print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} "
-                      f"{'answer' if produced else 'prompt read'} continues", flush=True)
+                      f"{'answer continues' if produced else 'prompt read continues from where the engine kept it'}",
+                      flush=True)
             with self.status_lock:
                 self.active += 1
                 self.touch_telemetry()
