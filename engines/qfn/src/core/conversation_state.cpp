@@ -191,16 +191,21 @@ bool conversation_checkpoint_save(ConversationCheckpoint& c, const SessionState&
     // state - and no clock covered the wait, which is where the parks logged right after a cut request lost
     // seconds the split could not see.  The one wait happens before returning on the failure paths too: the
     // queued copies write into `c`, and the caller may free it the moment save reports failure.
-    bool ok = copy(c.gdn.data(), ss.gdn_state, c.gdn.size(), error, true);
-    ok = copy(c.ple.data(), ss.ple_hist, c.ple.size(), error, true) && ok;
+    std::string first;   // the loop keeps going after a failure (the stream must still be waited for), so it names
+                         // the FIRST failing copy, not the last one to overwrite the message (review F5)
+    bool ok = copy(c.gdn.data(), ss.gdn_state, c.gdn.size(), first, true);
+    ok = copy(c.ple.data(), ss.ple_hist, c.ple.size(), first, true) && ok;
     for (size_t j = 0; j < layers; ++j) {
         const auto& st = owned(ss, j);
-        ok = copy(c.tails.data() + j * z.tail, st.idx_tail, z.tail, error, true) && ok;
-        ok = copy(c.dead.data() + j * z.dead, st.idx_dead, z.dead, error, true) && ok;
-        ok = copy(c.block_pos.data() + j * z.block_pos, st.idx_block_pos, z.block_pos, error, true) && ok;
+        ok = copy(c.tails.data() + j * z.tail, st.idx_tail, z.tail, first, true) && ok;
+        ok = copy(c.dead.data() + j * z.dead, st.idx_dead, z.dead, first, true) && ok;
+        ok = copy(c.block_pos.data() + j * z.block_pos, st.idx_block_pos, z.block_pos, first, true) && ok;
     }
     const cudaError_t done = conversation_detail::copy_stream_done();
-    if (!ok) return false;
+    if (!ok) {
+        if (error.empty()) error = first;
+        return false;
+    }
     if (done != cudaSuccess) return fail(error, "running-state copy");
     return true;
 }
