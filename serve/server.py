@@ -5608,7 +5608,9 @@ class Service:
                             pos = self._read_position()
                             if pos and pos[0] < pos[1] and self.fifo.waiting(above=prio) \
                                     and self.fifo.claim_yield(0.0, above=prio):
-                                claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting()]
+                                # (the claim held under the lock; the last waiter can still have left the line
+                                #  by now - name it, or name this request's own level rather than crash)
+                                claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting() or prio]
                                 if getattr(self.engine, "can_pause", False):
                                     self.engine.pause()   # (the state with what it read stays: the rest after)
                                     pausing = True
@@ -5645,7 +5647,9 @@ class Service:
                     if (prio < PRIORITY_HIGH and not pausing and not emb and not self.stopping
                             and len(produced) < max_new and self.fifo.waiting(above=prio)
                             and self.fifo.claim_yield(0.0, above=prio)):
-                        claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting()]
+                        # (the claim held under the lock; the last waiter can still have left the line by
+                        #  now - name it, or name this request's own level rather than crash)
+                        claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting() or prio]
                         if getattr(self.engine, "can_pause", False):
                             self.engine.pause(keep=len(cur) == len(ids))   # its first slice (as a fair slice's)
                             pausing = True
