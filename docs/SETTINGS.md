@@ -269,15 +269,19 @@ alive: the keep-alive comments, and after `SAGUARO_WAIT_EVENT_S` without a real 
 ollama-style streams send nothing); a non-streaming request that has waited `SAGUARO_WAIT_SPACE_S` or was paused
 once gets its 200 and headers early and a space until the JSON arrives.
 
-**An agent's alias at low** (llama-swap >= v200 syntax): point the agent at an alias of the same model whose
-params set the field, and its long turns keep the machine warm without holding up a person at the keyboard:
+**An agent's alias at low** (checked on llama-swap v260): ONE entry for the model with the agent's alias on it, and
+the field set by `filters: setParamsByID:` keyed to that alias ON THE SAME ENTRY - an alias is another name this
+model configuration answers for, and `setParamsByID` applies last, so a request to `glm-agent` runs on the model
+that is already running, no swap and no second process (a SECOND model entry would swap to its own process, which
+is the opposite of one server one model, and is not how this is done):
 
 ```yaml
-  - id: glm-background
-    # ... the same model as the normal entry ...
+  - id: glm
+    aliases:
+      - glm-agent            # requests to glm-agent run on THIS model: no swap, no second process
     filters:
       setParamsByID:
-        "glm-background":
+        glm-agent:
           priority: low
 ```
 
