@@ -834,7 +834,13 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok) {
         (void) cudaGetLastError();
         p.d[i] = nullptr;
     }
-    if (pages <= 0) { host_apply(p, p.d.data()); ok = true; return 0; }
+    if (pages <= 0) {   // nothing registered: say so in `backed` too, or a later grow to the old size would
+                        // answer "already backed" with null pointers (P124e review: the booby trap)
+        p.backed = 0;
+        host_apply(p, p.d.data());
+        ok = true;
+        return 0;
+    }
     std::vector<uint8_t*> nd(p.per.size(), nullptr);
     uint64_t got = 0;
     bool whole = true;
