@@ -10912,6 +10912,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 return true;
             }
             const auto t0 = Clock::now();
+            strata::core::conversation_snapshot_reset_split();   // (PLAN-p124a: this line counts this park only)
             try {
                 const uint64_t floor = (uint64_t) o.conversation_cache_min_free_mib * 1024 * 1024;
                 const size_t retained = reuse.bytes() + stage_retained;
@@ -10975,17 +10976,16 @@ vs.d_skip_usage = gs.d_skip_usage;
                 const bool stored = conversations.put(std::move(image), held, park_clock());
                 if (stored && sdir) sdir->write(conversations.newest());   // written behind, after its delay
                 if (stored) (f.slot < 0 ? turn_main : turn_slot[(size_t) f.slot]).reset();   // (its file moves on without the track)
+                const double park_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 if (stored) {   // the server's log: a conversation going out, to RAM
                     std::printf("INFO sess_event=parked sess_tokens=%zu sess_bytes=%zu sess_ms=%.0f sess_why=ram\n",
-                                f.ids.size(), snapshot_bytes,
-                                std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+                                f.ids.size(), snapshot_bytes, park_ms);
                     std::fflush(stdout);
                 }
                 if (!stored) spill();
-                const std::string split = strata::core::conversation_snapshot_take_split();   // (read-stall instrumentation)
+                const std::string split = strata::core::conversation_snapshot_take_split(park_ms);   // (read-stall instrumentation; wait = outside the split, PLAN-p124a)
                 std::fprintf(stderr, "saguaro serve: conversation cache: %s %zu tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu reused_kv_bytes=%zu%s; %s\n",
-                             stored ? "parked" : "skipped", f.ids.size(),
-                             std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                             stored ? "parked" : "skipped", f.ids.size(), park_ms,
                              conversations.size(), conversations.bytes(), conversations.evictions(), snapshot_bytes, reused_bytes,
                              who.c_str(), split.c_str());
             } catch (const std::bad_alloc&) {
@@ -18204,6 +18204,11 @@ vs.d_skip_usage = gs.d_skip_usage;
             pk::Memory mem;
             const auto reading = strata::core::sample_host_memory();
             if (reading) mem.available = reading->available;
+            // PLAN-p124a: the resident expert tier and the live K/V pool are ours and no release gives them back -
+            // count them out of the shortage, or a resident-RAM engine drops every park seconds after parking it
+            // while the host is wide open (mortar: 8.6 GiB "free", 81 GiB actually there, 68 GiB pinned by us).
+            mem.own_pinned = (srcp == &arena_src ? arena_src.pinned_arena_bytes() : src.resident_bytes()) +
+                             strata::core::qsa_kv_host_bytes();
             {
                 std::ifstream psi("/proc/pressure/memory");
                 if (psi) mem.psi_some10 = pk::psi_some10(psi);
@@ -18239,6 +18244,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                                   (double) park_lim.pool_bytes / 1073741824.0);
                 else if (mem.psi_some10 && pk::psi_high(mem, park_lim) && !pressed)
                     std::snprintf(why, sizeof why, "pressure: memory stalls %.1f, %.1f GiB free", *mem.psi_some10, free_gib);
+                else if (mem.own_pinned > 0)
+                    std::snprintf(why, sizeof why,
+                                  "pressure: %.1f GiB free, short even crediting the engine's own %.1f GiB pinned",
+                                  free_gib, (double) mem.own_pinned / 1073741824.0);
                 else
                     std::snprintf(why, sizeof why, "pressure: %.1f GiB free", free_gib);
                 std::fprintf(stderr, "saguaro serve: conversation cache: dropped %llu tokens (%s), on disk: %s; "
@@ -19808,6 +19817,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::printf("ERR the K/V cannot grow to the parked conversation: no VRAM is left\n");
                 return 1;
             }
+            strata::core::conversation_snapshot_reset_split();   // (PLAN-p124a: the restore line counts this switch only)
             if (borrow) {
                 const auto t0 = Clock::now();
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked

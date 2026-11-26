@@ -6,7 +6,9 @@
 //     be able to pin for live context anyway.  Their budget is what the live K/V does not hold right now, so a slot
 //     that grows or a new conversation shrinks it and the oldest parked entries leave.
 //   * They never take room from the weights or from live context: when the host's available RAM falls under the
-//     floor (or the kernel reports memory stalls), they are released until it is back above it.
+//     floor (or the kernel reports memory stalls), they are released until it is back above it.  The engine's own
+//     pinned weights and K/V pool are credited back when judging that (Memory::own_pinned): a resident-RAM engine
+//     is meant to hold most of the host, and dropping parks cannot change that (PLAN-p124a).
 //   * Otherwise they stay: nothing expires by age unless SAGUARO_PARK_IDLE_S says so.
 // An entry whose session file is written leaves at once.  One that is not yet on disk has its write started now (no
 // write delay) and its RAM goes back when the write ends; it is dropped unwritten only when the available RAM is
@@ -34,6 +36,13 @@ struct Limits {
 struct Memory {
     std::optional<uint64_t> available;       // MemAvailable under the cgroup limits (conversation_memory.hpp)
     std::optional<double> psi_some10;        // /proc/pressure/memory, when the kernel has it
+    // RAM the engine itself holds pinned by design and no release gives back: the resident expert tier and the live
+    // K/V pool (PLAN-p124a).  `available` counts them as used - on a resident-RAM box that keeps it under the floor
+    // forever, and every park is dropped seconds after it lands while the host is wide open.  Pressure asks for what
+    // is really available for one more parked conversation: the engine's own tier is credited back for the release
+    // decision (weights outrank parked, and they are not leaving); `severe` and the admission checks keep the raw
+    // reading, so a host that is genuinely full still stops a park and still drops unsaved entries.
+    uint64_t own_pinned = 0;
 };
 
 struct Entry {
@@ -75,9 +84,13 @@ inline std::optional<double> psi_some10(std::istream& in) {
 }
 
 /// The bytes pressure asks back: up to an eighth above the floor, so one release does not leave it at the edge.
+/// The engine's own pinned tier and live K/V pool (`own_pinned`: RAM no release gives back) are credited first -
+/// the floor guards against a shortage no parked conversation caused, not against the resident RAM mode working.
 inline uint64_t pressure_need(const Memory& m, const Limits& l) {
-    if (l.free_bytes == 0 || !m.available || *m.available >= l.free_bytes) return 0;
-    return l.free_bytes - *m.available + l.free_bytes / 8;
+    if (l.free_bytes == 0 || !m.available) return 0;
+    const uint64_t avail = *m.available > UINT64_MAX - m.own_pinned ? UINT64_MAX : *m.available + m.own_pinned;
+    if (avail >= l.free_bytes) return 0;
+    return l.free_bytes - avail + l.free_bytes / 8;
 }
 inline bool psi_high(const Memory& m, const Limits& l) { return l.psi > 0.0 && m.psi_some10 && *m.psi_some10 > l.psi; }
 inline bool severe(const Memory& m, const Limits& l) { return m.available && *m.available < l.severe_bytes; }

@@ -186,14 +186,22 @@ bool conversation_checkpoint_save(ConversationCheckpoint& c, const SessionState&
     c.gdn.resize(z.gdn); c.ple.resize(ss.ple_hist ? z.ple : 0);
     c.tails.resize(layers * z.tail); c.dead.resize(layers * z.dead); c.block_pos.resize(layers * z.block_pos);
     c.rope_level = ss.rope_level;
-    if (!copy(c.gdn.data(), ss.gdn_state, c.gdn.size(), error) ||
-        !copy(c.ple.data(), ss.ple_hist, c.ple.size(), error)) return false;
+    // PLAN-p124a: every copy is queued on this thread's private stream and waited for once at the end.  They used
+    // to synchronize one by one - about three driver round-trips per QSA layer for a 62-layer model's running
+    // state - and no clock covered the wait, which is where the parks logged right after a cut request lost
+    // seconds the split could not see.  The one wait happens before returning on the failure paths too: the
+    // queued copies write into `c`, and the caller may free it the moment save reports failure.
+    bool ok = copy(c.gdn.data(), ss.gdn_state, c.gdn.size(), error, true);
+    ok = copy(c.ple.data(), ss.ple_hist, c.ple.size(), error, true) && ok;
     for (size_t j = 0; j < layers; ++j) {
         const auto& st = owned(ss, j);
-        if (!copy(c.tails.data() + j * z.tail, st.idx_tail, z.tail, error) ||
-            !copy(c.dead.data() + j * z.dead, st.idx_dead, z.dead, error) ||
-            !copy(c.block_pos.data() + j * z.block_pos, st.idx_block_pos, z.block_pos, error)) return false;
+        ok = copy(c.tails.data() + j * z.tail, st.idx_tail, z.tail, error, true) && ok;
+        ok = copy(c.dead.data() + j * z.dead, st.idx_dead, z.dead, error, true) && ok;
+        ok = copy(c.block_pos.data() + j * z.block_pos, st.idx_block_pos, z.block_pos, error, true) && ok;
     }
+    const cudaError_t done = conversation_detail::copy_stream_done();
+    if (!ok) return false;
+    if (done != cudaSuccess) return fail(error, "running-state copy");
     return true;
 }
 
@@ -335,7 +343,14 @@ bool conversation_snapshot_save(SavedConversation& image, const ConversationView
     captured.kv = std::move(reuse.kv);
     const size_t layers = owned_qsa(ss);
     captured.kv.resize(layers + (draft ? 1 : 0));
-    if (!conversation_checkpoint_save(captured.live, ss, g, error)) return false;
+    {   // (the park/restore split: the live session's running state - the park's largest copy, and until
+        //  PLAN-p124a the only part of it no clock measured: a 62-layer model carries ~237 MB here)
+        const auto t_state = std::chrono::steady_clock::now();
+        const bool state_ok = conversation_checkpoint_save(captured.live, ss, g, error);
+        conversation_detail::snapshot_split().ckpt_ms +=
+            conversation_detail::split_ms(t_state, std::chrono::steady_clock::now());
+        if (!state_ok) return false;
+    }
     const int64_t upto = (int64_t) view.ids.size();
     for (size_t j = 0; j < layers; ++j)
         if (!conversation_kv_save(captured.kv[j], owned(ss, j), g, upto, true, error,
