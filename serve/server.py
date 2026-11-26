@@ -7079,8 +7079,10 @@ def make_handler(svc: Service):
             def work():
                 try:
                     box["body"] = make()
-                except (ValueError, EngineDied) as e:      # after the headers an error can only ride in the body
-                    box["error"] = e
+                except Exception as e:                     # any of them (a GpuBusy or a QueueWaitExpired is a plain
+                    box["error"] = e                       #  RuntimeError): the thread must not die with the box
+                    #  empty - the main thread would raise a KeyError no client asked for. After the headers an
+                    #  error can only ride in the body; before them the caller re-raises it as its own status
             t = threading.Thread(target=work, daemon=True)
             t.start()
             deadline = time.monotonic() + wait_space_seconds()

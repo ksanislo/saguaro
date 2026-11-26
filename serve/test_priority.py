@@ -780,6 +780,19 @@ class WaitKeepAlive(Env):
         self.assertIn("the status and headers go out now", log.getvalue())
         self.assertIn("an error after this cannot change the status", log.getvalue())
 
+    def test_an_error_of_the_gpu_busy_kind_rides_the_body_after_the_headers(self):
+        class Busy(ResumingEngine):                       # a GpuBusy or QueueWaitExpired is a plain RuntimeError:
+            def generate(self, ids, max_new, sampling, cancel, embeddings=None):    #  the worker thread used to
+                if "wait" in self.tok.decode(ids):        #  die on it with the box empty, and the main thread's
+                    raise RuntimeError("the GPU is busy") #  KeyError reached the client as a "malformed request"
+                return super().generate(ids, max_new, sampling, cancel, embeddings)
+        self.svc.engine = Busy(self.tok, {"wait": WaitKeepAlive.WAIT, "block": LONG}, delay_s=0.004)
+        body = {"model": "m", "stream": False, "messages": [{"role": "user", "content": "wait one"}]}
+        with contextlib.redirect_stdout(io.StringIO()):
+            s, out = self.blocked(lambda: self.post("/v1/chat/completions", body))   # it ends after the headers
+        self.assertEqual(s, 200)                          # went out, so only the real error can follow -
+        self.assertIn("the GPU is busy", json.loads(out)["error"]["message"])     #  not a KeyError about a body
+
     def test_a_paused_nonstream_answer_gets_its_headers_at_once(self):
         os.environ["SAGUARO_WAIT_SPACE_S"] = "30"        # only the pause starts it, not the waiting
         body = {"model": "m", "stream": False, "priority": "low",
