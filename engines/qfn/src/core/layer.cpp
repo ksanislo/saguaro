@@ -843,7 +843,8 @@ void host_apply(HostPool& p, uint8_t* const* a) {
 // the card script greps that line for growth-step timings, so a park must not print it (P124e nit).
 // A `pages` smaller than what is backed also MADV_DONTNEEDs the run the new prefix no longer covers: unregistering
 // alone leaves the populated NORESERVE pages resident, and the trim would report RAM the process still holds.
-uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, bool announce = true) {
+uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, bool announce = true,
+                                       cudaError_t* err = nullptr) {   // (P124e nit: the CUDA string of the refusal)
     const auto t0 = std::chrono::steady_clock::now();
     const int64_t old_backed = p.backed;
     const uint64_t had = host_prefix_bytes(p, old_backed);
@@ -879,12 +880,15 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
         uint8_t* at = p.base + p.off[i];
         const uint64_t bytes = kv_host_prefix_bytes(pages, p.per[i], 4096);
         void* d = nullptr;
-        if (cudaHostRegister(at, (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped) == cudaSuccess &&
-            cudaHostGetDevicePointer(&d, at, 0) == cudaSuccess && d != nullptr) {
+        const cudaError_t e = cudaHostRegister(at, (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped);
+        const cudaError_t e2 = e == cudaSuccess ? cudaHostGetDevicePointer(&d, at, 0) : e;
+        if (e == cudaSuccess && e2 == cudaSuccess && d != nullptr) {
             nd[i] = (uint8_t*) d;
             got += bytes;
         } else {
             whole = false;
+            if (err != nullptr && *err == cudaSuccess)
+                *err = e != cudaSuccess ? e : (e2 != cudaSuccess ? e2 : cudaErrorUnknown);   // (d == null: no alias)
             break;
         }
     }
@@ -962,20 +966,22 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
             (void) cudaGetLastError();
         }
         bool ok = false;
-        if (!capped) (void) host_prefix_reregister_locked(p, target, ok);
+        cudaError_t why = cudaSuccess;   // (P124e nit: the prefix line names the refusal too, as the pieces one does)
+        if (!capped) (void) host_prefix_reregister_locked(p, target, ok, true, &why);
         if (!ok && !capped) {   // the expert RAM tier gives way, then one try more
             if (host_relief(want - have) > 0) {
                 const strata::core::OnDevice on(p.dev);
                 (void) cudaDeviceSynchronize();
                 (void) cudaGetLastError();
-                (void) host_prefix_reregister_locked(p, target, ok);
+                (void) host_prefix_reregister_locked(p, target, ok, true, &why);
             }
         }
         if (!ok) {
+            const std::string err = capped ? std::string("SAGUARO_KV_HOST_MIB reached")
+                                           : std::string("RAM or the driver refused: ") + cudaGetErrorString(why);
             g_host_failed = true;
             std::fprintf(stderr, "saguaro: KV streaming: backing more of a host copy failed (%s; %.2f GiB pinned for "
-                                 "K/V in all)\n", capped ? "SAGUARO_KV_HOST_MIB reached" : "RAM or the driver refused",
-                         (double) g_kv_host_bytes.load() / 1073741824.0);
+                                 "K/V in all)\n", err.c_str(), (double) g_kv_host_bytes.load() / 1073741824.0);
             return false;
         }
         g_host_failed = false;
@@ -983,6 +989,8 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
     }
     const auto t0 = std::chrono::steady_clock::now();
     const std::vector<int64_t> had = p.pinned;   // (a failed step gives back what it pinned, every array)
+    cudaError_t why = cudaSuccess;               // (P124e nit: the refusal's CUDA string belongs in the log line a
+                                                 // manager has to read - not every failure is "RAM or the driver")
     for (int round = 0;; ++round) {
         bool failed = false;
         for (size_t i = 0; i < p.per.size() && !failed; ++i) {
@@ -993,7 +1001,9 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
                 const bool capped = host_cap() > 0 && g_kv_host_bytes.load() + kHostPiece > host_cap();
                 const cudaError_t e = capped ? cudaErrorMemoryAllocation
                                              : cudaHostRegister(a, (size_t) kHostPiece, cudaHostRegisterPortable | cudaHostRegisterMapped);
-                if (e != cudaSuccess || cudaHostGetDevicePointer(&d, a, 0) != cudaSuccess || d != (void*) a) {
+                const cudaError_t e2 = e == cudaSuccess ? cudaHostGetDevicePointer(&d, a, 0) : e;
+                if (e != cudaSuccess || e2 != cudaSuccess || d != (void*) a) {
+                    why = e != cudaSuccess ? e : (e2 != cudaSuccess ? e2 : cudaErrorUnknown);   // (d != a: no alias)
                     if (e == cudaSuccess) (void) cudaHostUnregister(a);   // (the device address is not the host's)
                     (void) cudaGetLastError();
                     failed = true;
@@ -1027,10 +1037,11 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
         (void) cudaGetLastError();
         if (round == 0 && host_relief(need) > 0) continue;   // the expert tier gave way: try the whole step once more
         const bool capped = host_cap() > 0 && g_kv_host_bytes.load() + kHostPiece > host_cap();
+        const std::string err = capped ? std::string("SAGUARO_KV_HOST_MIB reached")
+                                       : std::string("RAM or the driver refused: ") + cudaGetErrorString(why);
         g_host_failed = true;
         std::fprintf(stderr, "saguaro: KV streaming: pinning more of a slot's host copy failed (%s; %.2f GiB pinned "
-                             "for K/V in all)\n", capped ? "SAGUARO_KV_HOST_MIB reached" : "RAM or the driver refused",
-                     (double) g_kv_host_bytes.load() / 1073741824.0);
+                             "for K/V in all)\n", err.c_str(), (double) g_kv_host_bytes.load() / 1073741824.0);
         return false;
     }
 #else
