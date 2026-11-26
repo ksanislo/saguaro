@@ -38,16 +38,18 @@ Threads:\t23
 """
 
 
-def fake_proc(tmp, pids, net_tcp=None):
-    """A /proc-shaped tree: <tmp>/<pid>/stat (ppid = the second figure after the comm), plus a net/tcp."""
+def fake_proc(tmp, pids, net_tcp=None, net_tcp6=None):
+    """A /proc-shaped tree: <tmp>/<pid>/stat (ppid = the second figure after the comm), plus net/tcp and/or
+    net/tcp6."""
     for pid, ppid, comm in pids:
         d = tmp / str(pid)
         d.mkdir(parents=True)
         (d / "stat").write_text(f"{pid} ({comm}) S {ppid} {pid} {pid} 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 99\n",
                                 encoding="ascii")
-    if net_tcp is not None:
-        (tmp / "net").mkdir(parents=True, exist_ok=True)
-        (tmp / "net" / "tcp").write_text(net_tcp, encoding="ascii")
+    for name, text in (("tcp", net_tcp), ("tcp6", net_tcp6)):
+        if text is not None:
+            (tmp / "net").mkdir(parents=True, exist_ok=True)
+            (tmp / "net" / name).write_text(text, encoding="ascii")
     return tmp
 
 
@@ -101,13 +103,16 @@ class ProcParsingTests(unittest.TestCase):
             tmp = Path(t)
             fake_proc(tmp, [(77, 1, "server"), (78, 1, "other")],
                       "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  "
-                      "timeout inode\n" + tcp_line(8093, 555))
-            fd = tmp / "77" / "fd"
+                      "timeout inode\n" + tcp_line(8093, 555),
+                      "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  "
+                      "timeout inode\n" + tcp_line(9093, 777))     # (the v6 row sits in net/tcp6, where the
+            fd = tmp / "77" / "fd"                                  #  reader actually looks for it)
             fd.mkdir()
             os.symlink("socket:[555]", fd / "3")      # (the listen socket: a dangling link reads back fine)
+            os.symlink("socket:[777]", fd / "5")      # (and its v6 listener)
             os.symlink("/some/file", fd / "1")
-            (tmp / "tcp6").write_text("  sl  local_address rem_address   st x\n", encoding="ascii")
             self.assertEqual(MV.port_owner(8093, str(tmp)), 77)
+            self.assertEqual(MV.port_owner(9093, str(tmp)), 77)     # (found through net/tcp6)
             self.assertIsNone(MV.port_owner(8094, str(tmp)))
 
     def test_port_owner_established_is_not_a_listener(self):
