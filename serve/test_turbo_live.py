@@ -1,6 +1,7 @@
 """serve/test_turbo_live.py - the live per-request Turbo (PLAN-turbo-live): the request field, the engine-line keys
 (both drivers), the model's live global setting (GET/POST /api/turbo/options), the Monitor's badge fields - and
-that a request without Turbo still gets today's exact line.
+that a request without Turbo still gets today's exact line.  PLAN-p124s: that global is the web app's own chats'
+choice - an API request gets Turbo only from its own fields.
 
     python -m unittest serve.test_turbo_live -v
 """
@@ -111,6 +112,25 @@ class ServerSide(unittest.TestCase):
         self.assertEqual(status, 200, b)
         return self.engine.last_sampling.get("turbo")
 
+    def page(self, **extra):
+        # the web app's own chat request (serve/web/chats.js): strata_resume is what the server marks _api "web"
+        status, b = self.post("/v1/chat/completions",
+                              {"model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4,
+                               "strata_resume": True, **extra})
+        self.assertEqual(status, 200, b)
+        return self.engine.last_sampling.get("turbo")
+
+    def messages_api(self, **extra):
+        status, b = self.post("/v1/messages", {"model": "m", "messages": [{"role": "user", "content": "hi"}],
+                                               "max_tokens": 4, **extra})
+        self.assertEqual(status, 200, b)
+        return self.engine.last_sampling.get("turbo")
+
+    def responses_api(self, **extra):
+        status, b = self.post("/v1/responses", {"model": "m", "input": "hi", "max_output_tokens": 4, **extra})
+        self.assertEqual(status, 200, b)
+        return self.engine.last_sampling.get("turbo")
+
     def test_the_turbo_reaches_the_engine(self):
         self.assertIsNone(self.chat())                                              # (absent: nothing reaches the engine line)
         self.assertEqual(self.chat(turbo={"drop": 2, "skip": "ssd"}), {"drop": 2, "skip": "ssd"})
@@ -124,11 +144,28 @@ class ServerSide(unittest.TestCase):
                 self.assertEqual(status, 400, b)
                 self.assertIn("turbo", b["error"]["message"])
 
+    def test_the_api_never_borrows_the_pages_turbo(self):
+        # PLAN-p124s: with the sidecar ON (POST /api/turbo/options stores it) and the page's last choice ON,
+        # a /v1/chat/completions, a /v1/messages and a /v1/responses request without Turbo fields run with
+        # Turbo off; with their own field they run with it on; the web app's own request still follows it
+        status, out = self.post("/api/turbo/options", {"turbo": {"drop": 2, "skip": "ram"}})
+        self.assertEqual((status, out), (200, {"turbo": {"drop": 2, "skip": "ram"}}))
+        self.assertTrue(Path(self.svc.turbo_path).exists())          # (the sidecar is on: it survives a restart)
+        for call in (self.chat, self.messages_api, self.responses_api):
+            self.assertIsNone(call(), call.__name__)                 # (no field of its own: today's exact request)
+            self.assertEqual(call(turbo={"drop": 1, "skip": "ssd"}), {"drop": 1, "skip": "ssd"})   # (its own asks: on)
+        self.assertEqual(self.page(), {"drop": 2, "skip": "ram"})    # (the app's own chat follows the panel's choice)
+        self.assertEqual(self.page(turbo={"drop": 3}), {"drop": 3, "skip": "off"})     # (its chip wins)
+        self.assertEqual(self.page(turbo={"drop": 0, "skip": "off"}), {"drop": 0, "skip": "off"})   # (and opts out)
+        self.assertEqual(self.post("/api/turbo/options", {"turbo": None})[1], {"turbo": None})
+        self.assertIsNone(self.page())                               # (panel off: the chats run exact again)
+
     def test_the_live_global_setting_applies_and_persists(self):
         self.assertEqual(self.post("/api/turbo/options", {"turbo": None})[1], {"turbo": None})   # (clean start)
         status, out = self.post("/api/turbo/options", {"turbo": {"drop": 1, "skip": "ssd"}})
         self.assertEqual((status, out), (200, {"turbo": {"drop": 1, "skip": "ssd"}}))
-        self.assertEqual(self.chat(), {"drop": 1, "skip": "ssd"})                             # (agents included: any request without its own)
+        self.assertIsNone(self.chat())                                                          # (PLAN-p124s: an API caller without its own runs exact)
+        self.assertEqual(self.page(), {"drop": 1, "skip": "ssd"})                               # (the app's own chats take the panel's)
         self.assertEqual(self.chat(turbo={"drop": 3}), {"drop": 3, "skip": "off"})             # (its own wins)
         self.assertEqual(self.chat(turbo={"drop": 0, "skip": "off"}), {"drop": 0, "skip": "off"})   # (an explicit off opts out)
         self.assertEqual(Path(self.svc.turbo_path).read_text().strip(), json.dumps({"drop": 1, "skip": "ssd"}, indent=1).strip())

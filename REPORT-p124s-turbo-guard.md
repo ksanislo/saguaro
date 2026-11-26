@@ -49,3 +49,42 @@ No config, no sidecar format, no engine line, no /api/turbo (the engine's Turbo 
 untouched (nothing in engines/qfn/serve/server.py changed, so no re-extraction was due).
 
 ## Step 3 - tests
+
+serve/test_turbo_live.py:
+
+- new `ServerSide.test_the_api_never_borrows_the_pages_turbo`: sidecar ON and the page's last choice ON
+  (POST /api/turbo/options stores both - it asserts `<config>.turbo.json` exists); a `/v1/chat/completions`, a
+  `/v1/messages` and a `/v1/responses` request without Turbo fields reach the engine with none; each with its own
+  `turbo` field reaches it with it on; the web app's own request (its `strata_resume` marker, new `page()`
+  helper) still follows the panel's choice, its own `turbo` wins and an explicit off opts out; panel off, exact
+  again.
+- `test_the_live_global_setting_applies_and_persists` followed the rule: with the global on, a plain API `chat()`
+  is now None (was the global), `page()` takes it; the sidecar persist/off lines unchanged.
+- new `page()`, `messages_api()`, `responses_api()` helpers beside `chat()`.
+
+Runs (one at a time, as the plan names them):
+
+- `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_turbo_live -v` -> Ran 14 tests, OK (13 before, +1)
+- `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_server` -> Ran 179 tests, OK
+
+## Files changed
+
+- serve/server.py - the guard (check_request) + the old-rule doc words (set_turbo_default, both
+  /api/turbo/options comments and the two prints, check_request_sampling's comment)
+- serve/web/turbo.js - the "Turbo, live" panel words, section comments and the toast
+- serve/test_turbo_live.py - the tests above
+- serve/qfn_engine.py untouched (nothing changed under engines/qfn/serve/, so extract_qfn_engine.py was not due)
+
+## Open questions
+
+- The page's marker is `strata_resume: true`, the server's existing own-page identifier (the Monitor's request
+  table, serve/server.py:8505). An API client that deliberately sends the app's page marker could still inherit
+  the panel's choice; sealing that would mean the page stamping its loaded choice onto every request body and
+  dropping the server-side default entirely - a page-behaviour change this plan's "smallest change" rule
+  excluded. Real agents (opencode, Hermes, /v1 callers) never send it.
+- Ollama's /api/chat / /api/generate rebuild the body (serve/model_api.py:172-193), so they cannot carry their
+  own `turbo`: they now always run exact. If an Ollama-dialect client should ever ask for Turbo, model_api needs
+  a field mapping - deliberately out of scope.
+- The Turbo button's engine half (config env knobs, drafting, models.py:1056-1216) still applies to the whole
+  engine for every client when the page switches it on; it is page-gated (`_own_page`) and outside this plan's
+  per-request rule, which covers the skip/drop fields.
