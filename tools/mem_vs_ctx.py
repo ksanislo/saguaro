@@ -270,11 +270,11 @@ def start_server(cmd: list, run_dir, cwd=ROOT) -> subprocess.Popen:
     """Start the server (its session, so a Ctrl+C here does not reach it); its output goes to run_dir/server.log."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    log = open(run_dir / "server.log", "wb")
     env = dict(os.environ)
     env.pop("SAGUARO_API_KEY", None)                      # (the key lives in the config copy: "" = none)
-    return subprocess.Popen(cmd, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT, env=env,
-                            start_new_session=True)
+    with open(run_dir / "server.log", "wb") as log:       # (the child keeps the fd; our copy closes right after)
+        return subprocess.Popen(cmd, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT, env=env,
+                                start_new_session=True)
 
 
 def wait_health(port: int, timeout: float = HEALTH_S, host: str = "127.0.0.1",
