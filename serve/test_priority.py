@@ -119,10 +119,12 @@ class ReadEngine(ResumingEngine):
 
 
 class PausingRead(ReadEngine):
-    """GLM's way: can_pause, and PAUSE ends the read a couple of ticks later with its DONE saying "cancel" -
-    what it read stays in the engine, the rest is read when the request's turn comes back."""
+    """    GLM's way: can_pause (and multi - the read pause is the multi conversation engine's, as the fair reads gate
+    it), and PAUSE ends the read a couple of ticks later with its DONE saying "cancel" - what it read stays in
+    the engine, the rest is read when the request's turn comes back."""
     keeps_stopped_read = False
     can_pause = True
+    multi = 1
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -527,6 +529,15 @@ class ReadsPreempt(Env):
         self.assertLess(out["short one"][1], out["long one"][1])
         self.assertEqual(out["long one"][0], LONG)
         self.assertGreaterEqual(engine.pauses, 1)       # PAUSE, not a STOP: the state with what it read stays
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
+
+    def test_a_solo_pause_engine_lets_its_read_finish(self):
+        engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        engine.multi = 0                            # solo: a PAUSE in a read may be ignored or lose it, so the
+        out, log = self.race_read(engine)           #  read preemption pauses reads on a multi engine only
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertNotIn("prompt read paused", log)
         self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
 
     def test_an_engine_that_would_lose_a_stopped_read_finishes_it(self):

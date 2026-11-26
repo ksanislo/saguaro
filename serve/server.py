@@ -5599,12 +5599,14 @@ class Service:
                                 print(f"[saguaro] fair read: {pp[0]:,} of {pp[1]:,} prompt tokens read, paused for "
                                       f"{len(paused_for)} waiting request(s); the rest after they started", flush=True)
                         # R122: a read tick and a waiter that outranks this request - give the place up at once, no
-                        # timer, and only for engines that keep a stopped read: GLM by its PAUSE, QFN by its cut
-                        # SOLO (the conversation stays live at the token reached, keeps_stopped_read) - a QFN BATCH
-                        # slot's cancelled read is dropped, nothing of it reaches the next BGEN, so its read runs
-                        # on; every other engine's read runs to its end rather than lose what it read.
+                        # timer, and only for engines that keep a stopped read: GLM by its PAUSE, gated to a multi
+                        # conversation engine the way the fair reads are (on a solo can_pause one a PAUSE during a
+                        # read may be ignored or lose the read), and QFN by its cut SOLO (the conversation stays
+                        # live at the token reached, keeps_stopped_read) - a QFN BATCH slot's cancelled read is
+                        # dropped, nothing of it reaches the next BGEN, so its read runs on; every other engine's
+                        # read runs to its end rather than lose what it read.
                         if (prio < PRIORITY_HIGH and t0 is None and not pausing and not emb and not self.stopping
-                                and (getattr(self.engine, "can_pause", False)
+                                and ((getattr(self.engine, "can_pause", False) and getattr(self.engine, "multi", 0))
                                      or (getattr(self.engine, "keeps_stopped_read", False)
                                          and not getattr(self.engine, "batch", 0)))):
                             pos = self._read_position()
@@ -5614,7 +5616,7 @@ class Service:
                                 #  by now - name it, or name this request's own level rather than crash)
                                 claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_waiting() or prio]
                                 if getattr(self.engine, "can_pause", False):
-                                    self.engine.pause()   # (the state with what it read stays: the rest after)
+                                    self.engine.pause()   # (multi, see the gate: the state with what it read stays)
                                     pausing = True
                                 else:
                                     cut = True            # (STOP: gen.close() drains to the DONE, the engine keeps
