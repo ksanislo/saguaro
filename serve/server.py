@@ -1461,6 +1461,7 @@ class StrataEngine:
 
     gpu_busy = None   # () -> bool: the engine's GPUs are working (the service's telemetry); kept across restarts
     multi = 0         # READY ... multi=<n> (set per start; the class default for engines built without __init__)
+    keeps_stopped_read = False   # a stopped PROMPT read keeps what it read (Service._sliced's read preemption)
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None):
@@ -1518,6 +1519,8 @@ class StrataEngine:
                 self.can_stop = "stop" in f[2:]
                 self.can_pause = "pause" in f[2:]
                 self.multi = next((int(x[6:]) for x in f[2:] if x.startswith("multi=") and x[6:].isdigit()), 0)
+                # P124h: GLM keeps a cancelled prompt read (#573), so solo reads can pause too; maya-metal drops one, so it does not
+                self.keeps_stopped_read = self.can_pause and Path(exe).name.lower() != "maya-metal"
                 break
         loading.set()
         if self.max_context <= 0:
@@ -5717,12 +5720,12 @@ class Service:
                                       f"{len(paused_for)} waiting request(s); the rest after they started", flush=True)
                         # R122: a read tick and step_aside saying so (a low read beside a running or waiting
                         # person, a normal one for a waiting high that does not fit) - give the place up at once,
-                        # no timer, and only for engines that keep a stopped read: GLM by its PAUSE, gated to a
-                        # multi conversation engine the way the fair reads are (on a solo can_pause one a PAUSE
-                        # during a read may be ignored or lose the read), and QFN by its cut SOLO (the
-                        # conversation stays live at the token reached, keeps_stopped_read) - a QFN BATCH slot's
-                        # cancelled read is dropped, nothing of it reaches the next BGEN, so its read runs on;
-                        # every other engine's read runs to its end rather than lose what it read.
+                        # no timer, and only for engines that keep a stopped read: GLM by its PAUSE, a multi
+                        # conversation engine or solo with keeps_stopped_read (the line engine keeps a cancelled
+                        # read, generate.cpp #573; maya-metal drops one, so it never claims it), and QFN by its
+                        # cut SOLO (the conversation stays live at the token reached, keeps_stopped_read) - a QFN
+                        # BATCH slot's cancelled read is dropped, nothing of it reaches the next BGEN, so its
+                        # read runs on; every other engine's read runs to its end rather than lose what it read.
                         if (prio < PRIORITY_HIGH and t0 is None and not pausing and not emb and not self.stopping
                                 and ((getattr(self.engine, "can_pause", False) and getattr(self.engine, "multi", 0))
                                      or (getattr(self.engine, "keeps_stopped_read", False)
@@ -5733,7 +5736,7 @@ class Service:
                                 #  name the highest level that runs or waits, or this request's own one)
                                 claimed, preempt = True, PRIORITY_NAMES[self.fifo.highest_active() or prio]
                                 if getattr(self.engine, "can_pause", False):
-                                    self.engine.pause()   # (multi, see the gate: the state with what it read stays)
+                                    self.engine.pause()   # (GLM, multi or solo: the state with what it read stays)
                                     pausing = True
                                 else:
                                     cut = True            # (STOP: gen.close() drains to the DONE, the engine keeps

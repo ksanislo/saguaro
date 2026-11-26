@@ -124,9 +124,10 @@ class ReadEngine(ResumingEngine):
 
 
 class PausingRead(ReadEngine):
-    """    GLM's way: can_pause (and multi - the read pause is the multi conversation engine's, as the fair reads gate
-    it), and PAUSE ends the read a couple of ticks later with its DONE saying "cancel" - what it read stays in
-    the engine, the rest is read when the request's turn comes back."""
+    """    GLM's way: can_pause, and PAUSE ends the read a couple of ticks later with its DONE saying "cancel" -
+    what it read stays in the engine, the rest is read when the request's turn comes back.  Its reads are
+    preempted on a multi engine by can_pause, and on a solo one only when it keeps a stopped read
+    (keeps_stopped_read: the GLM line engine does, generate.cpp #573 - maya-metal drops one, so it does not)."""
     keeps_stopped_read = False
     can_pause = True
     multi = 1
@@ -637,7 +638,7 @@ class ReadsPreempt(Env):
         super().setUp()
         self.tok = ByteTokenizer()
 
-    def race_read(self, engine):
+    def race_read(self, engine, second=PRIORITY_HIGH):
         svc = Service(engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
         out, log = {}, io.StringIO()
         with contextlib.redirect_stdout(log):
@@ -645,7 +646,7 @@ class ReadsPreempt(Env):
             a.start()
             while sum(engine.ticks.values()) < 2:
                 time.sleep(0.001)                       # it is in the middle of reading its prompt
-            b = threading.Thread(target=ask, args=(svc, "short one", 4096, out, PRIORITY_HIGH))
+            b = threading.Thread(target=ask, args=(svc, "short one", 4096, out, second))
             b.start()
             a.join(30)
             b.join(30)
@@ -675,10 +676,27 @@ class ReadsPreempt(Env):
         self.assertGreaterEqual(engine.pauses, 1)       # PAUSE, not a STOP: the state with what it read stays
         self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
 
+    def test_a_solo_glm_read_pauses_by_its_pause_and_keeps_it(self):
+        engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        engine.multi = 0                                # solo GLM (READY ... stop pause, no multi=): the line
+        engine.keeps_stopped_read = True                #  engine keeps a cancelled read (#573), so it steps aside
+        out, log = self.race_read(engine, PRIORITY_NORMAL)   # a low read steps aside for a waiting normal too
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])   # the normal one answered first
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertGreaterEqual(engine.pauses, 1)       # PAUSE, not a cut
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt read continues from where the engine kept it", log)
+        long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
+        self.assertEqual(len(long_calls), 2)
+        self.assertEqual(long_calls[1][0], long_calls[0][0])   # the same prompt: the kept read is not re-read
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
+
     def test_a_solo_pause_engine_lets_its_read_finish(self):
         engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
-        engine.multi = 0                            # solo: a PAUSE in a read may be ignored or lose it, so the
-        out, log = self.race_read(engine)           #  read preemption pauses reads on a multi engine only
+        engine.multi = 0                            # solo AND an engine that drops a stopped read (no
+        engine.keeps_stopped_read = False           #  keeps_stopped_read - maya-metal is one): the read runs on
+        out, log = self.race_read(engine)
         self.assertEqual(out["long one"][0], LONG)
         self.assertEqual(out["short one"][0], SHORT)
         self.assertNotIn("prompt read paused", log)
