@@ -2,11 +2,13 @@
 
 One engine start per round and every measurement inside that one session: a warm-up answer (a 2K prompt and a short
 answer: the prompt path and the decode path both warm), 3 answers of 256 new tokens (greedy, thinking off) and the 2K
-and 8K prompts 3 times each (different openings: nothing reused).  Medians with min-max, what drafting chose, the
-wall time of each phase, and one result line (machine, GPU, driver, model, config, commit, release, date) appended to
-saguaro-bench-results.txt.  --compare: the same on this build and another one (a folder or a git ref), alternated
-A, B, A, B on the same model files, config and learned files (copied, never learned again): exactness first, then
-the speed medians and the difference.
+and 8K prompts 3 times each (different openings: nothing reused), then - for as many places as the config asks its
+engine for - rounds of 1, 2 and 4 different 2K prompts sent together (ref/parallel.py's method; each answer's own
+figure includes its prompt read and its turn waiting; --bench-parallel off skips it).  Medians with min-max, what
+drafting chose, the wall time of each phase, and one result line (machine, GPU, driver, model, config, commit,
+release, date) appended to saguaro-bench-results.txt.  --compare: the same on this build and another one (a folder
+or a git ref), alternated A, B, A, B on the same model files, config and learned files (copied, never learned
+again): exactness first, then the speed medians and the difference.
 
 The pure parts (parsing, medians, the result line, the quiet-machine verdict, the comparison) have no GPU, network or
 engine dependency: tools/test_bench.py tests them.
@@ -25,6 +27,7 @@ import time
 from pathlib import Path
 
 PROMPT_SIZES = (2048, 8192)
+PARALLEL_NS = (1, 2, 4)   # --bench's several-at-once section: these many answers sent together (ref/parallel.py)
 DECODE_TOKENS = 256
 REPEATS = 3
 WARM_TOKENS = 32
@@ -60,9 +63,9 @@ def fmt_stats(s, digits=1) -> str:
     return f"{m:.{digits}f} ({lo:.{digits}f}-{hi:.{digits}f})"
 
 
-def gen_line(n_new: int, ids, multi: bool) -> str:
+def gen_line(n_new: int, ids, multi: bool, rid: int = 0) -> str:
     """The GEN line: an engine that runs several conversations (READY ... multi=<n>) takes a request with its id."""
-    return f"GEN {n_new} temperature=0{' rid=0' if multi else ''} " + ",".join(map(str, ids)) + "\n"
+    return f"GEN {n_new} temperature=0{' rid=%d' % rid if multi else ''} " + ",".join(map(str, ids)) + "\n"
 
 
 def reply_fields(line: str, multi: bool):
@@ -477,7 +480,8 @@ class Session:
         self.t0 = time.time()
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True,
                                   env=env, cwd=cwd, bufsize=1)
-        self.multi = False
+        self.multi = 0                       # READY ... multi=<n>: n conversations at once (GEN lines carry rid)
+        self.batch = 0                       # INFO ... batch_slots=<n> (QFN): n BGEN slots, BT / BDONE lines
         self.lines = []                      # (stdout lines before READY: an engine's own drafting choice ...)
         while True:
             line = self.p.stdout.readline()
@@ -485,9 +489,14 @@ class Session:
                 self.close()
                 raise RuntimeError(f"the engine stopped while loading (its log: {log_path})")
             if line.startswith("READY"):
-                self.multi = any(w.startswith("multi=") for w in line.split())
+                words = [w for w in line.split() if w.startswith("multi=")]
+                # (a number as the server reads it; multi=<not-a-number> still said "several at once": treat it as
+                #  one place on rid-tagged lines, as the old any(...) did, rather than sending it plain GEN lines)
+                self.multi = next((int(w[6:]) for w in words if w[6:].isdigit()), 1 if words else 0)
                 break
             self.lines.append(line.rstrip())
+            self.batch = max(self.batch, next((int(w[12:]) for w in line.split()
+                                               if w.startswith("batch_slots=") and w[12:].isdigit()), 0))
             self.log.write(line if line.endswith("\n") else line + "\n")   # (the start lines: stdout's, kept too)
             self.log.flush()
         self.load_s = time.time() - self.t0
@@ -526,6 +535,11 @@ class Session:
             self.p.kill()
             self.p.wait()
         self.log.close()
+        for pipe in (self.p.stdin, self.p.stdout):        # (the session is over: its pipes go with it)
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
         return time.time() - t
 
 
@@ -541,6 +555,18 @@ def plan_prompts(doc, ctx: int, sizes=PROMPT_SIZES, repeats=REPEATS):
         out[n] = [doc[(len(out) * repeats + k) * step:(len(out) * repeats + k) * step + n] for k in range(repeats)]
     warm = doc[-min(sizes[0], len(doc)):]
     return out, warm
+
+
+def plan_parallel(doc, ctx: int, size: int = PROMPT_SIZES[0], ns=PARALLEL_NS, step=997, after=6):
+    """The several-at-once prompts: max(ns) slices of the docs' tokens opening after every window the standard
+    run opened (`after` windows of `step`: the 2K and 8K ones - an 8K one runs far past its opening, and these
+    slices sit behind the last of those ranges, but none shares an opening with a standard window, so as in
+    plan_prompts different openings mean different prefixes and nothing is checkpoint-reused here either).  {}
+    when the docs cannot hold them or the context is too small (the section is then skipped with a note)."""
+    n_max = max(ns)
+    if size + 64 > ctx or len(doc) < step * (after + n_max - 1) + size:
+        return {}
+    return {size: [doc[step * (after + i):step * (after + i) + size] for i in range(n_max)]}
 
 
 def prompt_text_files(names) -> list:
@@ -561,13 +587,17 @@ def input_hashes(chats, prompts, warm) -> dict:
     return out
 
 
-def run_session(start, chats, prompts, warm, label, say, decode_tokens: int = DECODE_TOKENS) -> dict:
-    """Everything one round measures, in one engine session: the warm-up answer, the decode answers and the prompts.
-    Returns the samples, the greedy tokens of every request (exactness) and the wall time of each phase."""
+def run_session(start, chats, prompts, warm, label, say, decode_tokens: int = DECODE_TOKENS,
+                par: dict | None = None, cfg_places: int = 1) -> dict:
+    """Everything one round measures, in one engine session: the warm-up answer, the decode answers, the prompts
+    and - with `par` (plan_parallel's plan) - the several-at-once rounds, the engine still warm and open.
+    Returns the samples, the greedy tokens of every request (exactness), the several-at-once figures (or None)
+    and the wall time of each phase."""
     ph = {}
     s = Session(*start)
     ph["load"] = s.load_s
     say(f"  {label}loaded in {s.load_s:.0f} s")
+    par_runs = None
     try:
         t = time.time()
         _, wtok = s.gen(warm, WARM_TOKENS)               # (warm-up: a 2K prompt and a short answer)
@@ -590,12 +620,166 @@ def run_session(start, chats, prompts, warm, label, say, decode_tokens: int = DE
                 toks[f"prompt {n // 1024}K #{k + 1}"] = tk
                 say(f"  {label}prompt  {reads[n][-1]:6.0f} tokens/s  ({n} tokens)")
         ph["prompts"] = time.time() - t
+        if par is not None:
+            t = time.time()
+            par_runs = run_parallel(s, par, decode_tokens, cfg_places, say, label)
+            ph["several"] = time.time() - t
         lines = s.lines
     finally:
         ph["stop"] = s.close()
     lines = lines + s.log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     return {"answers": answers, "reads": reads, "tokens": toks, "phases": ph, "engine_lines": lines,
-            "reused": reused}
+            "reused": reused, "parallel": par_runs}
+
+
+# ------------------------------------------------------------------------------------------------ several at once
+def parallel_places(cfg: dict, reported: int = 0) -> int:
+    """How many answers this engine sends out at once: what it said when it started (READY ... multi=<n>, or
+    QFN's INFO ... batch_slots=<n>) when it said, else what the config asks for - its "parallel": N (QFN's
+    server turns it into the engine's --batch) or a --parallel / --batch / --slots in its args; at least 1."""
+    if reported:
+        return max(1, int(reported))
+    try:
+        out = int(cfg.get("parallel") or 0)
+    except (TypeError, ValueError):
+        out = 0
+    a = [str(x) for x in cfg.get("args") or []]
+    for k in ("--parallel", "--batch", "--slots"):
+        if k in a[:-1]:
+            try:
+                out = max(out, int(a[a.index(k) + 1]))
+            except ValueError:
+                pass
+    return max(1, out)
+
+
+def parallel_ns(places: int) -> tuple:
+    """Of 1, 2 and 4 answers at once, the ones this run measures and the ones it skips (the engine has `places`
+    places; the skipped ones are said in the table)."""
+    return ([n for n in PARALLEL_NS if n <= places], [n for n in PARALLEL_NS if n > places])
+
+
+def _par_line(s) -> tuple:
+    """The engine's next line as (text, fields); the round ends as plainly as Session.gen reads an ERR."""
+    line = s.p.stdout.readline()
+    if not line:
+        raise RuntimeError(f"the engine stopped during the several-at-once round (its log: {s.log_path})")
+    f = line.split()
+    if f and f[0] == "ERR":
+        raise RuntimeError("the engine refused a parallel benchmark request: " + " ".join(f[1:]))
+    return line, f
+
+
+def parallel_phase(s, slices, n_new: int) -> tuple:
+    """ref/parallel.py's method on the engine's own lines: every request written before the first answer is read
+    (all sent together), then read until every one of them has ended: its DONE / BDONE, an answer ending at its
+    admission (BADM <slot> 0), or a slot the engine says died (BRE <slot> <why> - "no RAM is left" - the
+    protocol's own terminal line for a slot: its part of the round ends there, "failed: <why>" in place of its
+    tok/s, and the round never hangs waiting for a BDONE that will not come).  Returns (total tok/s over the
+    whole round - a failed slot's tokens are unknown and count for nothing - and every request's own figure in
+    the order they were sent: its tok/s, its time from its own GEN line to its end, prompt read and turn
+    waiting included, or its "failed:" line).  The two several-conversation protocols: rid (READY multi=<n>:
+    GEN rid=<id> in, T / DONE <rid> out) and QFN's slots (INFO batch_slots=<n>: BGEN <slot> in, BT / BDONE
+    <slot> out, the answer that ends at its admission named by that admission's control DONE and BADM
+    <slot> 0).  One request alone goes on the plain GEN line every engine knows."""
+    n = len(slices)
+    ids_of = lambda ids: ",".join(map(str, ids))                        # noqa: E731
+    slots = bool(s.batch) and n > 1                                     # QFN: one request per batch slot
+    if slots:
+        reqs = [f"BGEN {i} {n_new} temperature=0 {ids_of(ids)}" for i, ids in enumerate(slices)]
+    elif s.multi:
+        reqs = [gen_line(n_new, ids, True, i)[:-1] for i, ids in enumerate(slices)]
+    else:
+        reqs = [gen_line(n_new, ids, False)[:-1] for i, ids in enumerate(slices)]
+    t_w, t0 = {}, time.time()
+    for i, rq in enumerate(reqs):
+        t_w[i] = time.time()
+        s.p.stdin.write(rq + "\n")
+    s.p.stdin.flush()
+    got, waiting = {}, set(range(n))
+    failed = {}                                   # (BRE <slot> <why>: the engine's own end of a slot that died;
+    admitted = 0                                  #  its reason goes to the table in place of that answer's tok/s)
+    while waiting:                                # (QFN: BADM slot 0 means the answer ends at its admission and
+        line, f = _par_line(s)                    #  no BDONE will come for it)
+        i = None
+        if slots:
+            if f and f[0] == "BDONE" and len(f) > 2 and f[1].isdigit():
+                i, produced = int(f[1]), (int(f[2]) if f[2].isdigit() else 0)
+            elif f and f[0] == "BADM" and len(f) > 2 and f[1].isdigit() and f[2] == "0":
+                i, produced = int(f[1]), admitted
+            elif f and f[0] == "DONE" and len(f) > 1 and f[1].isdigit():
+                admitted = int(f[1])              # (an admission's first token: its slot says BADM next)
+                continue
+            elif f and f[0] == "BRE" and len(f) > 1 and f[1].isdigit():
+                j = int(f[1])
+                if j in waiting:                  # (terminal for that slot: no BT / BDONE follows - ending it
+                    waiting.discard(j)            #  here is what keeps the round from hanging on a dead slot)
+                    failed[j] = " ".join(f[2:]) or "the engine said the slot died"
+                continue
+            elif f and f[0] not in ("T", "PP", "STAT", "BSTAT", "PSTAT", "BT", "BADM", "BDONE", "BQ", "BRE"):
+                s.lines.append(line.rstrip())
+                continue
+        elif s.multi:                             # rid-tagged lines, rids 0 .. n-1
+            if f and f[0] == "DONE" and len(f) > 1 and f[1].isdigit():
+                i, produced = int(f[1]), parse_done(f[:1] + f[2:])["produced"]
+            elif not (f and f[0] in ("T", "PP", "PAUSE", "LP")):
+                s.lines.append(line.rstrip())
+                continue
+        else:                                     # plain GEN lines, answered one at a time in the order written
+            t = token_of(line, False)
+            if t is not None:
+                continue
+            fields = reply_fields(line, False)
+            if fields is None:
+                s.lines.append(line.rstrip())
+                continue
+            i, produced = min(waiting), parse_done(fields)["produced"]
+        if i is not None and i in waiting:
+            waiting.discard(i)
+            got[i] = (produced, time.time() - t_w[i])
+    wall = time.time() - t0
+    total = sum(p for p, _ in got.values()) / wall if wall > 0 else 0.0   # (a failed slot's tokens: unknown, 0)
+    return total, ["failed: " + failed[i] if i in failed else (got[i][0] / got[i][1] if got[i][1] > 0 else 0.0)
+                   for i in range(n)]
+
+
+def run_parallel(s, plan, n_new: int, cfg_places: int, say, label: str = "") -> dict:
+    """The several-at-once part of one session: N different 2K prompts sent together for N in 1 / 2 / 4 within
+    the engine's places (the config's "parallel" / --parallel / --batch, or what the engine itself said at its
+    start), each answer `n_new` greedy tokens; the skipped Ns named for the table."""
+    places = max(1, s.multi or s.batch or cfg_places)
+    size = min(plan) if plan else 0
+    out = {"places": places, "size": size, "runs": [], "skipped": list(PARALLEL_NS)}
+    if not plan or not plan.get(size):
+        out["note"] = "not measured: the docs are too short for these prompts, or the context too small"
+        return out
+    run_ns, out["skipped"] = parallel_ns(places)
+    for n in run_ns:
+        total, each = parallel_phase(s, plan[size][:n], n_new)
+        say(f"  {label}{n} at once: total {total:6.1f} tok/s, each "
+            + ", ".join(x if isinstance(x, str) else f"{x:.1f}" for x in each))
+        out["runs"].append((n, total, each))
+    return out
+
+
+def parallel_section(par) -> list:
+    """saguaro-bench.txt's "several at once" part: one line a measured N - the total tok/s and each answer's own,
+    the way ref/parallel.py prints them (an answer whose slot the engine died on prints its "failed:" line), and
+    the Ns this engine cannot fill.  Nothing at all when the section was skipped (--bench-parallel off): the
+    file keeps the bytes of before the several-at-once rounds; the console of the run says why."""
+    if not par:
+        return []
+    if not par["runs"]:
+        return ["several at once: " + (par.get("note") or "not measured")]
+    out = [f"several at once ({par['size'] // 1024}K-token prompts sent together, {DECODE_TOKENS} tokens each, "
+           "greedy, thinking off; each answer's own time includes its prompt read and queueing):"]
+    for n, total, each in par["runs"]:      # (an answer whose slot the engine died on (BRE) prints its error)
+        out.append(f"  {n} at once: total {total:.1f} tok/s ("
+                   + ", ".join(x if isinstance(x, str) else f"{x:.1f}" for x in each) + ")")
+    if par["skipped"]:
+        out.append(f"  ({', '.join(map(str, par['skipped']))} not measured: this engine runs {par['places']} "
+                   f"{'answers' if par['places'] > 1 else 'answer'} at once)")
+    return out
 
 
 # ------------------------------------------------------------------------------------------------ learned files
@@ -876,7 +1060,8 @@ def summarize(runs, prompts) -> dict:
 
 
 def phase_line(runs) -> str:
-    keys = ("load", "warm-up", "decode", "prompts", "stop")
+    keys = [k for k in ("load", "warm-up", "decode", "prompts", "several", "stop")   # (several: only of a run
+            if any(k in r["phases"] for r in runs)]                                  #  that measured it)
     tot = {k: sum(r["phases"].get(k, 0.0) for r in runs) for k in keys}
     return ", ".join(f"{k} {tot[k]:.0f} s" for k in keys) + f" (total {sum(tot.values()):.0f} s)"
 

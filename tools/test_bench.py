@@ -1,6 +1,7 @@
-"""tools/test_bench.py - --bench (saguaro.py, tools/maya_bench.py): the engine binary on HIP, the requests, and the
-speed-test standard's parsing, medians, result line, quiet check and A/B parts. No GPU, no network, no engine process
-(a few lines of Python stand in for one).
+"""tools/test_bench.py - --bench (saguaro.py, tools/maya_bench.py): the engine binary on HIP, the requests, the
+several-at-once section, and the speed-test standard's parsing, medians, result line, quiet check and A/B parts.
+No GPU, no network, no engine process (a few lines of Python stand in for one - the scripted mock engines here
+speak the same GEN / rid / BGEN lines the real engines do, serve/server.py's --engine mock in spirit).
 
     python -m unittest tools.test_bench -v
 """
@@ -382,6 +383,267 @@ class BenchStandard(unittest.TestCase):
             (Path(d) / "saguaro.py").write_text("")
             self.assertEqual(MB.other_root(d, Path(d), Path(d) / "build" / "saguaro-glm", print, "maya"),
                              Path(d).resolve())
+
+
+class BenchParallel(unittest.TestCase):
+    """The several-at-once section: the N selection from the config / what the engine reported, the table text,
+    and a measured round against a scripted mock engine speaking each family's protocol (rid for the line
+    engines, BGEN / BT / BDONE for QFN - once with a slot the engine kills, BRE, which ends that answer with
+    its error in the table instead of hanging the round).  No GPU, no network."""
+
+    # a mock several-conversation engine (READY ... multi=2): answers every GEN rid=<id> with rid-tagged
+    # T / DONE lines; the rid 1 answer finishes later than the rid 0 one beside it (its own time differs)
+    MOCK_RID = (
+        "import sys, time\n"
+        "print('READY 4096 stop multi=2', flush=True)\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line or line.strip() == 'QUIT':\n"
+        "        break\n"
+        "    f = line.split()\n"
+        "    if f[0] != 'GEN':\n"
+        "        continue\n"
+        "    rid = next((int(x[4:]) for x in f if x.startswith('rid=')), 0)\n"
+        "    n = min(int(f[1]), 8)\n"
+        "    if rid == 1:\n"
+        "        time.sleep(0.3)\n"
+        "    for _ in range(n):\n"
+        "        print(f'T {rid} 7', flush=True)\n"
+        "    print(f'DONE {rid} {n} {len(f[-1].split(\",\"))} 100.0 400.0 length 0 0 0', flush=True)\n")
+
+    # a mock QFN batch engine (INFO batch_slots=4 before READY): GEN solo answers on the plain lines, BGEN
+    # admits its slot (the control T / DONE, then BADM), the answer goes on in BT / BDONE <slot> lines - and
+    # slot 0 ends at its admission (BADM 0, no BDONE), late on purpose: its own tok/s must read lowest
+    MOCK_QFN = (
+        "import sys, time\n"
+        "print('INFO engine=0 batch_slots=4 slot_cache=1', flush=True)\n"
+        "print('READY 4096 stop', flush=True)\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line or line.strip() == 'QUIT':\n"
+        "        break\n"
+        "    f = line.split()\n"
+        "    if f[0] == 'GEN':\n"
+        "        for _ in range(min(int(f[1]), 8)):\n"
+        "            print('T 7', flush=True)\n"
+        "        print(f'DONE 8 {len(f[-1].split(\",\"))} 100.0 400.0 length 0 0 0', flush=True)\n"
+        "    elif f[0] == 'BGEN':\n"
+        "        slot, n_new = int(f[1]), int(f[2])\n"
+        "        print('T 7', flush=True)\n"
+        "        print(f'DONE 1 {len(f[-1].split(\",\"))} 100.0 1.0 length 0 0 0', flush=True)\n"
+        "        if slot == 0:\n"
+        "            time.sleep(0.3)\n"
+        "            print(f'BADM {slot} 0', flush=True)\n"
+        "            continue\n"
+        "        print(f'BADM {slot} 1', flush=True)\n"
+        "        for _ in range(min(n_new, 8) - 1):\n"
+        "            print(f'BT {slot} 7', flush=True)\n"
+        "        print(f'BDONE {slot} 8 length 300.0', flush=True)\n")
+
+    # a mock QFN batch engine where one slot dies: after its admission's control DONE it answers the slot
+    # with BRE <slot> <why> instead of BT / BDONE lines - the terminal line the real engine prints for a slot
+    # that ran out of RAM; the round must end with the failure in the table, not hang on the missing BDONE
+    MOCK_QFN_BRE = (
+        "import sys\n"
+        "print('INFO engine=0 batch_slots=4 slot_cache=1', flush=True)\n"
+        "print('READY 4096 stop', flush=True)\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line or line.strip() == 'QUIT':\n"
+        "        break\n"
+        "    f = line.split()\n"
+        "    if f[0] == 'GEN':\n"
+        "        for _ in range(min(int(f[1]), 8)):\n"
+        "            print('T 7', flush=True)\n"
+        "        print(f'DONE 8 {len(f[-1].split(\",\"))} 100.0 400.0 length 0 0 0', flush=True)\n"
+        "    elif f[0] == 'BGEN':\n"
+        "        slot, n_new = int(f[1]), int(f[2])\n"
+        "        print('T 7', flush=True)\n"
+        "        print(f'DONE 1 {len(f[-1].split(\",\"))} 100.0 1.0 length 0 0 0', flush=True)\n"
+        "        if slot == 1:\n"
+        "            print(f'BRE {slot} no RAM is left', flush=True)\n"
+        "            continue\n"
+        "        print(f'BADM {slot} 1', flush=True)\n"
+        "        for _ in range(min(n_new, 8) - 1):\n"
+        "            print(f'BT {slot} 7', flush=True)\n"
+        "        print(f'BDONE {slot} 8 length 300.0', flush=True)\n")
+
+    # a mock single-conversation engine: plain GEN lines answered in the order they came
+    MOCK_SOLO = (
+        "import sys\n"
+        "print('READY 4096 stop', flush=True)\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line or line.strip() == 'QUIT':\n"
+        "        break\n"
+        "    f = line.split()\n"
+        "    if f[0] != 'GEN':\n"
+        "        continue\n"
+        "    for _ in range(min(int(f[1]), 8)):\n"
+        "        print('T 7', flush=True)\n"
+        "    print(f'DONE 8 {len(f[-1].split(\",\"))} 100.0 400.0 length 0 0 0', flush=True)\n")
+
+    def session(self, code, td):
+        sess = MB.Session([sys.executable, "-c", code], None, td, Path(td) / "maya-bench.log")
+        self.addCleanup(sess.close)      # (QUIT, and the pipes close with it)
+        return sess
+
+    def test_n_selection_from_the_config(self):
+        # the config's places: its "parallel" (QFN's server turns it into --batch) or the flag in its args
+        self.assertEqual(MB.parallel_places({"parallel": 4}), 4)
+        self.assertEqual(MB.parallel_places({"args": ["--parallel", "2", "--max-context", "32768"]}), 2)
+        self.assertEqual(MB.parallel_places({"args": ["--batch", "8"]}), 8)
+        self.assertEqual(MB.parallel_places({"args": ["--slots", "3"]}), 3)
+        self.assertEqual(MB.parallel_places({}), 1)
+        self.assertEqual(MB.parallel_places({"parallel": "nonsense"}), 1)
+        # what the engine said at its start decides when it said: it may run fewer than the config asked
+        self.assertEqual(MB.parallel_places({"parallel": 8}, reported=2), 2)
+        self.assertEqual(MB.parallel_places({}, reported=4), 4)
+        # which of 1, 2 and 4 a run measures, and which it skips with a note
+        self.assertEqual(MB.parallel_ns(1), ([1], [2, 4]))
+        self.assertEqual(MB.parallel_ns(2), ([1, 2], [4]))
+        self.assertEqual(MB.parallel_ns(3), ([1, 2], [4]))       # (3 places: 4 does not fit)
+        self.assertEqual(MB.parallel_ns(8), ([1, 2, 4], []))
+
+    def test_the_prompts_open_after_every_standard_window(self):
+        doc = list(range(20000))
+        prompts, warm = MB.plan_prompts(doc, 32768)
+        plan = MB.plan_parallel(doc, 32768)
+        self.assertEqual(sorted(plan), [2048])
+        self.assertEqual(len(plan[2048]), 4)                     # (one a, b, c and d answer for N = 4)
+        self.assertTrue(all(len(s) == 2048 for s in plan[2048]))
+        read = {s[0] for v in prompts.values() for s in v} | {warm[0]}
+        self.assertEqual({s[0] for s in plan[2048]} & read, set())   # (openings the engine has not read)
+        self.assertEqual(MB.plan_parallel(list(range(1000)), 32768), {})      # (docs too short)
+        self.assertEqual(MB.plan_parallel(doc, 1024), {})                     # (context too small)
+
+    def test_the_table_text(self):
+        self.assertEqual(MB.parallel_section(None), [])            # (off: the file keeps the bytes of no section)
+        lines = MB.parallel_section({"places": 2, "size": 2048, "skipped": [4],
+                                     "runs": [(1, 22.4, [22.4]), (2, 41.0, [20.8, 20.2])]})
+        self.assertIn("2K-token prompts sent together, 256 tokens each", lines[0])
+        self.assertIn("prompt read and queueing", lines[0])
+        self.assertEqual(lines[1], "  1 at once: total 22.4 tok/s (22.4)")
+        self.assertEqual(lines[2], "  2 at once: total 41.0 tok/s (20.8, 20.2)")
+        self.assertEqual(lines[3], "  (4 not measured: this engine runs 2 answers at once)")
+        self.assertEqual(MB.parallel_section({"places": 4, "size": 2048, "skipped": [1, 2, 4], "runs": [],
+                                              "note": "the docs are too short"}),
+                         ["several at once: the docs are too short"])
+
+    def test_bench_text_holds_the_section(self):
+        # between the prompt readings and the wall time; absent of --compare, and said off when skipped
+        res = {"decode": (20.0, 19.0, 21.0), "prompt": {2048: (600.0, 590.0, 610.0)}, "answers": [], "short": 0}
+        solo = [{"phases": {"load": 1.0, "warm-up": 1.0, "decode": 2.0, "prompts": 3.0, "stop": 0.5}}]
+        both = [{"phases": {"load": 1.0, "warm-up": 1.0, "decode": 2.0, "prompts": 3.0, "several": 4.0,
+                            "stop": 0.5}}]
+        args = ("1.2.4", Path("cfg.json"), {"gpu": [0]}, 32768, "a GPU")
+        with patch.object(maya.S, "cpu_info", return_value=("a CPU", 0)):        # (setup.py reads /proc/cpuinfo)
+            out = maya.bench_text(*args, res, "no drafting", solo, 1.0, 1.0)     # (--compare: no key at all)
+            self.assertEqual([x for x in out if "several at once" in x], [])
+            self.assertNotIn("several 0 s", out[-1])
+            ran = dict(res, parallel={"places": 4, "size": 2048, "skipped": [],
+                                      "runs": [(1, 22.4, [22.4]), (4, 58.0, [15.1, 14.9, 14.5, 13.5])]})
+            out = maya.bench_text(*args, ran, "no drafting", both, 1.0, 1.0)
+            self.assertLess(next(i for i, x in enumerate(out) if x.startswith("prompt reading")),
+                            out.index("  1 at once: total 22.4 tok/s (22.4)"))
+            self.assertLess(out.index("  4 at once: total 58.0 tok/s (15.1, 14.9, 14.5, 13.5)"),
+                            next(i for i, x in enumerate(out) if x.startswith("wall time")))
+            self.assertIn("several 4 s", out[-1])
+            out = maya.bench_text(*args, dict(res, parallel=None), "no drafting", solo, 1.0, 1.0)
+        self.assertEqual([x for x in out if "several at once" in x], [])   # (off: the file's old bytes: no note,
+        self.assertNotIn("several 0 s", out[-1])                   #  and the phase line stays as it was)
+
+    def test_several_at_once_rid_engine(self):
+        # (READY multi=2: N GEN lines with their own rid, answers on rid-tagged T / DONE lines)
+        plan = MB.plan_parallel(list(range(20000)), 32768)
+        with tempfile.TemporaryDirectory() as td:
+            s = self.session(self.MOCK_RID, td)
+            self.assertEqual((s.multi, s.batch), (2, 0))
+            out = MB.run_parallel(s, plan, 256, 1, lambda *a: None)
+        self.assertEqual(out["places"], 2)                       # (what the engine said, not the config)
+        self.assertEqual([n for n, _, _ in out["runs"]], [1, 2])
+        self.assertEqual(out["skipped"], [4])
+        one = dict((n, (t, e)) for n, t, e in out["runs"])
+        self.assertEqual(len(one[1][1]), 1)
+        self.assertEqual(len(one[2][1]), 2)
+        self.assertGreater(one[2][1][0], one[2][1][1])           # (the mock lets rid 1 finish late)
+        self.assertGreater(one[2][0], 0.0)
+
+    def test_several_at_once_qfn_slots(self):
+        # (INFO batch_slots=4: N BGEN lines, the answers on BT / BDONE <slot> - and slot 0 ends at its admission)
+        plan = MB.plan_parallel(list(range(20000)), 32768)
+        with tempfile.TemporaryDirectory() as td:
+            s = self.session(self.MOCK_QFN, td)
+            self.assertEqual((s.multi, s.batch), (0, 4))         # (the slots from the INFO line before READY)
+            out = MB.run_parallel(s, plan, 256, 1, lambda *a: None)
+        self.assertEqual(out["places"], 4)
+        self.assertEqual([n for n, _, _ in out["runs"]], [1, 2, 4])
+        self.assertEqual(out["skipped"], [])
+        four = [e for n, _, e in out["runs"] if n == 4][0]
+        self.assertEqual(len(four), 4)
+        # slot 0 ended at its admission (its answer is the single token its DONE said: lowest own tok/s);
+        # the mock's late BADM 0 holds every slot's clock, so what separates them is the token count
+        self.assertLess(four[0] * 3, four[1])
+
+    def test_several_at_once_a_slot_dies_with_bre(self):
+        # (a QFN slot that died: BRE <slot> <why>, and no BDONE for it ever - the round ends with the failure
+        #  noted in the table instead of hanging, the other answers of every round still measured)
+        plan = MB.plan_parallel(list(range(20000)), 32768)
+        with tempfile.TemporaryDirectory() as td:
+            s = self.session(self.MOCK_QFN_BRE, td)
+            out = MB.run_parallel(s, plan, 256, 1, lambda *a: None)   # (hangs if BRE is not terminal)
+        self.assertEqual([n for n, _, _ in out["runs"]], [1, 2, 4])   # (the N = 1 round: plain GEN, no BRE)
+        runs = dict((n, (t, e)) for n, t, e in out["runs"])
+        self.assertIsInstance(runs[1][1][0], float)                   # (the solo answer is unaffected)
+        for n in (2, 4):
+            total, each = runs[n]
+            self.assertGreater(total, 0.0)                           # (the answered slots still give a total)
+            self.assertEqual(len(each), n)                           # (one figure a request, in sent order)
+            self.assertIsInstance(each[1], str)
+            self.assertEqual(each[1], "failed: no RAM is left")      # (the BRE line's own words)
+            self.assertEqual(sum(isinstance(x, float) for x in each), n - 1)
+        lines = MB.parallel_section(out)
+        self.assertEqual(sum(any(f"{n} at once" in x and "failed: no RAM is left" in x for x in lines)
+                             for n in (2, 4)), 2)                    # (both rounds name the failure)
+
+    def test_several_at_once_one_at_a_time_engine(self):
+        # (an engine that runs one answer at a time: N = 1 measured on the plain GEN line, 2 and 4 skipped;
+        #  with the config asking for two, the plain GENs queue and are read back in the order they were sent)
+        plan = MB.plan_parallel(list(range(20000)), 32768)
+        with tempfile.TemporaryDirectory() as td:
+            s = self.session(self.MOCK_SOLO, td)
+            self.assertEqual((s.multi, s.batch), (0, 0))
+            out = MB.run_parallel(s, plan, 256, 1, lambda *a: None)
+            self.assertEqual((out["places"], [n for n, _, _ in out["runs"]], out["skipped"]), (1, [1], [2, 4]))
+            two = MB.run_parallel(s, plan, 256, 2, lambda *a: None)
+        self.assertEqual(len(two["runs"]), 2)
+        self.assertEqual(len(two["runs"][1][2]), 2)              # (the N = 2 round: one tok/s a request)
+
+    def test_run_session_measures_it_in_the_same_session(self):
+        # the whole standard round against the mock: warm-up, decode, prompts and - still in that session, the
+        # engine warm - the several-at-once rounds; the one-answer numbers keep their shape
+        doc = list(range(20000))
+        prompts, warm = MB.plan_prompts(doc, 32768)
+        plan = MB.plan_parallel(doc, 32768)
+        with tempfile.TemporaryDirectory() as td:
+            run = MB.run_session(([sys.executable, "-c", self.MOCK_RID], None, td,
+                                  Path(td) / "maya-bench.log"), [warm[:40]], prompts, warm, "",
+                                 lambda *a: None, par=plan, cfg_places=1)
+        self.assertEqual(len(run["answers"]), 1)
+        self.assertEqual({n: len(v) for n, v in run["reads"].items()}, {2048: 3, 8192: 3})
+        self.assertIn("several", run["phases"])
+        self.assertEqual(run["parallel"]["places"], 2)
+        self.assertEqual([n for n, _, _ in run["parallel"]["runs"]], [1, 2])
+        self.assertEqual(run["parallel"]["skipped"], [4])
+        self.assertIn("  (4 not measured: this engine runs 2 answers at once)",
+                      MB.parallel_section(run["parallel"]))
+        # (no par: the section is not measured and the phases keep their old set)
+        with tempfile.TemporaryDirectory() as td:
+            run = MB.run_session(([sys.executable, "-c", self.MOCK_RID], None, td,
+                                  Path(td) / "maya-bench.log"), [warm[:40]], prompts, warm, "",
+                                 lambda *a: None)
+        self.assertIsNone(run["parallel"])
+        self.assertNotIn("several", run["phases"])
 
 
 class SharedCpuTiming(unittest.TestCase):

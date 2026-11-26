@@ -11,7 +11,9 @@ of being re-derived, and the long part runs unattended every night, so on releas
 | `tools/maya_nightly.py` | per machine and model, every night: answers and speed against the previous release | yes |
 
 All three sit on `./saguaro.sh --bench` (the speed-test standard: quiet machine, GPU lock, warm-up, 3 answers of 256
-tokens, the 2K / 8K prompts, greedy, thinking off) and on the config the setup wrote - never a hand-written one.
+tokens, the 2K / 8K prompts, greedy, thinking off, and after them 1 / 2 / 4 different 2K prompts sent together within
+the config's places - the total tok/s and each answer's own, queueing included, `--bench-parallel off` skips that
+section) and on the config the setup wrote - never a hand-written one.
 
 ## 1. What changed -> what to test
 
