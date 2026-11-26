@@ -30,6 +30,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from serve import model_api  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
 from serve.server import (IM_END, PRIORITY_NAMES, ByteTokenizer, FairLock, MockEngine, Service, serve,  # noqa: E402
                           PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL)
@@ -1095,6 +1096,32 @@ class RequestFields(Env):
             self.assertEqual(s, 200, f"{path}: {b[:200]!r}")
         s, b = self.post("/v1/chat/completions", {**chat, "stream": False}, {"X-Saguaro-Priority": "high"})
         self.assertEqual(s, 200, b[:200])              # and the header on its own
+
+    def test_the_ollama_apis_take_the_field_too(self):
+        # (the review's nit 7): /api/chat and /api/generate carry the field through the ollama translation
+        # (serve/model_api.py) - asserted at the translation AND sent through both endpoints, bad value included.
+        self.assertEqual(model_api.chat_to_openai({"model": "m", "messages": [{"role": "user", "content": "hi"}],
+                                                   "priority": "low"})["priority"], "low")
+        self.assertEqual(model_api.generate_to_openai({"model": "m", "prompt": "hi",
+                                                       "priority": "high"})["priority"], "high")
+        was = getattr(self.svc, "model_management", False)
+        self.svc.model_management = True                    # (both ollama endpoints are gated on it, as before)
+        try:
+            for path, body in (("/api/chat", {"model": "m", "messages": [{"role": "user", "content": "hi"}],
+                                              "stream": False, "priority": "low"}),
+                               ("/api/generate", {"model": "m", "prompt": "hi", "stream": False,
+                                                  "priority": "high"})):
+                s, b = self.post(path, body)
+                self.assertEqual(s, 200, f"{path}: {b[:200]!r}")
+            s, b = self.post("/api/chat", {"model": "m", "messages": [{"role": "user", "content": "hi"}],
+                                                        "stream": False}, {"X-Saguaro-Priority": "high"})
+            self.assertEqual(s, 200, b[:200])               # and the header on the ollama body too
+            s, b = self.post("/api/generate", {"model": "m", "prompt": "hi", "stream": False,
+                                               "priority": "urgent"})
+            self.assertEqual(s, 400)                        # a bad value is a 400 here too, naming the three ...
+            self.assertIn('priority: "high", "normal" or "low"', json.loads(b)["error"])   # (ollama's own shape:
+        finally:                                            #  the error is the message, not an object)
+            self.svc.model_management = was
 
     def test_a_bad_value_is_a_400_that_names_the_field(self):
         chat = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": False}
