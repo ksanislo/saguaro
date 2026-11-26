@@ -841,15 +841,29 @@ void host_apply(HostPool& p, uint8_t* const* a) {
 // silent - keep any new caller on the owning session's thread.
 // `announce`: log the "the host copy backs N cells now (... ms)" step - grows only; a trim gives memory BACK and
 // the card script greps that line for growth-step timings, so a park must not print it (P124e nit).
+// A `pages` smaller than what is backed also MADV_DONTNEEDs the run the new prefix no longer covers: unregistering
+// alone leaves the populated NORESERVE pages resident, and the trim would report RAM the process still holds.
 uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, bool announce = true) {
     const auto t0 = std::chrono::steady_clock::now();
-    const uint64_t had = host_prefix_bytes(p, p.backed);
+    const int64_t old_backed = p.backed;
+    const uint64_t had = host_prefix_bytes(p, old_backed);
     g_kv_host_bytes -= had;
     for (size_t i = 0; i < p.d.size(); ++i) {
         if (p.d[i] == nullptr) continue;
         (void) cudaHostUnregister(p.base + p.off[i]);
         (void) cudaGetLastError();
         p.d[i] = nullptr;
+        if (pages < old_backed) {   // P124e review finding 2: unpinning is not releasing - the range is a
+                                    // MAP_NORESERVE mapping whose pages STAY populated once touched, so a trim
+                                    // that only unregisters reports RAM it keeps holding (the pieces path
+                                    // madvises every piece it unpins, layer.cpp's host_unpin_locked).  Give the
+                                    // run the new prefix does not cover - [prefix for `pages`, prefix for
+                                    // `old_backed`), the whole registered run when `pages` <= 0 - away, AFTER
+                                    // the unregister and BEFORE any re-registration covers it again
+            const uint64_t lo = kv_host_prefix_bytes(pages, p.per[i], 4096);
+            const uint64_t hi = kv_host_prefix_bytes(old_backed, p.per[i], 4096);
+            if (hi > lo) (void) madvise(p.base + p.off[i] + lo, (size_t) (hi - lo), MADV_DONTNEED);
+        }
     }
     if (pages <= 0) {   // nothing registered: say so in `backed` too, or a later grow to the old size would
                         // answer "already backed" with null pointers (P124e review: the booby trap)
