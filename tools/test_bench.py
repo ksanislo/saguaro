@@ -235,6 +235,17 @@ class BenchStandard(unittest.TestCase):
         self.assertEqual(MB.drafting_choice([], {}, ["dspark: x"], [], "ik2"), "no drafting")
         self.assertEqual(MB.drafting_choice([], {}, ["dspark: 3 drafts"], [], "deepseek"), "DSpark")
 
+    def test_drafting_choice_qfn_names_the_drafter_the_config_loads(self):
+        # (the CYBER-FROST quant carries its own drafter, built from the file's NextN block and loaded from
+        #  <pack>/mtp (qfn_drafter_step); every other QFN config's --mtp is the Lamina layer folder)
+        cf = ["--pack", "/m/Qwen3.8-Flash-Next-CYBER-FROST", "--mtp", "/m/Qwen3.8-Flash-Next-CYBER-FROST/mtp"]
+        lam = ["--pack", "/m/Qwen3.8-Flash-Next-Coder/pack", "--mtp", "/models/Qwen3.8-Flash-Next-MTP-Lamina"]
+        info = "INFO context=262144 kv=int8 mtp_max=3 mtp=1 lookup=1 pool_workers=19"
+        self.assertEqual(MB.drafting_choice(cf, {}, [], [], "qfn"), "MTP (from the model's NextN block)")
+        self.assertEqual(MB.drafting_choice(cf, {}, [info], [], "qfn"), "MTP (from the model's NextN block)")
+        self.assertEqual(MB.drafting_choice(lam, {}, [], [], "qfn"), "MTP (Lamina)")
+        self.assertEqual(MB.drafting_choice(lam, {}, [info], [], "qfn"), "MTP (Lamina)")
+
     def test_drafting_choice_of_a_first_start(self):
         # (the plan line names every source the engine loaded; the measurement's line says what was kept)
         plan = "drafting: the drafter and the prompt lookup, 1.54 GiB of VRAM from the experts' tier with the window's"
