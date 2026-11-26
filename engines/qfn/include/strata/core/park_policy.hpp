@@ -152,4 +152,20 @@ inline std::vector<Action> plan(const std::vector<Entry>& entries, uint64_t park
     return out;
 }
 
+/// PLAN-p124a2: a park that follows its own conversation's turn save does not have to capture the K/V a second
+/// time - it can adopt the host copy the capture just made (conversation_snapshot_from_capture). Figures only:
+/// `captured`  - a WHOLE (not delta) capture of this same place is still alive (its file write has not ended,
+///               so its buffers exist; the turn hold keeps only a weak reference to them);
+/// `single_stage` - no layer split: one session's snapshot is what the capture covered;
+/// `no_retained`  - the cache's retained K/V is not the source (with it, the park already copies no prefix);
+/// `nothing_ran`  - no request began since the capture, so the session still holds exactly the captured bytes;
+/// `same_tokens`  - the parked conversation has the token count, ids and steering mode the capture took;
+/// `no_images`    - neither the capture nor the park carries image keys (an image list is not compared).
+/// All six must hold for the adoption; anything else captures the park normally. The result is byte-identical
+/// either way: the adoption aliases the same bytes, it does not invent them.
+inline bool adopt_turn_capture(bool captured, bool single_stage, bool no_retained, bool nothing_ran,
+                               bool same_tokens, bool no_images) {
+    return captured && single_stage && no_retained && nothing_ran && same_tokens && no_images;
+}
+
 }  // namespace strata::core::park

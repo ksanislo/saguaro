@@ -10688,7 +10688,19 @@ vs.d_skip_usage = gs.d_skip_usage;
             int64_t dirty = INT64_MAX;      // the first position written since (INT64_MAX: nothing reported = unknown)
             std::vector<int32_t> ids;
             Clock::time_point retry{};
-            void begin(int64_t at) { dirty = std::min(dirty, at); }   // a request goes on in place from `at`
+            // PLAN-p124a2: the WHOLE capture of the last turn save here, for the park that follows the turn to adopt
+            // (park::adopt_turn_capture) instead of copying the same K/V a second time. It is the park's own turn:
+            // `begin` (a request continuing in place) invalidates it, and so do the sites that overwrite the session
+            // without a request starting (a slot's copy-in, a context restore, the checkpoint mount in
+            // live_from_checks); `reset` deliberately does not - a conversation switch goes through it, and the
+            // switch's park of the outgoing conversation is exactly what adopts the capture.
+            std::weak_ptr<const strata::core::SessionLogTurn> adopt_cap;
+            std::vector<int32_t> adopt_ids;
+            bool adopt_cvec = false;
+            bool adopt_imgs = false;
+            bool adopt_live = false;
+            void adopt_clear() { adopt_cap.reset(); adopt_ids.clear(); adopt_cvec = false; adopt_imgs = false; adopt_live = false; }
+            void begin(int64_t at) { dirty = std::min(dirty, at); adopt_clear(); }   // a request goes on in place from `at`
             void reset() { track.reset(); tokens = -1; dirty = INT64_MAX; ids.clear(); seq = 0; }   // another conversation
         };
         TurnHold turn_main;
@@ -10781,6 +10793,16 @@ vs.d_skip_usage = gs.d_skip_usage;
                 h.ids.assign(f.ids.begin(), f.ids.end());
                 h.tokens = (int64_t) f.ids.size();
                 h.dirty = INT64_MAX;
+                // PLAN-p124a2: only a whole capture holds every K/V byte the next park would capture, and only while
+                // the folder's writer still holds the buffers (a weak reference) are they worth adopting for free.
+                h.adopt_clear();
+                if (!job.turn->delta()) {
+                    h.adopt_cap = std::shared_ptr<const strata::core::SessionLogTurn>(job.turn);
+                    h.adopt_ids = h.ids;
+                    h.adopt_cvec = f.cvec;
+                    h.adopt_imgs = !f.imgs.empty();
+                    h.adopt_live = true;
+                }
                 sdir->write_turn(std::move(job));
                 return true;
             } catch (const std::bad_alloc&) {
@@ -10859,6 +10881,16 @@ vs.d_skip_usage = gs.d_skip_usage;
             std::vector<strata::core::ConversationKvReuse> stage_reuse = std::move(reuse.stages);
             stage_reuse.resize(n_st);
             reuse.stages.clear();
+            // PLAN-p124a2: the whole capture the last turn save made at this place, if this park may adopt it: then
+            // the K/V is the capture's host bytes (aliased, not re-copied) and their part of the estimate is RAM
+            // this park does not allocate. The hold is this park's turn's, consumed here either way.
+            TurnHold& hold = f.slot < 0 ? turn_main : turn_slot[(size_t) f.slot];
+            std::shared_ptr<const strata::core::SessionLogTurn> turn_cap =
+                hold.adopt_live ? hold.adopt_cap.lock() : nullptr;
+            const bool adopt = strata::core::park::adopt_turn_capture(
+                turn_cap != nullptr, n_st == 0, reuse.kv.empty(), hold.adopt_live,
+                hold.adopt_cvec == f.cvec && hold.adopt_ids == f.ids, f.imgs.empty() && !hold.adopt_imgs);
+            hold.adopt_clear();
             // the later stages' estimates, each with its own retained K/V when it still fits
             size_t stage_estimate = 0, stage_retained = 0;
             for (size_t k = 0; k < n_st; ++k) {
@@ -10915,7 +10947,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             strata::core::conversation_snapshot_reset_split();   // (PLAN-p124a: this line counts this park only)
             try {
                 const uint64_t floor = (uint64_t) o.conversation_cache_min_free_mib * 1024 * 1024;
-                const size_t retained = reuse.bytes() + stage_retained;
+                // (an adopted capture holds its K/V in buffers that already exist: only the rest is fresh RAM)
+                const size_t adopt_kv = adopt ? strata::core::conversation_snapshot_kv_bytes(
+                                       park_ss(f, 0), g, draft0, (int64_t) f.ids.size()) : 0;
+                const size_t retained = reuse.bytes() + stage_retained + adopt_kv;
                 const size_t additional = estimate > retained ? estimate - retained : 0;
                 // The physical-RAM gate: the incoming snapshot has to fit beside the floor.  make_room()
                 // above only balanced the cache's own budget, so a full cache leaves this one short even
@@ -10950,8 +10985,21 @@ vs.d_skip_usage = gs.d_skip_usage;
                                  (long long) o.conversation_cache_min_free_mib);
                 strata::core::SavedConversation image;
                 size_t reused_bytes = 0;
-                if (!strata::core::conversation_snapshot_save(image, view, park_ss(f, 0), g, draft0, err,
-                        std::move(reuse), &reused_bytes)) return false;
+                bool from_capture = false;
+                if (adopt) {   // PLAN-p124a2: adopt the turn save's whole host capture; a fresh capture only if it refuses
+                    std::string ae;
+                    if (strata::core::conversation_snapshot_from_capture(image, view, park_ss(f, 0), g, draft0,
+                            std::move(turn_cap), ae, &reused_bytes))
+                        from_capture = true;
+                    else {
+                        image = {};
+                        std::fprintf(stderr, "saguaro serve: conversation cache: the turn capture could not stand in "
+                                             "for this park (%s); capturing normally\n", ae.c_str());
+                    }
+                }
+                // (adopt implies reuse.kv is empty - park::adopt_turn_capture's `no_retained` - so the move is empty here)
+                if (!from_capture && !strata::core::conversation_snapshot_save(image, view, park_ss(f, 0), g, draft0,
+                        err, std::move(reuse), &reused_bytes)) return false;
                 for (size_t k = 0; k < n_st; ++k) {   // the later stages (the last one with the draft layer's K/V)
                     auto& st = stages[k];
                     const strata::core::OnDevice on(st->dev);
@@ -11012,6 +11060,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     c = &k;
             if (c == nullptr || c->stage_parts.size() != stages.size()) return;
             if ((size_t) conversations.best(c->ids, c->imgs, cvec_cached).tokens >= c->ids.size()) return;
+            turn_main.adopt_clear();   // (PLAN-p124a2: this mount rewrites the session: a capture before it is not its bytes)
             if (!checkpoint_restore(*c, ss, g)) return;
             for (size_t i = 0; i < stages.size(); ++i) {
                 const strata::core::OnDevice on(stages[i]->dev);
@@ -16551,6 +16600,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         }
                         fresh = true;
                         turn_slot[(size_t) b].reset();   // (the slot started over: its file is written whole next)
+                        turn_slot[(size_t) b].adopt_clear();   // PLAN-p124a2: started over means its capture is gone
                     }
                 }
             }
@@ -16957,7 +17007,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 return AdmEnd::paused;
             }
             std::vector<ConvCheckpoint> grid = slot_grid_settle(sl.checks, j.resume, ids, j.grid_ck);   // SAGUARO_SLOT_GRID
-            if (j.yarn_mv || j.resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(j.resume);
+            if (j.yarn_mv || j.resume <= 0) { turn_slot[(size_t) b].reset(); turn_slot[(size_t) b].adopt_clear(); }   // PLAN-p124a2: a restart rewrites the slot
+            else turn_slot[(size_t) b].begin(j.resume);
             if (ckpt_pool.on())
                 for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
             sl = BSlot{};
@@ -17133,7 +17184,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (resume > 0) dr.kv_restore(resume);
                 dr.set_prompt_len(n);
             }
-            if (resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(resume);   // (the lane read)
+            if (resume <= 0) { turn_slot[(size_t) b].reset(); turn_slot[(size_t) b].adopt_clear(); }   // (the lane read; PLAN-p124a2: a restart rewrites the slot)
+            else turn_slot[(size_t) b].begin(resume);
             // the checkpoints this prompt continues stay the slot's: the resume point of its turn saves and parks (a
             // thinking continuation's lane read used to leave the slot none, so its file could not resume the next turn)
             std::vector<ConvCheckpoint> lane_kept;
@@ -17665,7 +17717,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 j.gparts.clear();
                 j.gpart_ok.clear();
                 std::vector<ConvCheckpoint> grid = slot_grid_settle(sl.checks, j.resume, ids, grid_new);
-                if (j.yarn_mv || j.resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(j.resume);
+                if (j.yarn_mv || j.resume <= 0) { turn_slot[(size_t) b].reset(); turn_slot[(size_t) b].adopt_clear(); }   // PLAN-p124a2: a restart rewrites the slot
+                else turn_slot[(size_t) b].begin(j.resume);
                 if (ckpt_pool.on())
                     for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
                 sl = BSlot{};
@@ -19040,6 +19093,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                     conversations.take_reuse();   // retained K/V described the outgoing session
                     turn_main.reset();
+                    turn_main.adopt_clear();   // (PLAN-p124a2: the restore below rewrites the session)
                     live_ok = false;
                     // host -> device in synchronous copies of the whole state: one bounded allowance
                     blocking("transfer", bytes);
@@ -19701,7 +19755,13 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t turn_tokens_before = turn_main.tokens;
             // (turn saves: the same conversation going on in place from `resume`, or another one taking the session)
             if (!incoming && !borrow && slot_source < 0 && resume > 0 && live_ok) turn_main.begin(resume);
-            else turn_main.reset();
+            else {
+                turn_main.reset();
+                // PLAN-p124a2: a switch keeps the outgoing conversation's capture for its park below; a restart of
+                // the SAME session (a full re-read, a zeroed session) does not keep a capture that its re-read is
+                // about to overwrite.
+                if (!incoming && !borrow && slot_source < 0) turn_main.adopt_clear();
+            }
             const char* park_skip = nullptr;
             if (live_ok && !live.empty() && !borrow && !pin_sibling && park_worth) {
                 // (with a session folder: only when the last turn's save was captured - else the park is its save)
@@ -22842,6 +22902,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                     const auto tc2 = Clock::now();   // (the slot's old checkpoints freed)
                     turn_slot[(size_t) admit_slot].reset();   // (copied in from the main session)
+                    turn_slot[(size_t) admit_slot].adopt_clear();   // (PLAN-p124a2: the copy-in rewrote the slot)
                     sl.active = true;
                     sl.cache0 = drive.d.cache_hits;   // the request's own expert-cache figures (the tail of its BDONE)
                     sl.look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
