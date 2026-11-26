@@ -9,7 +9,9 @@ the RAM tier it gets, the memlock soft limit beside a planned RAM tier (P3: one 
 unknown and at-or-over-the-tier say nothing), the config it writes - AMD's as measured, NVIDIA's mirroring the live
 4x Tesla T4 configs,
 the vision entry, the drafting choice and the answers-at-once value - the cards it picks, the report's QFN lines, the
---import-model entries and the Models page's entries.  No GPU, no network.
+--import-model entries and the Models page's entries, and P124o: what the setup recommends for a PC's cards -
+Qwen3.8-Flash-Next first on lower-end hardware with its largest quant that runs, Inkling 2 Mini only where no QFN
+quant runs.  No GPU, no network.
 
     python -m unittest tools.test_setup_qfn -v
 """
@@ -701,6 +703,100 @@ class Offered(unittest.TestCase):
         for ctx in (maya.QF.DEFAULT_CONTEXT, maya.QF.SPLIT_CONTEXT, maya.QF.SCALED_CONTEXT):
             self.assertIn(ctx, maya.QFN_CONTEXTS)                  # (choose_context offers only QFN_CONTEXTS -
                                                                    #  including the scaled-down one it recommends)
+
+
+class TheRecommendation(unittest.TestCase):
+    """P124o: the model and the quant the setup recommends for a PC's cards when nothing was set up before
+    (family_fit, qfn_recommended_quant, the quant menu's default): Qwen3.8-Flash-Next first on lower-end
+    hardware - its largest quant that RUNS (UD-Q4_K_XL > GSQ IQ3_S > Coder IQ1_M, priced by the setup's own
+    qfn_quant_fit) - and Inkling 2 Mini still picked where no QFN quant runs.  The plan's five fake machine
+    profiles a-e (P40 24+64, 2x T4 +256, RX 9070 XT +96, 4x T4 +256, one 12 GB card +32).  No GPU, no network."""
+
+    @staticmethod
+    def nv(index=0, name="Tesla T4", cc="75", gb=15.0):
+        return {"index": index, "name": name, "arch": cc, "vram_gb": gb, "driver": "580.0"}
+
+    @staticmethod
+    def xt(index=0, gb=15.9):
+        return {"index": index, "name": "AMD Radeon RX 9070 XT", "arch": "gfx1201", "vram_gb": gb,
+                "driver": "amdgpu", "vendor": "amd"}
+
+    def setUp(self):
+        self.win = patch.object(maya, "WIN", False)
+        self.win.start()
+        self.addCleanup(self.win.stop)
+
+    def test_a_one_tesla_p40_24gb_gets_qfn(self):
+        p40 = [self.nv(name="Tesla P40", cc="61", gb=24.0)]
+        self.assertEqual(maya.family_fit(p40, 64.0), "qfn")        # (24 GB is a lower-end card too: the model
+                                                                   #  question used to default to GLM with no note)
+        self.assertEqual(maya.qfn_recommended_quant(p40, 64.0), "ud-q4_k_xl")
+
+    def test_b_two_tesla_t4s_get_qfn_not_inkling(self):
+        t4s = [self.nv(i) for i in range(2)]
+        self.assertEqual(maya.family_fit(t4s, 256.0), "qfn")       # (measured on exactly this: the split; was ik2)
+        self.assertEqual(maya.qfn_recommended_quant(t4s, 256.0), "ud-q4_k_xl")
+
+    def test_c_one_rx_9070_xt_gets_qfn(self):
+        self.assertEqual(maya.family_fit([self.xt()], 96.0, "hip"), "qfn")   # (the layout UD-Q4_K_XL was measured on)
+        self.assertEqual(maya.qfn_recommended_quant([self.xt()], 96.0, "hip"), "ud-q4_k_xl")
+
+    def test_d_four_equal_t4s_stay_hy4(self):
+        self.assertEqual(maya.family_fit([self.nv(i) for i in range(4)], 256.0), "hy4")   # (the four-card pick,
+                                                                                           #  measured Maya-S, stays)
+
+    def test_e_one_12gb_card_gets_qfn(self):
+        one = [self.nv(name="GeForce RTX 2060", gb=12.0)]
+        self.assertEqual(maya.family_fit(one, 32.0), "qfn")        # (runs slowly under the measured layout: v1.2.1-B)
+        self.assertEqual(maya.qfn_recommended_quant(one, 32.0), "ud-q4_k_xl")
+
+    def test_no_qfn_quant_runs_still_gets_inkling(self):
+        one = [self.nv(name="GeForce RTX 2060", gb=12.0)]
+        self.assertIsNone(maya.qfn_recommended_quant(one, 13.0))   # (13 GB of RAM is under every quant's minimum)
+        self.assertEqual(maya.family_fit(one, 13.0), "ik2")        # (Inkling: offered, and the pick where QFN is out)
+
+    def test_the_ladder_is_the_largest_that_runs(self):
+        g8 = [self.nv(name="GeForce GTX 1660", gb=8.0)]
+        self.assertEqual(maya.qfn_recommended_quant(g8, 251.0), "ud-q4_k_xl")     # (the PC holds it: the default)
+        self.assertEqual(maya.qfn_recommended_quant(g8, 15.4), Q.GSQ_IQ3_S)       # (15.4 GB of RAM: UD-Q4's 16 GB
+                                                                                  #  minimum says no, IQ3_S says yes)
+        self.assertEqual(maya.qfn_recommended_quant(g8, 14.5), Q.GSQ_CODER_IQ1_M)   # (... and the Coder's last out)
+
+    def test_bigger_pcs_keep_their_recommendation(self):
+        # (GLM / DS4 / MM3 territory: no small-card recommendation, the question keeps its GLM default;
+        #  AMD with two cards stays GLM's - Inkling and QFN both run on its one GPU there)
+        self.assertIsNone(maya.family_fit([self.nv(name="RTX 6000 Ada", cc="89", gb=48.0)], 64.0))
+        self.assertIsNone(maya.family_fit([self.nv(i) for i in range(3)], 64.0))
+        self.assertEqual(maya.family_fit([self.xt(), self.xt(1)], 96.0, "hip"), "glm")
+
+    def test_the_quant_menu_recommends_and_defaults_to_the_largest_that_runs(self):
+        got = {}
+
+        def ask(title, intro, rows, default, yes, *x):
+            got.update(rows=rows, default=default)
+            return default
+        g8 = [self.nv(name="GeForce GTX 1660", gb=8.0)]
+        with patch.object(maya, "choose", ask):
+            self.assertEqual(maya.choose_qfn_quant(args(qfn_quant=None), {}, g8, 14.5), Q.GSQ_CODER_IQ1_M)
+            self.assertEqual([r[0] for r in got["rows"] if r[1] == "recommended"],
+                             [Q.shown("qfn", Q.GSQ_CODER_IQ1_M, maya.qfn_entry(Q.GSQ_CODER_IQ1_M)["download_gb"])])
+            self.assertEqual(maya.choose_qfn_quant(args(qfn_quant=None), {}, [self.nv()], 251.0), "ud-q4_k_xl")
+            self.assertIn("recommended", [r[1] for r in got["rows"] if "UD-Q4_K_XL" in r[0]])
+            out = refusal(lambda: maya.choose_qfn_quant(args(qfn_quant=None), {}, g8, 13.0))   # (nothing fits:
+            self.assertIn("cannot run", out)                                        #  the default is refused as before)
+
+    def test_the_model_question_renames_the_quant_on_the_reason_line(self):
+        got = {}
+
+        def ask(title, intro, rows, default, yes, *x):
+            got.update(rows=rows, default=default)
+            return default
+        with patch.object(maya, "choose", ask), patch.object(maya.S, "gpus", return_value=[self.nv()]), \
+                patch.object(maya, "mem_gb", return_value=(256.0, 240.0)):
+            self.assertEqual(maya.choose_family(args(model=None, backend="cuda"), {}), "qfn")
+        self.assertEqual(got["default"], maya.FAMILIES.index("qfn"))
+        self.assertEqual(got["rows"][maya.FAMILIES.index("qfn")][1], "recommended for this PC (UD-Q4_K_XL)")
+        self.assertEqual(got["rows"][maya.FAMILIES.index("ik2")][1], "new")   # (Inkling: offered, no longer the pick)
 
 
 def cpu(sockets=1, cores=8):
