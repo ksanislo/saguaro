@@ -86,7 +86,8 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "tools"))
 import setup as S  # noqa: E402  Strata's installer: PC checks, pip, llama.cpp, downloads (nothing runs on import)
 from setup import ask, fail, ok, run, say, step, warn  # noqa: E402
-from saguaro_version import saguaro_version  # noqa: E402  the version text: the banner's and the dashboard's About, one function
+from saguaro_version import installed_version, saguaro_version  # noqa: E402  the version text: the banner's and the
+#  dashboard's About, one function (saguaro_version); the VERSION line --bench's header and /health print (installed_version)
 import config_names as CN  # noqa: E402  the run configs' name family (saguaro-<model>.json; maya-<model>.json found too)
 import maya_import as MI  # noqa: E402  --import-model: model files downloaded some other way, found by size + sha256
 import maya_quants as Q  # noqa: E402  the quants' names users see (MiniMax M3.1 · Maya-XS) and the older ones as aliases
@@ -5844,7 +5845,7 @@ def bench_compare(cfg, cfg_path, spec, rounds, here, start, chats, prompts, warm
     res = {k: MB.summarize(v, prompts) for k, v in runs.items()}
     verdict, exact = MB.exact_verdict([r["tokens"] for r in runs["this"]], [r["tokens"] for r in runs["other"]])
     again = {k: MB.exactness(v[0]["tokens"], v[-1]["tokens"]) for k, v in runs.items() if len(v) > 1}
-    o_ver = (other / "VERSION").read_text().strip() if (other / "VERSION").exists() else "?"
+    o_ver = installed_version(other) or "?"          # (the other checkout's VERSION line, same single source)
     names = {"this": f"{MB.commit_of(ROOT)} (v{version})", "other": f"{MB.commit_of(other)} (v{o_ver})"}
     records, lines = [], []
     for side, root, ver in (("other", other, o_ver), ("this", ROOT, version)):
@@ -9531,7 +9532,8 @@ def set_up_and_serve(a, prev: dict) -> tuple | None:
 
 # ------------------------------------------------------------------------------------------------ main
 def maya_version() -> str:
-    return (HERE / "VERSION").read_text(encoding="utf-8").strip() if (HERE / "VERSION").exists() else "?"
+    """--bench's header (and its records) name the version from saguaro_version.py: the VERSION file's line."""
+    return installed_version(HERE) or "?"
 
 
 def model_option(a) -> str | None:

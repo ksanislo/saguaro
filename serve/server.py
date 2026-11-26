@@ -196,11 +196,10 @@ from serve.response_store import StoreBusy  # noqa: E402
 from serve.update import RESTART_EXIT, Updater  # noqa: E402
 import config_names  # noqa: E402  (tools/) the config name family: saguaro-<model>.json, the old maya- one found too
 import maya_quants  # noqa: E402  (tools/) the quants' names users see (the model first: "GLM-5.3 · Maya-S")
+from saguaro_version import installed_version  # noqa: E402  the one place the VERSION line is read
 
-try:                        # Saguaro's release (the dashboard's About; the engine's INFO carries none)
-    SAGUARO_VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip() or None
-except OSError:
-    SAGUARO_VERSION = None
+SAGUARO_VERSION = installed_version(ROOT)     # Saguaro's release: /health, the dashboard's About and the report print
+                                              #  this; asked in saguaro_version.py, never a stale or upstream string
 MAC_FREE_SETTLE_BYTES = 1 << 30    # macOS: the old engine's memory is back once free memory rises by less than this ...
 MAC_FREE_POLL_S = 0.5              # ... between two reads this far apart
 
