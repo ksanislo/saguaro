@@ -3336,6 +3336,12 @@ class Service:
             (_special_ids("</think%s>" % template.hy4_tag) or _special_ids("</think>")) \
             if getattr(template, "hy4", False) else _special_ids("</think>")
         self.think_end_id = end[0] if end else None
+        # (P124q: a MiniMax vocabulary that holds both names ends its thinking at EITHER token - since the token
+        #  rule arrived, a plain "</think>" the model samples must close the reasoning too, as its text did before.
+        #  The budget's forced close and the restarts' keep send the canonical id above; a quote of the tag as
+        #  ordinary pieces stays text)
+        alt = _special_ids("</think>") if getattr(template, "minimax", False) and self.think_end_id is not None else []
+        self.think_end_id_alt = alt[0] if alt and alt[0] != self.think_end_id else None
         # Inkling 2 leaves its reasoning at segment marks, not </think>: <|end_message|><|message_model|><|content_text|>
         # opens the answer (the close Service.run puts there for a tiny max_tokens); its other marks end it too
         ink = getattr(template, "inkling", False)
@@ -5960,10 +5966,18 @@ class Service:
             # is the answer's, not the reasoning's)
             return OutputParser(thinking=thinking if in_thinking is None else thinking and in_thinking, tools=tools,
                                 stream_tools=True, dsml=getattr(self.template, "deepseek", False),
-                                token_only_end=(getattr(self.template, "deepseek", False) or   # (QFN's </think> is
-                                                # its token 248069 at every turn's end: a quote of the tag in the
-                                                # thinking - an agent reading this server's code - is text, not its end)
-                                                getattr(self, "engine_kind", None) == "qfn") and self.think_end_id is not None,
+                                token_only_end=(getattr(self.template, "deepseek", False) or   # (P124q: every engine
+                                                # whose model ends thinking with a SINGLE token closes on the token
+                                                # alone - QFN's </think> is its token 248069 at every turn's end,
+                                                # GLM's is its </think> (the thinking budget's forced close sends
+                                                # that very id), MiniMax's is </mm:think>, Hy4's the suffixed
+                                                # </think:..> the pack renames to </think>.  A quote of the tag in
+                                                # the thinking - an agent reading this server's code - is text, not
+                                                # its end.  Inkling 2 has no such token: its segment marks end the
+                                                # reasoning, so it keeps the text search)
+                                                getattr(self, "engine_kind", None) in ("qfn", "glm",
+                                                                                        "minimax", "hy4")
+                                                and self.think_end_id is not None),
                                 minimax=getattr(self.template, "minimax", False),
                                 inkling=getattr(self.template, "inkling", False),
                                 strict_tools=responses, single_tool=single_tool)
@@ -6087,6 +6101,8 @@ class Service:
                 # the thinking budget goes to the engine with the request: a reasoning block still open after that many
                 # tokens is closed there (its next token is </think>) and the answer follows in the same decode
                 in_think = bool(thinking) and self.think_end_id is not None   # (tracked with no budget too, #786)
+                alt_end = getattr(self, "think_end_id_alt", None)   # (P124q: MiniMax's plain "</think>" too, if its
+                # vocabulary holds both names: sampling it means the same end as the canonical token above)
                 budgeted = in_think and self.think_budget > 0   # (0 = no budget: the end token is still tracked)
                 # The thinking budget is the config's ("thinking_budget"); a request's max_tokens (or the context
                 # left) lowers it only when that output limit is tiny, THINK_TINY_LIMIT (1024) tokens or fewer - a
@@ -6230,7 +6246,7 @@ class Service:
                         if my_first is None:
                             my_first = time.time()
                         raw_ids.append(t)
-                        end_think = bool(in_think and t == self.think_end_id)
+                        end_think = bool(in_think and t in (self.think_end_id, alt_end))
                         if end_think:
                             in_think = False
                             if think_budget > 0 and n == think_budget + 1:
@@ -6238,7 +6254,7 @@ class Service:
                                       f"{f', {soft} + {think_budget - soft} without a sentence end' if soft else ''})"
                                       ": closed, answering", flush=True)
                         text, stopped = detok.push(t), False
-                        if t == self.think_end_id and parser.token_only_end:
+                        if t in (self.think_end_id, alt_end) and parser.token_only_end:
                             # the token's own text: the tag is no one's text.  Not only when it closes the reasoning
                             # (end_think): a model that closes twice - or the answer's continuation, a reasoning that
                             # was already closed (see the last restart) - would otherwise put the tag verbatim into
