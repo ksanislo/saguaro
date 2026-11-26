@@ -5730,6 +5730,10 @@ int main(int argc, char** argv) {
             strata::core::ExpertCache::set_vmm(on);
         }
         strata::core::qsa_set_host_elastic_main(o.serve);   // SAGUARO_KV_HOST_ELASTIC: the solo session and the stages' too
+        // P124e (round 4, manager card test): and the VRAM half of the same rule (SAGUARO_KV_VRAM_ELASTIC, on unless
+        // =0): the states' context-scaled device arrays hold a start step, not --max-context.  Checked per state
+        // (streaming + host elastic + VMM card); off on the CLI and on a card that cannot do it - byte-identical.
+        strata::core::qsa_set_vram_elastic(o.serve && host_vram_main_env());
         // ... and their VRAM pools and pooled keys grow too, under the elastic slots (they draw on the same budget)
         const bool vram_main = o.serve && o.batch > 0 && elastic_slots_mode() == 2 && host_vram_main_env();
         strata::core::qsa_set_vram_elastic_main(vram_main && strata::core::vmm_available(primary_device));
@@ -6209,6 +6213,7 @@ int main(int argc, char** argv) {
         }
     }
     strata::core::qsa_set_host_elastic_slots(false);   // (later states pin whole again - nothing else builds slots here)
+    strata::core::qsa_set_vram_elastic(false);         // P124e round 4: the device half is scoped exactly the same
     // SAGUARO_KV_HOST_ELASTIC: the solo session's host copies (every stage, its drafter) pinned for `cells` before anything
     // writes them: a request's prompt and max_new, a restored conversation.  They only grow (the conversation they hold
     // is parked from them after a new request has started).  P124e: `cells` 1 pins one growth step (about 32768 cells) -
@@ -7053,6 +7058,54 @@ int main(int argc, char** argv) {
                                  "(layer, expert) pair lifts it - tools/make_profile.py)\n", o.expert_cache,
                          profile.size(), o.expert_profile.c_str(), profile.size());
         o.expert_cache = (int) sized_slots.size();
+    }
+    // P124e (round 4, manager card test): the VRAM follow rule (qsa_set_vram_elastic) made the sessions' context-scaled
+    // device state - page tables, pooled indexer keys, the block-score scratch, the RoPE tables - VMM ranges backed
+    // for one start step each.  A conversation that grows past it takes new chunks, and on a card the expert cache
+    // has filled, the room can only come from the cache: the serve loop's give path (SAGUARO_ELASTIC_SLOTS_GIVE),
+    // which needs the cache in VMM and the RAM-arena tier.  Where that cannot run, back the context state whole NOW
+    // (the free-VRAM figure the cache then sizes from is today's, and so is every number the card test compares).
+    bool vram_follow_on = strata::core::qsa_vram_follow_active();
+    const bool vram_follow_give =
+        vram_follow_on && srcp == &arena_src && o.adapt_async == 0 && !o.prefill_head_alias && o.peer_device < 0 &&
+        !o.vram_elastic && !remote_caches;
+    if (vram_follow_on && !vram_follow_give) {
+        const char* why = srcp != &arena_src ? "the experts are not all in the RAM arena"
+                        : o.adapt_async ? "--adapt-async is on"
+                        : o.prefill_head_alias ? "--prefill-head-alias is on"
+                        : o.peer_device >= 0 ? "--peer-device is on"
+                        : o.vram_elastic ? "--vram-elastic owns the cache's segments"
+                                         : "a helper cache is on another GPU";
+        std::fprintf(stderr, "saguaro generate: the context's device state cannot grow (the expert cache gives no "
+                             "room: %s): backing it whole for --max-context %lld now, as before P124e\n", why,
+                     (long long) o.max_context);
+        auto back_whole = [&](strata::core::SessionState& u, int dev) {
+            const strata::core::OnDevice on(dev);
+            if (!strata::core::qsa_scores_back_whole(u.scores_elastic, o.max_context)) return false;
+            for (int64_t j = 0; u.qsa_states != nullptr && j < u.qsa_alloc; ++j)
+                if (!strata::core::qsa_follow_back_whole(u.qsa_states[u.qsa_ord0 + j])) return false;
+            return u.host_follow == nullptr || strata::core::qsa_follow_back_whole(*u.host_follow);
+        };
+        bool ok = back_whole(ss, primary_device);
+        for (auto& st : stages) ok = ok && back_whole(st->ss, st->dev);
+        for (size_t k = 0; k < bslot_ss.size(); ++k) {
+            const int dev = k == 0 ? primary_device : stages[k - 1]->dev;
+            for (auto& u : bslot_ss[k]) ok = ok && back_whole(*u, dev);
+        }
+        if (!ok) {
+            std::fprintf(stderr, "saguaro generate: the context's device state does not fit in VRAM%s\n",
+                         vram_free_note().c_str());
+            return 1;
+        }
+        vram_follow_on = false;   // (the load's numbers and the fits are today's from here: nothing trails)
+        strata::core::qsa_vram_follow_off();
+    } else if (vram_follow_on) {
+        strata::core::ExpertCache::set_vmm(true);   // the caches (this card and the stages') give chunks through it
+        std::fprintf(stderr, "saguaro generate: KV streaming: the sessions' context device state (page tables, the "
+                             "indexer's keys, the selection scratch, the RoPE tables) holds %llu MiB at load and "
+                             "grows with each conversation past --max-context's start\n",
+                     (unsigned long long)
+                         ((strata::core::qsa_follow_backed_bytes() + strata::core::qsa_scores_backed_bytes(ss.scores_elastic)) >> 20));
     }
     // #533: --vram-elastic: the cache in physical segments (the VRAM command resizes it between requests).  One GPU,
     // no helper caches, serve mode: anything else keeps the one cudaMalloc, said once.
@@ -13512,6 +13565,10 @@ vs.d_skip_usage = gs.d_skip_usage;
         }();
         const bool efit_on = eslots_on || ehost_on;
         const int64_t ehost_step = strata::core::qsa_host_step_cells();
+        // P124e (round 4, manager card test): the follow pools (the sessions' context-scaled DEVICE state) are live
+        // when the give path can feed them - decided with the cache at 7057 (backed whole if not).  This is the same
+        // fact re-read: pools still marked follow.
+        const bool efollow_on = strata::core::qsa_vram_follow_active();
         auto eslot_dev = [&](size_t k) { return k == 0 ? 0 : stages[k - 1]->dev; };
         // per card: MiB the slot's elastic arrays hold, and the budget's free MiB
         auto slot_mem_note = [&](int b) {
@@ -13551,9 +13608,17 @@ vs.d_skip_usage = gs.d_skip_usage;
         std::vector<Give> gv;
         const int64_t give_floor = 128;
         std::string give_off_why;   // why the give path is off (what VLEND / VRECLAIM answer then)
+        // P124e (round 4): the give path has a second customer now - the follow pools ask for the card's VRAM through
+        // the relief hook - and it runs with no --batch at all (one Give per card: CUDA0 + the stages).
+        const size_t gv_parts = 1 + stages.size();
         const bool give_on = [&] {
-            if (!elastic_give_env() || !eslots_on) {
-                give_off_why = elastic_give_env() ? "no --batch slot budget to give to" : "SAGUARO_ELASTIC_SLOTS_GIVE is off";
+            if (!elastic_give_env() && !efollow_on) {
+                give_off_why = efollow_on ? "" : (elastic_give_env() ? "no --batch slot budget to give to"
+                                                                     : "SAGUARO_ELASTIC_SLOTS_GIVE is off");
+                return false;
+            }
+            if (!eslots_on && !efollow_on) {
+                give_off_why = "no elastic slots and no VRAM-follow state";
                 return false;
             }
             const char* why = srcp != &arena_src ? "the experts are not all in the RAM arena"
@@ -13561,7 +13626,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                             : o.prefill_head_alias ? "--prefill-head-alias is on"
                             : d_res == nullptr || host_res.empty() ? "there is no residency table"
                             : nullptr;
-            for (size_t k = 0; why == nullptr && k < bslot_ss.size(); ++k) {
+            for (size_t k = 0; why == nullptr && k < gv_parts; ++k) {
                 strata::core::ExpertCache& xc = k == 0 ? xcache : stages[k - 1]->cache;
                 if (xc.vmm_range() == nullptr || xc.segmented()) why = "an expert cache is not in VMM";
             }
@@ -13570,7 +13635,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::fprintf(stderr, "saguaro batch: SAGUARO_ELASTIC_SLOTS_GIVE is off: %s\n", why);
                 return false;
             }
-            for (size_t k = 0; k < bslot_ss.size(); ++k) {
+            for (size_t k = 0; k < gv_parts; ++k) {
                 Give v;
                 v.cache = k == 0 ? &xcache : &stages[k - 1]->cache;
                 v.dev = eslot_dev(k);
@@ -18568,12 +18633,14 @@ vs.d_skip_usage = gs.d_skip_usage;
         // the server's orderly QUIT.  SIGKILL still ends it.
         std::signal(SIGTERM, SIG_IGN);
         std::signal(SIGINT, SIG_IGN);
-        // an allocation that fails for lack of VRAM (a window graph, the drafter's records) asks for it here: the card's
-        // budget spare, and its expert cache when this thread asks and the card is quiet (any other thread: the spare)
+        // an allocation that fails for lack of VRAM (a window graph, the drafter's records, and - P124e round 4 - a
+        // follow grow) asks for it here: the card's budget spare, and its expert cache when this thread asks and the
+        // card is quiet (any other thread: the spare).  With the follow rule there is no --batch budget at all: the
+        // give runs from the cache to the budget and straight back to the driver again (free_to_driver's release).
         const std::thread::id serve_thread = std::this_thread::get_id();
-        if (eslots_on)
+        if (eslots_on || efollow_on)
             strata::core::set_vram_relief([&](int dev, uint64_t bytes) -> uint64_t {
-                for (size_t k = 0; k < bslot_ss.size(); ++k) {
+                for (size_t k = 0; k < gv.size(); ++k) {   // (one Give per card: CUDA0 and each stage)
                     if (eslot_dev(k) != dev) continue;
                     const uint64_t G = strata::core::vmm_granularity(dev);
                     if (G == 0) return 0;
