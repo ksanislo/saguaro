@@ -263,7 +263,10 @@ measurements are in [Measured on Saguaro](#measured-on-saguaro).
 ### Measured on Saguaro
 
 Our own machines on Saguaro 1.2.1 (2026-11-25; the row that says so is a user's), with `./saguaro.sh --bench`: decode = three greedy 256-token answers, the median
-(range); prefill = a 2K / 8K-token prompt.
+(range); prefill = a 2K / 8K-token prompt.  `--bench` now measures the several-at-once figures in the several-chats table's method too:
+for 1, 2 and 4 answers - as many as the config's places allow (`parallel`, the engine's batch slots) - it sends that many
+different 2K prompts together and prints the total tok/s and each answer's own, prompt reading and queueing included;
+`--bench-parallel off` skips that section of saguaro-bench.txt.
 
 | Machine | Model | Decode (writing the answer) | Prefill (2K / 8K prompt) |
 | --- | --- | ---: | ---: |
