@@ -685,7 +685,7 @@ MM3_PROFILE = ROOT / "data" / "expert-profile-mm3.bin"
 # Listed (and offered) once published: until then --model minimax-maya-xs / minimax-maya-s (--mm3-quant gguf-xs /
 # gguf-s before) with --model-dir takes files already there.  Named as every Saguaro quant (tools/maya_quants.py): the
 # model first, in the repo peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF (Maya-XS/, Maya-S/), each in <models folder>/<its
-# full name> on this PC, its config maya-minimax-maya-xs.json; the manifest's "was": the names its files had before,
+# full name> on this PC, its config saguaro-minimax-maya-xs.json; the manifest's "was": the names its files had before,
 # used as they are.
 MM3_GGUF_MANIFEST = ROOT / "tools" / "mm3" / "download_gguf.json"
 MM3_QUANTS = {"exl3": "EXL3 3.5 bits", "gguf-xs": "MiniMax-M3.1-Flash-Maya-XS", "gguf-s": "MiniMax-M3.1-Flash-Maya-S"}
@@ -5749,7 +5749,7 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
             records = [MB.record_line(rec)]
             if smoke and any(a["produced"] == 0 for a in run["answers"]):
                 fail("the model answered nothing (0 tokens) in the smoke run",
-                     f"its log: {ROOT / 'maya-bench.log'}")
+                     f"its log: {ROOT / 'saguaro-bench.log'}")
             if smoke:                            # (not the standard: no result line, the answers are what it is for)
                 lines = [lines[0].replace(" benchmark, ", " smoke run, ")] + lines[1:3] + [
                     f"{len(run['answers'])} answers of up to {MB.SMOKE_TOKENS} tokens (greedy, thinking off): " +
@@ -8867,7 +8867,7 @@ def hy4_pack_step(a, d: Path, files: dict) -> Path:
 
 def write_config_hy4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path, d: Path, quant: str,
                      lay: dict) -> Path:
-    """maya-hy4-flash-maya-s.json and its start script: the layout's flags for these cards (hy4_fit.layout), the
+    """saguaro-hy4-flash-maya-s.json and its start script: the layout's flags for these cards (hy4_fit.layout), the
     model's own sampling and thinking level.  A setup again keeps the flags set by hand on the same cards, the env,
     where the server listens and its key.  saguaro-hy4 stops at a flag it does not know: only its own are written."""
     step(8, "the configuration and the start script")
@@ -9382,7 +9382,7 @@ def ik2_fit_user_flags(a, args: list, lay: dict, ctx: int) -> list:
 def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, models: Path, d: Path, lay: dict,
                      vision: dict | None = None, drafter: Path | None = None, prev: dict | None = None,
                      quant: str = Q.IK2_QUANT) -> Path:
-    """maya-inkling-2-mini[-<file>].json (each file its own: ik2_config_path) and its start script: the layout's flags
+    """saguaro-inkling-2-mini[-<file>].json (each file its own: ik2_config_path) and its start script: the layout's flags
     for one card or two (ik2_fit.layout; AMD: ik2_fit.amd_layout), drafting (ik2_fit.default_drafting: on or auto;
     off where it does not run).  A setup again keeps the config before's env, where the server listens and its key (another
     Inkling config's where this file has none yet); of the flags, only those the user set on the same file and cards
