@@ -625,6 +625,11 @@ class FairLock:
                 if me not in self._queue:
                     return False
                 p = me[4] if len(me) > 4 else PRIORITY_NORMAL
+                #  (its OWN level, not `_eff`: with SAGUARO_PRIORITY_AGE_S > 0 a low waiter that has aged into
+                #  normal grants in normal order and cuts runners like a normal one (_eff is what _first and
+                #  waiting count with), but it still waits out the idle grace - the grace is the model's rest
+                #  after a person, not a queue position - and the grant is recorded at the raw level, which is
+                #  what the request's release(priority=) hands back to _held)
                 grace = self._idle_wait(p)
                 if grace == 0.0 and self._first(me) and self._fits(min(me[1], self.capacity)):
                     self._queue.remove(me)
