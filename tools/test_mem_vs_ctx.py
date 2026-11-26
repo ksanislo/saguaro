@@ -232,6 +232,17 @@ class TableAndVerdictTests(unittest.TestCase):
         # 10000 vs 10200: 200 < max(200 ... no: 2% of 10200 = 204, floor 256) -> 200 < 256 passes
         self.assertTrue(MV.verdict(self.rows([10000.0, 10200.0], [40000.0, 40500.0]))[0])
 
+    def test_a_difference_exactly_at_the_limit_fails(self):
+        # (the report's "the boundary equal fails - less than", now actually on the boundary:
+        #  10000 vs 10256 is exactly the 256 MiB floor (2% is 205.12), 39690 vs 40500 exactly the 2%)
+        ok, why = MV.verdict(self.rows([10000.0, 10256.0], [40000.0, 40500.0]))
+        self.assertFalse(ok)
+        self.assertIn("pinned RAM differs by 256.0 MiB", why)
+        ok, why = MV.verdict(self.rows([1000.0, 1010.0], [39690.0, 40500.0]))
+        self.assertFalse(ok)
+        self.assertIn("RSS differs by 810.0 MiB", why)
+        self.assertTrue(MV.verdict(self.rows([10000.0, 10255.0], [40000.0, 40500.0]))[0])   # (one under: ok)
+
     def test_two_percent_beats_the_floor(self):
         # pinned 1000000 vs 1001000: 1000 apart, limit 2% = 20020 -> passes; 30000 apart: 2% of 1030000 = 20600
         # is the limit there, not the 256 MiB floor -> fails - the percent rules a big figure, the floor a small one
