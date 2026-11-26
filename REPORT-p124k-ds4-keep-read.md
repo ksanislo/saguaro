@@ -45,7 +45,8 @@ as its `reused`, so the next request of the same prompt shares it and reads only
 turn's conversation is shared (`prompt_begin`'s in-place continuation at the state's end, :1518-1521 pre-change).
 One change, in `prompt_piece`, so solo and `--parallel` both get it; the DONE keeps the per-rid tag in multi.
 
-* `src/ds4/ds4_marks.hpp` - **`read_stop_landing(mid, done, stored, from, spans)`** (pure, :120-142): first of the
+* `src/ds4/ds4_marks.hpp` - **`read_stop_landing(mid, done, stored, from, spans)`** (pure, :128-144, weighing the
+  candidates on the shared **`splits_span`** :120-126): first of the
   live piece end `done` (only asked for between runs - `mid` false; a Stop inside a run leaves everything past that
   run's start unusable, and a cancelled feed's `fed()` is the full n, never what it consumed), the deepest restore
   point `stored` at or before the stopped run's own start (the read's last mark, or the keep checkpoint below it),
@@ -56,15 +57,18 @@ One change, in `prompt_piece`, so solo and `--parallel` both get it; the DONE ke
   - `serve()` :750-766 - the keep's two settings: `SAGUARO_DS4_KEEP_READ` (default on; 0: no keep, and READY says no
     `keepread`) and `SAGUARO_DS4_KEEP_READ_STEP` (default 8192 tokens; 0: the read takes no keep points of its own
     and keeps only the request's marks and its base).
-  - `prompt_piece` - a run is capped at `keep_step` tokens (:1749-1752; `feed`'s `after` arg still tells the model of
-    the prompt up to the next cut), and the read takes its keep point **by progress**: checkpoint 0 where the read
-    first stands at or past the next `keep_at` position (:1822-1828 - the conversation's own slot, no mark-LRU
+  - `prompt_piece` - a run is capped at `keep_step` tokens (:1754-1757; `feed`'s `after` arg still tells the model
+    of the prompt up to the next cut), and the read takes its keep point **by progress**: checkpoint 0 where the
+    read first stands at or past the next `keep_at` position (:1827-1836 - the conversation's own slot, no mark-LRU
     pressure; the old prompt's end it replaces is held as checkpoint 1 by `prompt_begin` :1659), so a run cut short
     by `feed_unit` - the windows path's 16 - does not pay a snapshot of its own, while the whole piece's end still
-    stands behind the run that follows it; and the marks-inside one-run shortcut (:1756-1770) is not taken while the
-    keep splits (:1763) - a run stopped inside keeps nothing of the points it was carrying. `Prompt::run_start`
-    (:1474) records where each run began.
-  - the stopped branch (:1840-1889): `mid = !ok` (stopped inside a run) → `stored = m.restorable(run_start)`, else
+    stands behind the run that follows it; never **inside a picture's span** (`splits_span` on the read's spans,
+    built once before its loop :1740-1744 and weighed again at the landing): as the latest stored point such a keep
+    would be rejected there and hide the deeper points behind it, so the first run end clear of the span takes the
+    point in its place; and the marks-inside one-run shortcut (:1761-1775) is not taken while the keep splits
+    (:1768) - a run stopped inside keeps nothing of the points it was carrying. `Prompt::run_start` (:1474) records
+    where each run began.
+  - the stopped branch (:1846-1894): `mid = !ok` (stopped inside a run) → `stored = m.restorable(run_start)`, else
     the live end at `done`; land via `read_stop_landing` (restore only where the state does not already stand there),
     re-hang the pictures the kept state really holds (`held` as `prompt_end` re-hangs it, at `keep`), `checkpoint(0)`
     at the kept position, and DONE with `reused = keep`. Where there is no landing (nothing stored - a fresh
@@ -84,8 +88,9 @@ compares piecewise against whole reads bit for bit.
 
 ## 3. Files
 
-* `src/ds4/ds4_marks.hpp` - `read_stop_landing` (pure helper).
-* `src/ds4/ds4_main.cpp` - the keep: settings + READY word, run cap, keep checkpoint, `run_start`, stopped branch.
+* `src/ds4/ds4_marks.hpp` - `read_stop_landing` and `splits_span` (pure helpers).
+* `src/ds4/ds4_main.cpp` - the keep: settings + READY word, run cap, keep checkpoint (by progress, clear of the
+  spans), `run_start`/`keep_at`, stopped branch.
 * `tests/ds4_marks_test.cpp` - the helper's checks + the stopped-branch shape as a case; `Conv` grew a
   `restorable()` beside its `restore()`.
 * `scratch/card-test-ds4-keep-read.sh` - the manager's card check (force-added; `scratch/` is ignored, as P124b's

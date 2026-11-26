@@ -1737,6 +1737,11 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
         m.set_cancel(stop_now);
         std::string err;
         bool ok = true, stopped = false;
+        // (the pictures' spans the stopped read must not cut in the middle - its own and those the state holds: no
+        //  keep point stands inside one either, as mark_plan keeps its cuts out of them)
+        std::vector<std::pair<int64_t, int64_t>> spans;
+        for (const Pic& q : P.pics) spans.push_back({q.start, (int64_t) q.len});
+        for (const Pic& x : held) spans.push_back({(int64_t) x.start, (int64_t) x.len});
         while (ok && P.done < total) {
             if (stop_now()) {
                 stopped = true;
@@ -1821,8 +1826,11 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
             }
             // (keepread: the read's own keep point, taken by *progress* and not by run end: checkpoint 0 where the read
             //  first stands at or past `keep_at` - a run cut short by `feed_unit` (windows of 16, `--prefill-chunk 0`)
-            //  is no keep point of its own, while the whole piece's end still stands behind the run that follows it)
-            if (ok && keep_read && keep_step > 0 && P.done < total && P.done >= P.keep_at) {
+            //  is no keep point of its own, while the whole piece's end still stands behind the run that follows it.
+            //  None inside a picture's span: as the latest stored point it would be rejected at the landing, hiding
+            //  the deeper ones behind it - the next run end clear of the span takes the point in its place)
+            if (ok && keep_read && keep_step > 0 && P.done < total && P.done >= P.keep_at &&
+                !maya::ds4::splits_span((int64_t) P.done, spans)) {
                 m.checkpoint(0);
                 P.keep_at = P.done + keep_step;
             }
@@ -1846,9 +1854,6 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
             //  rest, exactly as it shares a finished turn's conversation)
             if (keep_read) {
                 const bool mid = !ok;   // (stopped inside a run: past its start the state of a stopped run is not usable)
-                std::vector<std::pair<int64_t, int64_t>> spans;
-                for (const Pic& q : P.pics) spans.push_back({q.start, (int64_t) q.len});
-                for (const Pic& x : held) spans.push_back({(int64_t) x.start, (int64_t) x.len});
                 const int64_t stored = m.restorable((int64_t) (mid ? P.run_start : P.done));
                 const int64_t land = maya::ds4::read_stop_landing(mid, (int64_t) P.done, stored, (int64_t) from, spans);
                 const bool live = !mid && land == (int64_t) P.done;   // (the state stands there: the last run left it)

@@ -18,6 +18,7 @@ using maya::ds4::mark_victim;
 using maya::ds4::MarkAt;
 using maya::ds4::MarkUse;
 using maya::ds4::read_stop_landing;
+using maya::ds4::splits_span;
 using maya::ds4::TailCost;
 
 namespace {
@@ -183,6 +184,13 @@ int main() {
     assert(mark_victim({{10, false, 1}, {20, false, 2}, {30, false, 3}}, 2) == 2);
     assert(mark_victim({{5, true, 0}, {10, false, 1}, {20, false, 2}, {30, false, 9}, {40, false, 4}}, 2) == 4);
     assert(mark_victim({{10, false, 1}, {20, false, 2}}, 2) == 0);   // (only early ones: the LRU of them)
+
+    // splits_span (P124k): where a keep point may not stand - inside a picture's rows; its start and its end are fine
+    const std::vector<std::pair<int64_t, int64_t>> one_pic = {{100, 50}};
+    assert(splits_span(101, one_pic) && splits_span(149, one_pic));
+    assert(!splits_span(99, one_pic) && !splits_span(100, one_pic));
+    assert(!splits_span(150, one_pic) && !splits_span(151, one_pic));
+    assert(!splits_span(120, {}));
 
     // read_stop_landing (P124k): where a read a STOP ends keeps its conversation - the live piece end between two runs,
     // the deepest point stored inside one, never what a stopped run had consumed; pictures are not cut in their span

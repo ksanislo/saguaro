@@ -117,6 +117,14 @@ struct TailCost {
     }
 };
 
+// does the position `x` cut one of the picture spans (`spans`: start, length)?  A span is stored whole or not at
+// all (the model's Check holds no partial rows), so no point a stopped read may land on stands inside one
+inline bool splits_span(int64_t x, const std::vector<std::pair<int64_t, int64_t>>& spans) {
+    for (const auto& s : spans)
+        if (x > s.first && x < s.first + s.second) return true;
+    return false;
+}
+
 // Where a prompt read that a STOP ends keeps its conversation (P124k, ds4_main's stopped branch).  Candidates, first
 // that answers and splits none of the picture spans wins: `done` - the end of the read's last whole piece, asked for
 // only when the run that was going finished whole (`mid` false: a Stop between two runs leaves the state live there,
@@ -129,14 +137,9 @@ struct TailCost {
 // resets, as without the keep).  Pure logic (tests/ds4_marks_test.cpp).
 inline int64_t read_stop_landing(bool mid, int64_t done, int64_t stored, int64_t from,
                                  const std::vector<std::pair<int64_t, int64_t>>& spans = {}) {
-    const auto splits = [&spans](int64_t x) {
-        for (const auto& s : spans)
-            if (x > s.first && x < s.first + s.second) return true;
-        return false;
-    };
     const int64_t v[3] = {mid ? -1 : done, stored, from};
     for (const int64_t p : v)
-        if (p > 0 && !splits(p)) return p;
+        if (p > 0 && !splits_span(p, spans)) return p;
     return 0;
 }
 
