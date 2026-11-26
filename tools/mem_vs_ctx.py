@@ -232,12 +232,15 @@ def budget_lines(text: str) -> list[str]:
 # ---- the config copy and the run ---------------------------------------------------------------------
 
 def set_context(args: list, context: int) -> list:
-    """--max-context in the engine's args, set to this context (as the server's set_context rewrites it)."""
+    """The context flag in the engine's args, set to this context (as the server's set_context rewrites it).
+    serve/models.py's ctx_flag: a config that names its context --ctx (an ik2 shape) keeps the ONE flag -
+    appending --max-context beside the old --ctx would leave which value wins to the engine's mood."""
     args = list(args)
-    if "--max-context" in args[:-1]:
-        args[args.index("--max-context") + 1] = str(int(context))
+    ctx = "--max-context" if "--max-context" in args[:-1] or "--ctx" not in args[:-1] else "--ctx"
+    if ctx in args[:-1]:
+        args[args.index(ctx) + 1] = str(int(context))
     else:
-        args += ["--max-context", str(int(context))]
+        args += ["--max-context", str(int(context))]         # (neither flag: the canonical name is added)
     return args
 
 

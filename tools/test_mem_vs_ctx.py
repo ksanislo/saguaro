@@ -188,6 +188,14 @@ class BudgetAndConfigTests(unittest.TestCase):
         self.assertEqual(MV.gpu_cards({"gpu": 1}), [1])
         self.assertEqual(MV.gpu_cards({}), [])
 
+    def test_set_context_keeps_the_one_flag_of_a_ctx_config(self):
+        # (serve/models.py's ctx_flag: an ik2 config may name its context --ctx - the copy rewrites that
+        #  flag, it never appends --max-context beside it and leaves the winner to the engine's mood)
+        self.assertEqual(MV.set_context(["--ctx", "131072", "--threads", "8"], 262144),
+                         ["--ctx", "262144", "--threads", "8"])
+        self.assertEqual(MV.set_context(["--max-context", "131072", "--ctx", "1"], 262144),
+                         ["--max-context", "262144", "--ctx", "1"])   # (max-context holds when both sit there)
+
 
 class TableAndVerdictTests(unittest.TestCase):
     @staticmethod
