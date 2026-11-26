@@ -681,8 +681,14 @@ bool g_host_slot = false;   // qsa_set_host_elastic_slots: the --serve --batch s
                             // (P124e manager card test: the slots and their drafters must pin the small start at
                             // load and grow with their conversations, whatever the VRAM ring does)
 bool g_vram_main = false;   // qsa_set_vram_elastic_main: their VRAM pools and pooled keys in slot pools too
+// P124e (round 4, manager card test): qsa_set_vram_elastic - the VRAM half of the host-elastic rule (see the header).
+// Scoped exactly like g_host_main / g_host_slot: on around the conversation holders' states at load, off again after,
+// so a state built anywhere else (the CLI path, every pinned-whole fallback) is carved as today, byte for byte.
+bool g_vram_follow = false;
 bool g_host_prefix = false;   // host_elastic_on's decision: prefix mode instead of pieces (see above)
 std::atomic<bool> g_host_failed{false};   // qsa_host_pin_failed: the last qsa_host_grow ran out of RAM
+std::atomic<bool> g_dev_failed{false};    // P124e: the last qsa_follow_grow ran out of VRAM (qsa_dev_pin_failed)
+std::atomic<bool> g_follow_live{true};    // P124e: off once the load decided to back the context state whole
 // Does registering one step's piece answer cudaHostGetDevicePointer with the piece's own address?  That is what the
 // kernels' one-pointer-per-array arithmetic needs; the attribute is a promise, this is the proof (HIP: unsupported
 // attribute, flat VA nonetheless, P124e on mortar's RX 9070 XT).
@@ -740,6 +746,10 @@ bool host_elastic_on() {
     return on;
 }
 bool host_prefix_mode() { (void) host_elastic_on(); return g_host_prefix; }
+// P124e (round 4): the VRAM half of the rule.  It needs everything the host half needs (the same growth driver, the
+// same give-way-on-RAM pressure) PLUS a card that does virtual memory: where VMM is missing (an old driver, Metal,
+// Windows) nothing follows and every state is carved whole as today - which is also what SAGUARO_KV_HOST_ELASTIC=0
+// means for both halves.  qsa_set_vram_elastic / qsa_vram_follow_wanted are defined with the pools below.
 // SAGUARO_KV_HOST_MIB=N: the K/V host copies pin at most N MiB in all (0: what the OS gives); past it a step fails as
 // when the RAM is out
 uint64_t host_cap() {
@@ -1332,6 +1342,10 @@ struct SlotPool {
     strata::core::VmmRange range;
     std::vector<strata::core::SlotArray> arr;
     int64_t page_size = 0, idx_block = 0;
+    // P124e (round 4, manager card test): a FOLLOW pool - the context-scaled arrays of a streamed state whose VRAM
+    // follows the conversation (qsa_set_vram_elastic).  Its chunks come from the driver (fresh) and the card's relief,
+    // never from the slots' budget, and a trim frees them instead of parking them in it.
+    bool follow = false;
 };
 std::vector<std::unique_ptr<SlotPool>> g_slot_pools;
 struct SlotBudget {
@@ -1474,6 +1488,41 @@ void qsa_slot_budget(int dev, uint64_t& total, uint64_t& free) {
     total = it == g_slot_budget.end() ? 0 : (uint64_t) it->second.total * G;
     free = it == g_slot_budget.end() ? 0 : (uint64_t) it->second.free.size() * G;
 }
+namespace {
+// P124e (round 4): what a fresh chunk of array `a` of pool `p` must HOLD.  Every new chunk arrives zero-filled
+// (a driver's VMM chunk is not guaranteed zero, and the pools have always zeroed explicitly).  A streamed state's
+// page table needs -1 ("not resident", exactly what kv_stream_reset writes) and a ring's the formula `block %
+// n_slots` - both read by the kernels at any live block index, including ones whose chunk was mapped long after
+// the conversation started, so the fill runs on EVERY map path (grow, fresh, follow) for the fresh spans.
+// `fresh`: the newly mapped chunk indices inside the array's span.  Synchronous on `cs`.
+bool follow_fill_locked(SlotPool& p, size_t ai, const std::vector<int64_t>& fresh, cudaStream_t cs = nullptr) {
+    const strata::core::SlotArray& a = p.arr[ai];
+    const uint64_t G = p.range.granularity();
+    for (const int64_t c : fresh)
+        if (cudaMemsetAsync(p.range.base() + (uint64_t) c * G, 0, (size_t) G, cs) != cudaSuccess) return false;
+    if (a.fill == strata::core::SlotArray::kSlotFillZero)
+        return cs == nullptr || cudaStreamSynchronize(cs) == cudaSuccess;
+    // the fresh chunks, consecutive runs of the array's unit span
+    for (size_t i = 0; i < fresh.size();) {
+        size_t j = i;
+        while (j + 1 < fresh.size() && fresh[j + 1] == fresh[j] + 1) ++j;
+        const int64_t u0 = (int64_t) ((uint64_t) fresh[i] * G / a.per_unit);
+        int64_t u1 = (int64_t) ((uint64_t) (fresh[j] + 1) * G / a.per_unit);
+        if (u1 > a.units) u1 = a.units;
+        if (u1 > u0 && a.fill == strata::core::SlotArray::kSlotFillPending &&
+            cudaMemsetAsync(p.range.base() + a.off + (uint64_t) u0 * a.per_unit, 0xFF,
+                            (size_t) (u1 - u0) * a.per_unit, cs) != cudaSuccess)
+            return false;
+        if (u1 > u0 && a.fill == strata::core::SlotArray::kSlotFillRing) {
+            // the ring formula is a kernel: the zeroing above must have landed first (same stream, in order)
+            strata::kernels::kv_ring_fill((int32_t*) (p.range.base() + a.off), u0, u1, a.ring_slots, cs);
+        }
+        i = j + 1;
+    }
+    return cs == nullptr || cudaStreamSynchronize(cs) == cudaSuccess;
+}
+}  // namespace
+
 bool qsa_slots_grow_fresh(const QsaState& st, int64_t cells) {
     if (st.slot_elastic < 0) return true;
     std::lock_guard<std::mutex> lk(g_slot_mu);
@@ -1481,7 +1530,8 @@ bool qsa_slots_grow_fresh(const QsaState& st, int64_t cells) {
     const uint64_t G = p.range.granularity();
     const int dev = p.range.device();
     const strata::core::OnDevice on(dev);
-    for (const auto& a : p.arr) {
+    for (size_t ai = 0; ai < p.arr.size(); ++ai) {
+        const auto& a = p.arr[ai];
         const int64_t c0 = (int64_t) (a.off / G);
         const int64_t c1 = c0 + strata::core::slot_chunks(a, strata::core::slot_units(a, cells, p.page_size, p.idx_block), G);
         std::vector<int64_t> fresh;
@@ -1489,8 +1539,7 @@ bool qsa_slots_grow_fresh(const QsaState& st, int64_t cells) {
             if (!p.range.mapped(c)) fresh.push_back(c);
         if (fresh.empty()) continue;
         if (!p.range.map_range(c0, c1, [dev] { return strata::core::vmm_chunk_new(dev); })) return false;
-        for (const int64_t c : fresh)
-            if (cudaMemset(p.range.base() + (uint64_t) c * G, 0, (size_t) G) != cudaSuccess) return false;
+        if (!follow_fill_locked(p, ai, fresh)) return false;
     }
     return true;
 }
@@ -1512,7 +1561,8 @@ bool qsa_slots_grow(const std::vector<const QsaState*>& states, int64_t cells) {
         if (st->slot_elastic < 0) continue;
         SlotPool& p = *g_slot_pools[(size_t) st->slot_elastic];
         const uint64_t G = p.range.granularity();
-        for (const auto& a : p.arr) {
+        for (size_t ai = 0; ai < p.arr.size(); ++ai) {
+            const auto& a = p.arr[ai];
             const int64_t c0 = (int64_t) (a.off / G);
             const int64_t c1 = c0 + strata::core::slot_chunks(a, strata::core::slot_units(a, cells, p.page_size, p.idx_block), G);
             std::vector<int64_t> fresh;
@@ -1531,15 +1581,15 @@ bool qsa_slots_grow(const std::vector<const QsaState*>& states, int64_t cells) {
                 return false;
             }
             // a chunk taken back from another slot still holds that slot's cells: zeroed, as a new session is
-            for (const int64_t c : fresh)
-                if (cudaMemsetAsync(p.range.base() + (uint64_t) c * G, 0, (size_t) G, b.zero) != cudaSuccess) {
-                    std::fprintf(stderr, "saguaro: elastic slots: clearing a chunk failed: %s\n",
-                                 cudaGetErrorString(cudaGetLastError()));
-                    return false;
-                }
+            // (and a page table's fresh run filled: -1, or the ring formula - P124e)
+            if (!follow_fill_locked(p, ai, fresh, b.zero)) {
+                std::fprintf(stderr, "saguaro: elastic slots: clearing a chunk failed: %s\n",
+                             cudaGetErrorString(cudaGetLastError()));
+                return false;
+            }
         }
     }
-    return cudaStreamSynchronize(b.zero) == cudaSuccess;
+    return true;
 }
 int64_t qsa_slot_trim(const QsaState& st, int64_t cells) {
     if (st.slot_elastic < 0) return 0;
@@ -1554,7 +1604,9 @@ int64_t qsa_slot_trim(const QsaState& st, int64_t cells) {
         const int64_t end = a + 1 < p.arr.size() ? (int64_t) (p.arr[a + 1].off / G) : p.range.chunks();
         for (int64_t c = c1; c < end; ++c)
             if (const strata::core::VmmChunk h = p.range.unmap(c)) {
-                b.free.push_back(h);
+                // a follow pool's chunk is the driver's, not the slots' budget: give it straight back (P124e)
+                if (p.follow) strata::core::vmm_chunk_free(h);
+                else b.free.push_back(h);
                 ++n;
             }
     }
@@ -1573,6 +1625,287 @@ uint64_t qsa_slot_reserved_bytes(const QsaState& st) {
     return (uint64_t) p.range.chunks() * p.range.granularity();
 }
 
+// ---- P124e (round 4, manager card test): THE VRAM HALF OF THE HOST-ELASTIC RULE (see qsa_set_vram_elastic).
+namespace {
+// Every array a follow pool tracks for "backed cells": the pooled rows and the page table.  (The K/V ring arrays,
+// when the same state also runs under SAGUARO_ELASTIC_SLOTS, stay budget-grown as before and are not counted.)
+bool follow_array(const strata::core::SlotArray& a) { return !a.kv || a.fill != 0; }
+int64_t follow_units_cells(const SlotPool& p, const strata::core::SlotArray& a, int64_t units) {
+    if (units <= 0) return 0;
+    return a.kv ? std::min<int64_t>(units, a.units) * p.page_size      // the page table: units are pages
+                : (units - 2) * p.idx_block;                           // pooled rows: row r holds cells < r * 4
+}
+// The start every conversation holds at load: the host copies' step (SAGUARO_KV_HOST_STEP, 32768 cells by default).
+int64_t follow_start_cells() {
+    const int64_t s = qsa_host_step_cells();
+    return s > 0 ? s : 32768;
+}
+// Maps the chunks `cells` cells need in every follow array.  The chunks are the driver's (map_range's own fresh
+// chunks); when the card says no, the card's relief (its expert cache giving way, the plan's take-from-experts in
+// VRAM) is asked ONCE for the whole shortfall and the probe retried.  Fills what it maps; false: the VRAM is not
+// there (mapped-and-filled chunks stay mapped - a page table never reads past its live blocks).
+bool follow_grow_locked(SlotPool& p, int64_t cells) {
+    const uint64_t G = p.range.granularity();
+    const int dev = p.range.device();
+    const strata::core::OnDevice on(dev);
+    int64_t need = 0;
+    for (size_t ai = 0; ai < p.arr.size(); ++ai) {
+        if (!follow_array(p.arr[ai])) continue;
+        const auto& a = p.arr[ai];
+        const int64_t c0 = (int64_t) (a.off / G);
+        const int64_t c1 = c0 + strata::core::slot_chunks(a, strata::core::slot_units(a, cells, p.page_size, p.idx_block), G);
+        for (int64_t c = c0; c < c1; ++c) need += !p.range.mapped(c);
+    }
+    if (need == 0) return true;
+    // can the card hand out `need` chunks right now (the relief asked once for the shortfall when it cannot)?
+    bool room = true;
+    for (int64_t i = 0; i < need && room; ++i) {
+        strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
+        if (h == 0) {
+            vram_relief(dev, (uint64_t) (need - i) * G);
+            h = strata::core::vmm_chunk_new(dev);
+        }
+        if (h == 0) room = false;
+        else strata::core::vmm_chunk_free(h);
+    }
+    if (!room) {
+        g_dev_failed.store(true);
+        return false;
+    }
+    for (size_t ai = 0; ai < p.arr.size(); ++ai) {
+        if (!follow_array(p.arr[ai])) continue;
+        const auto& a = p.arr[ai];
+        const int64_t c0 = (int64_t) (a.off / G);
+        const int64_t c1 = c0 + strata::core::slot_chunks(a, strata::core::slot_units(a, cells, p.page_size, p.idx_block), G);
+        std::vector<int64_t> fresh;
+        for (int64_t c = c0; c < c1; ++c)
+            if (!p.range.mapped(c)) fresh.push_back(c);
+        if (fresh.empty()) continue;
+        if (!p.range.map_range(c0, c1, [] { return (strata::core::VmmChunk) 0; })) {
+            std::fprintf(stderr, "saguaro: the context's device state could not be mapped on CUDA%d: %s\n", dev,
+                         cudaGetErrorString(cudaGetLastError()));
+            for (const int64_t c : fresh)   // what the probe promised but the map still could not take
+                if (const strata::core::VmmChunk h = p.range.unmap(c)) strata::core::vmm_chunk_free(h);
+            g_dev_failed.store(true);
+            return false;
+        }
+        if (!follow_fill_locked(p, ai, fresh, nullptr)) {
+            std::fprintf(stderr, "saguaro: filling the context's device state failed on CUDA%d\n", dev);
+            g_dev_failed.store(true);
+            return false;
+        }
+    }
+    g_dev_failed.store(false);
+    return true;
+}
+}  // namespace
+
+bool qsa_vram_follow_wanted() {
+#ifndef _WIN32
+    // the host half on (the same rule, the same growth driver), KV streaming (the ring is what makes the context
+    // arrays the only context-scaled ones left), and a card that does virtual memory
+    return g_follow_live && g_vram_follow && g_kv_resident > 0 && host_elastic_on() && strata::core::vmm_available();
+#else
+    return false;
+#endif
+}
+void qsa_vram_follow_off() { g_follow_live.store(false); }   // (the pools stay as they are: what is backed stays backed)
+bool qsa_vram_follow_active() {
+    if (!g_follow_live.load()) return false;
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    for (const auto& p : g_slot_pools)
+        if (p->follow) return true;
+    return false;
+}
+bool qsa_state_follow(const QsaState& st) {
+    if (st.follow_elastic < 0) return false;
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    return g_slot_pools[(size_t) st.follow_elastic]->follow && g_follow_live.load();
+}
+// P124e: how far a streamed state's page table may be WRITTEN now (a follow pool's is -1-filled chunk by chunk;
+// kv_stream_reset must not touch the unmapped tail).  All of it for a carved table.
+int64_t qsa_table_backed_pages(const QsaState& st) {
+    if (st.follow_elastic < 0) return st.n_pages;
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    const SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+    int64_t lim = st.n_pages;
+    for (size_t ai = 0; ai < p.arr.size(); ++ai)
+        if (p.arr[ai].kv && p.arr[ai].fill != 0)
+            lim = std::min(lim, strata::core::slot_units_in(p.arr[ai], slot_mapped_prefix(p, ai),
+                                                            p.range.granularity()));
+    return lim;
+}
+int64_t qsa_follow_backed_cells(const QsaState& st) {
+    if (st.follow_elastic < 0 || !g_follow_live.load()) return std::numeric_limits<int64_t>::max();
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+    if (!p.follow) return std::numeric_limits<int64_t>::max();
+    int64_t n = std::numeric_limits<int64_t>::max();
+    for (size_t ai = 0; ai < p.arr.size(); ++ai) {
+        if (!follow_array(p.arr[ai])) continue;
+        n = std::min(n, follow_units_cells(p, p.arr[ai],
+                                           strata::core::slot_units_in(p.arr[ai], slot_mapped_prefix(p, ai),
+                                                                       p.range.granularity())));
+    }
+    return n;
+}
+bool qsa_follow_grow(const QsaState& st, int64_t cells) {
+    if (st.follow_elastic < 0 || !g_follow_live.load()) return true;
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+    if (!p.follow) return true;
+    return follow_grow_locked(p, std::max<int64_t>(cells, follow_start_cells()));
+}
+uint64_t qsa_follow_trim(const QsaState& st, int64_t cells) {
+    if (st.follow_elastic < 0 || !g_follow_live.load()) return 0;
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+    if (!p.follow) return 0;
+    const int64_t keep = std::max<int64_t>(cells, follow_start_cells());
+    const uint64_t G = p.range.granularity();
+    const strata::core::OnDevice on(p.range.device());
+    uint64_t freed = 0;
+    for (size_t ai = 0; ai < p.arr.size(); ++ai) {
+        if (!follow_array(p.arr[ai])) continue;
+        const auto& a = p.arr[ai];
+        const int64_t c0 = (int64_t) (a.off / G);
+        const int64_t c1 = c0 + strata::core::slot_chunks(a, strata::core::slot_units(a, keep, p.page_size, p.idx_block), G);
+        const int64_t end = ai + 1 < p.arr.size() ? (int64_t) (p.arr[ai + 1].off / G) : p.range.chunks();
+        for (int64_t c = c1; c < end; ++c)
+            if (const strata::core::VmmChunk h = p.range.unmap(c)) {
+                strata::core::vmm_chunk_free(h);
+                freed += G;
+            }
+    }
+    return freed;
+}
+bool qsa_follow_back_whole(const QsaState& st) {
+    if (st.follow_elastic < 0) return true;
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+    return !p.follow || follow_grow_locked(p, st.max_cells);
+}
+bool qsa_dev_pin_failed() { return g_dev_failed.load(); }
+uint64_t qsa_follow_reserved_bytes(const QsaState& st) {
+    if (st.follow_elastic < 0) return 0;
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    const SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+    if (!p.follow) return 0;
+    uint64_t n = 0;
+    for (const auto& a : p.arr)
+        if (follow_array(a)) n += (uint64_t) a.units * a.per_unit;
+    return n;
+}
+uint64_t qsa_follow_backed_bytes() {
+    std::lock_guard<std::mutex> lk(g_slot_mu);
+    const uint64_t G = strata::core::vmm_granularity();
+    uint64_t n = 0;
+    for (const auto& p : g_slot_pools) {
+        if (!p->follow) continue;
+        for (size_t ai = 0; ai < p->arr.size(); ++ai) {
+            if (!follow_array(p->arr[ai])) continue;
+            n += (uint64_t) slot_mapped_prefix(*p, ai) * (p->range.granularity() ? p->range.granularity() : G);
+        }
+    }
+    return n;
+}
+
+// The session's block-score scratch (`cell_scores`, one fp32 per cell of the selection): with the follow rule it
+// lives in a VMM range of its own instead of the buffers arena.  P124e (round 4, manager card test): it is the
+// fourth --max-context-scaled device allocation of a session (1 MiB at 262144, 4 MiB at 1048576 - per full
+// session).  The kernels touch cells below the live count only (qsa_index_kernel's `b > n_bid` return, the
+// selection writers' `b0 + j < n_bid` guards), so an unmapped tail is never read; it is scratch - nothing to fill.
+namespace {
+struct ScoresPool {
+    strata::core::VmmRange range;
+    int64_t unit = 4;   // bytes per cell
+};
+std::vector<std::unique_ptr<ScoresPool>> g_scores_pools;
+std::mutex g_scores_mu;
+bool scores_grow_locked(ScoresPool& sp, int64_t cells, bool ask_relief) {
+    const uint64_t G = sp.range.granularity();
+    const int dev = sp.range.device();
+    const strata::core::OnDevice on(dev);
+    const int64_t c1 = (int64_t) (((uint64_t) std::max<int64_t>(cells, 1) * sp.unit + G - 1) / G);
+    int64_t need = 0;
+    for (int64_t c = 0; c < c1; ++c) need += !sp.range.mapped(c);
+    if (need == 0) return true;
+    if (ask_relief) {   // the driver first, the card's relief once when it says no (as the follow pools)
+        bool room = true;
+        for (int64_t i = 0; i < need && room; ++i) {
+            strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
+            if (h == 0) {
+                vram_relief(dev, (uint64_t) (need - i) * G);
+                h = strata::core::vmm_chunk_new(dev);
+            }
+            if (h == 0) room = false;
+            else strata::core::vmm_chunk_free(h);
+        }
+        if (!room) {
+            g_dev_failed.store(true);
+            return false;
+        }
+    }
+    if (!sp.range.map_range(0, c1, [] { return (strata::core::VmmChunk) 0; })) {
+        g_dev_failed.store(true);
+        return false;
+    }
+    g_dev_failed.store(false);
+    return true;
+}
+}  // namespace
+
+// The scratch's addresses, before qsa_buffers_init carves the arena around it (which skips what lives here).
+// -1: not made (the caller carves the scratch whole, as it always did).
+int32_t qsa_scores_make(int64_t cells) {
+    auto sp = std::make_unique<ScoresPool>();
+    if (!sp->range.reserve((uint64_t) cells * (uint64_t) sp->unit) ||
+        !scores_grow_locked(*sp, follow_start_cells(), false)) return -1;
+    std::lock_guard<std::mutex> lk(g_scores_mu);
+    g_scores_pools.push_back(std::move(sp));
+    return (int32_t) g_scores_pools.size() - 1;
+}
+float* qsa_scores_base(int32_t i) {
+    if (i < 0) return nullptr;
+    std::lock_guard<std::mutex> lk(g_scores_mu);
+    return (float*) g_scores_pools[(size_t) i]->range.base();
+}
+bool qsa_scores_grow(int32_t i, int64_t cells) {
+    if (i < 0 || !g_follow_live.load()) return true;
+    std::lock_guard<std::mutex> lk(g_scores_mu);
+    return scores_grow_locked(*g_scores_pools[(size_t) i], cells, true);
+}
+uint64_t qsa_scores_trim(int32_t i, int64_t cells) {
+    if (i < 0 || !g_follow_live.load()) return 0;
+    std::lock_guard<std::mutex> lk(g_scores_mu);
+    ScoresPool& sp = *g_scores_pools[(size_t) i];
+    const uint64_t G = sp.range.granularity();
+    const int64_t keep = (int64_t) (((uint64_t) std::max<int64_t>(cells, follow_start_cells()) * sp.unit + G - 1) / G);
+    const strata::core::OnDevice on(sp.range.device());
+    uint64_t freed = 0;
+    for (int64_t c = keep; c < sp.range.chunks(); ++c)
+        if (const strata::core::VmmChunk h = sp.range.unmap(c)) {
+            strata::core::vmm_chunk_free(h);
+            freed += G;
+        }
+    return freed;
+}
+bool qsa_scores_back_whole(int32_t i, int64_t cells) {
+    if (i < 0) return true;
+    std::lock_guard<std::mutex> lk(g_scores_mu);
+    return scores_grow_locked(*g_scores_pools[(size_t) i], cells, false);
+}
+uint64_t qsa_scores_reserved_bytes(int32_t i) {
+    if (i < 0) return 0;
+    std::lock_guard<std::mutex> lk(g_scores_mu);
+    return (uint64_t) g_scores_pools[(size_t) i]->range.chunks() * g_scores_pools[(size_t) i]->range.granularity();
+}
+uint64_t qsa_scores_backed_bytes(int32_t i) {
+    if (i < 0) return 0;
+    std::lock_guard<std::mutex> lk(g_scores_mu);
+    return (uint64_t) g_scores_pools[(size_t) i]->range.mapped_count() * g_scores_pools[(size_t) i]->range.granularity();
+}
+
 void qsa_set_kv_resident(int64_t cells) { g_kv_resident = cells > 0 ? cells : 0; }
 int64_t qsa_kv_resident() { return g_kv_resident; }
 int64_t qsa_kv_resident_min() { return 20480; }
@@ -1587,6 +1920,15 @@ uint64_t qsa_kv_bytes_per_cell(const ModelGeometry& g) {
     return per_page / (uint64_t) (s.page_size > 0 ? s.page_size : 1);
 }
 void qsa_set_vram_elastic_main(bool on) { g_vram_main = on; }
+// P124e (round 4): the follow rule's scope switch (declared in the header, defined here at namespace scope; the
+// state builder reads it through qsa_vram_follow_wanted, which also checks streaming, the host rule and VMM).
+void qsa_set_vram_elastic(bool on) {
+#ifndef _WIN32
+    g_vram_follow = on;
+#else
+    (void) on;
+#endif
+}
 bool qsa_host_pin_failed() {
 #ifndef _WIN32
     return g_host_failed.load();
@@ -1642,7 +1984,11 @@ RopeGrow* yarn_of(const float* cos_tab) {
 constexpr int64_t kRopeBase = 262144, kRopeMargin = 4096;   // backed at load; past the cells asked for (drafts)
 bool rope_grow_on(int64_t max_cells) {
     static const bool env = [] { const char* v = std::getenv("SAGUARO_ROPE_GROW"); return v == nullptr || v[0] != '0'; }();
-    return env && g_vram_main && max_cells > kRopeBase && strata::core::vmm_available();
+    // P124e (round 4): the same rule as the host copies and the follow pools - the table (256 B per cell of the
+    // context: 256 MiB at 1M, 64 MiB at 262K, once per session) is not something --max-context may pin at load.
+    // Its addresses are reserved for the whole context and the first 262144 positions (the trained context, the
+    // same bytes the carve took at 262144) are backed; qsa_rope_grow maps more as a conversation needs them.
+    return env && (g_vram_main || qsa_vram_follow_wanted()) && max_cells > kRopeBase && strata::core::vmm_available();
 }
 RopeGrow* rope_grow_of(const float* cos_tab) {
     for (auto& r : g_rope_grow)
@@ -1690,8 +2036,22 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
     const int dev = r->cos.device();
     const int64_t need = rope_need(*r, cells);
     std::vector<strata::core::VmmChunk> got;
-    if (qsa_slot_budget_take(dev, need, got) < need) {   // all or nothing, as the slots' K/V
-        for (const strata::core::VmmChunk h : got) qsa_slot_budget_give(dev, h);
+    int64_t from_budget = 0;
+    if (need > 0) from_budget = qsa_slot_budget_take(dev, need, got);   // (what the budget has; a solo card has none)
+    // P124e (round 4): the rest from the driver, its relief (the card's expert cache) asked once when it says no -
+    // the same source the follow pools grow from.  The budget's own chunks go back if the whole grow cannot run.
+    for (int64_t i = from_budget; i < need; ++i) {
+        strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
+        if (h == 0) {
+            vram_relief(dev, (uint64_t) (need - i) * r->cos.granularity());
+            h = strata::core::vmm_chunk_new(dev);
+        }
+        if (h == 0) break;
+        got.push_back(h);
+    }
+    if ((int64_t) got.size() < need) {
+        for (size_t i = (size_t) from_budget; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);
+        for (size_t i = 0; i < (size_t) from_budget; ++i) qsa_slot_budget_give(dev, got[i]);
         return false;
     }
     const strata::core::OnDevice on(dev);
@@ -1867,7 +2227,7 @@ bool qsa_rope_move(const QsaShapes& s, const std::vector<std::pair<const QsaStat
                                 cs) != cudaSuccess)
                 ok = false;
         }
-        if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, cs);
+        if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, cs, qsa_table_backed_pages(st));
         ok = ok && cudaStreamSynchronize(cs) == cudaSuccess;
     }
     cudaFreeHost(tab);
@@ -1882,25 +2242,34 @@ float qsa_rope_yarn_spare_scale() {
 }
 
 uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_rope, int64_t ring_cells,
-                         bool elastic_slot) {
+                         bool elastic_slot, bool follow) {
     const QsaShapes s = qsa_shapes(g);
     const KvPlan p = kv_plan(s, max_cells, ring_cells);
-    const uint64_t G = elastic_slot || (g_vram_main && ring_cells == 0) ? strata::core::vmm_granularity() : 0;
+    const uint64_t gran = strata::core::vmm_granularity();
+    // P124e (round 4): `follow` - this state's context-scaled arrays (page table, pooled keys) in a VMM range of
+    // their own, backed for the start step only (qsa_state_init builds it; the session fits grow it).  A streamed
+    // state only: a mode-0 (fully resident) table is the identity the whole context needs, and its pools are the
+    // ring's own business; the rule exists for what --kv-resident streams out of VRAM.
+    const bool foll = p.mode != 0 && (follow || qsa_vram_follow_wanted());
+    const uint64_t G = elastic_slot || (g_vram_main && ring_cells == 0) ? gran : 0;
+    const uint64_t FG = foll ? gran : 0;
+    const bool pt_pool = FG > 0 && strata::core::slot_array_elastic((uint64_t) p.pages * 4, FG);
+    const bool rows_pool = strata::core::slot_array_elastic((uint64_t) p.pooled_rows * s.idx_dim * 4,
+                                                            G > FG ? G : FG);
     uint64_t n = 0;
     if (G > 0) {   // an elastic slot: only the arrays that stay carved (qsa_state_init)
         const bool hybrid = g_kv_hybrid && ring_cells <= 0;
         for (const uint64_t b : kv_per_slot(s, hybrid, !hybrid && g_kv_q4, !hybrid && g_kv_int8 && !g_kv_q4))
             if (!strata::core::slot_array_elastic((uint64_t) p.slots * b, G)) n += align_up16((uint64_t) p.slots * b);
         n += 64 + 4 * 16;
-    } else if (!(g_kv_elastic && p.mode == 0))   // the elastic K/V's pools are in their own VMM range
+    } else if (!(g_kv_elastic && p.mode == 0))
         n += kv_pool_bytes(s, p.slots, g_kv_hybrid && ring_cells <= 0,
                            g_kv_int8 || g_kv_hybrid) + 4 * 16;   // K/V pools (the VRAM slots)
-    n += (uint64_t) p.pages * 4;                                               // page_table
+    if (!pt_pool) n += (uint64_t) p.pages * 4;                               // page_table (else in the follow pool)
     if (p.mode == 1) n += strata::kernels::kv_stream_map_bytes(p.slots) + 6 * 16;   // the residency map
     n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;                         // tail
     n += (uint64_t) s.idx_dim * 4;                                             // dead
-    if (!strata::core::slot_array_elastic((uint64_t) p.pooled_rows * s.idx_dim * 4, G))
-        n += (uint64_t) p.pooled_rows * s.idx_dim * 4;                         // pooled
+    if (!rows_pool) n += (uint64_t) p.pooled_rows * s.idx_dim * 4;             // pooled
     n += 16;                                                                   // block_pos
     if (with_rope && !rope_grow_on(max_cells)) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;   // cos + sin tables
     n += strata::kernels::qsa_step_bytes() + 16;                               // counts and aligned attention status
@@ -1909,7 +2278,8 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
 }
 
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
-                        const QsaState* share_rope, int64_t ring_cells, bool elastic_slot, bool host_elastic) {
+                        const QsaState* share_rope, int64_t ring_cells, bool elastic_slot, bool host_elastic,
+                        bool follow) {
     const QsaShapes s = qsa_shapes(g);
     const KvPlan p = kv_plan(s, max_cells, ring_cells);
     const int64_t pages = p.pages;
@@ -1931,6 +2301,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     st.kv_elastic = -1;
     st.slot_elastic = -1;
     st.host_elastic = -1;
+    st.follow_elastic = -1;   // P124e round 4
     // the pool arrays' pointers, in kv_per_slot's order
     auto assign = [&st](uint8_t* const* a) {
         if (st.kv_hybrid) { st.k_q = (int8_t*) a[0]; st.k_scale = (uint16_t*) a[1]; st.v_q4 = a[2]; }
@@ -1943,20 +2314,31 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         } else { st.k_pool = (uint16_t*) a[0]; st.v_pool = (uint16_t*) a[1]; }
     };
     // as qsa_state_bytes decided (a solo session's state under qsa_set_vram_elastic_main too: session_vram_fit)
-    const uint64_t slot_G = elastic_slot || (g_vram_main && ring_cells == 0) ? strata::core::vmm_granularity() : 0;
+    const uint64_t gran = strata::core::vmm_granularity();
+    const bool foll = p.mode != 0 && (follow || qsa_vram_follow_wanted());   // P124e round 4: streamed states only
+    const uint64_t slot_G = elastic_slot || (g_vram_main && ring_cells == 0) ? gran : 0;
+    const uint64_t fG = foll ? gran : 0;
+    const bool rows_b = slot_G > 0 && strata::core::slot_array_elastic((uint64_t) p.pooled_rows * s.idx_dim * 4, slot_G);
+    const bool rows_f = !rows_b && fG > 0 && strata::core::slot_array_elastic((uint64_t) p.pooled_rows * s.idx_dim * 4, fG);
+    const bool pt_f = fG > 0 && strata::core::slot_array_elastic((uint64_t) pages * 4, fG);
     std::unique_ptr<SlotPool> spool;
-    std::vector<int> in_range;   // per pool array (then the pooled rows, last): its index in spool->arr, or -1
+    std::unique_ptr<SlotPool> fpool;   // P124e: the follow pool (page table, pooled keys)
+    int rows_idx = -1;                 // the pooled rows' index in spool->arr (the budget pool), when it is there
+    int f_rows_idx = -1, f_pt_idx = -1;   // ... and in the follow pool
     if (slot_G > 0) {
         spool = std::make_unique<SlotPool>();
         spool->page_size = s.page_size;
         spool->idx_block = s.idx_block;
-        auto add = [&](uint64_t per, int64_t units, bool kv) {
-            if (!strata::core::slot_array_elastic((uint64_t) units * per, slot_G)) { in_range.push_back(-1); return; }
+        std::vector<int> in_range;   // per kv pool array: its index in spool->arr, or -1
+        auto add = [&](uint64_t per, int64_t units, bool kv, int fill = 0, int64_t ring = 0) {
+            if (!strata::core::slot_array_elastic((uint64_t) units * per, slot_G)) { in_range.push_back(-1); return -1; }
             in_range.push_back((int) spool->arr.size());
-            spool->arr.push_back({per, units, kv, 0});
+            strata::core::SlotArray a{per, units, kv, 0, fill, ring};
+            spool->arr.push_back(a);
+            return (int) spool->arr.size() - 1;
         };
         for (const uint64_t b : kv_per_slot(s, st.kv_hybrid, st.kv_q4, st.kv_int8)) add(b, p.slots, true);
-        add((uint64_t) s.idx_dim * 4, p.pooled_rows, false);
+        rows_idx = add((uint64_t) s.idx_dim * 4, p.pooled_rows, false);
         if (!spool->arr.empty() && !spool->range.reserve(strata::core::slot_layout(spool->arr, slot_G))) {
             std::fprintf(stderr, "saguaro: elastic slots: reserving a slot state's addresses failed\n");
             return 0;
@@ -2006,7 +2388,33 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         st.k_pool = c.take<uint16_t>(rows * s.head_dim);
         st.v_pool = c.take<uint16_t>(rows * s.head_dim);
     }
-    st.page_table = c.take<int32_t>((uint64_t) pages);
+    if (rows_f || pt_f) {
+        // P124e (round 4): the state's context-scaled arrays in a follow pool: addresses for the whole --max-context,
+        // the START step's physical VRAM (mapped just below), the rest as the conversation grows (qsa_follow_grow,
+        // driven from the session's host-copy fits).  A fresh chunk arrives filled (pending / ring formula).
+        fpool = std::make_unique<SlotPool>();
+        fpool->page_size = s.page_size;
+        fpool->idx_block = s.idx_block;
+        fpool->follow = true;
+        if (rows_f) {
+            f_rows_idx = (int) fpool->arr.size();
+            fpool->arr.push_back({(uint64_t) s.idx_dim * 4, p.pooled_rows, false, 0,
+                                  strata::core::SlotArray::kSlotFillZero, 0});
+        }
+        if (pt_f) {
+            f_pt_idx = (int) fpool->arr.size();
+            fpool->arr.push_back({4, pages, true, 0,
+                                  p.mode == 2 ? strata::core::SlotArray::kSlotFillRing
+                                              : strata::core::SlotArray::kSlotFillPending,
+                                  p.slots});
+        }
+        if (!fpool->range.reserve(strata::core::slot_layout(fpool->arr, fG))) {
+            std::fprintf(stderr, "saguaro: reserving a state's context device addresses failed\n");
+            return 0;
+        }
+    }
+    st.page_table = f_pt_idx >= 0 ? (int32_t*) (fpool->range.base() + fpool->arr[(size_t) f_pt_idx].off)
+                                  : c.take<int32_t>((uint64_t) pages);
     st.n_pages = pages;
     st.max_cells = max_cells;
     st.map = strata::kernels::KvStreamMap{};
@@ -2024,7 +2432,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     st.idx_tail = c.take<float>((uint64_t) (s.idx_block - 1) * s.idx_dim);
     st.idx_dead = c.take<float>((uint64_t) s.idx_dim);
     st.idx_pooled_rows = p.pooled_rows;
-    if (spool && in_range.back() >= 0) st.idx_pooled = (float*) (spool->range.base() + spool->arr[(size_t) in_range.back()].off);
+    if (rows_idx >= 0) st.idx_pooled = (float*) (spool->range.base() + spool->arr[(size_t) rows_idx].off);
+    else if (f_rows_idx >= 0) st.idx_pooled = (float*) (fpool->range.base() + fpool->arr[(size_t) f_rows_idx].off);
     else st.idx_pooled = c.take<float>((uint64_t) p.pooled_rows * s.idx_dim);
     st.idx_block_pos = c.take<int32_t>(1);
     bool rope_grown = false;
@@ -2162,20 +2571,31 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     }
     // the page table starts as the IDENTITY, which is the simplest legal mapping and what a caller that does
     // not page at all wants; a streamed state starts with nothing resident, a ring at `block % n_slots`.
+    // (P124e: a pooled page table is written only where it is mapped - the fresh chunks' fill (-1 / the ring
+    // formula) covers the start step below, and nothing reads an entry before its block is live.)
     if (p.mode == 0) {
         std::vector<int32_t> tab((size_t) pages);
         for (int64_t i = 0; i < pages; ++i) tab[(size_t) i] = (int32_t) i;
         cudaMemcpy(st.page_table, tab.data(), tab.size() * 4, cudaMemcpyHostToDevice);
     } else if (p.mode == 1) {
-        strata::kernels::kv_stream_reset(st.map, nullptr);
+        strata::kernels::kv_stream_reset(st.map, nullptr, pt_f ? 0 : pages);
     } else {
-        strata::kernels::kv_ring_table(st.page_table, pages, p.slots, nullptr);
+        strata::kernels::kv_ring_table(st.page_table, pt_f ? 0 : pages, p.slots, nullptr);
     }
     strata::core::device_sync();
     if (spool && !spool->arr.empty()) {   // nothing backed yet: qsa_slots_grow, from the device's slot budget
         std::lock_guard<std::mutex> lk(g_slot_mu);
         st.slot_elastic = (int32_t) g_slot_pools.size();
         g_slot_pools.push_back(std::move(spool));
+    }
+    if (fpool) {   // P124e: registered as a follow pool, and its start step backed now from new chunks
+        std::lock_guard<std::mutex> lk(g_slot_mu);
+        st.follow_elastic = (int32_t) g_slot_pools.size();
+        g_slot_pools.push_back(std::move(fpool));
+        if (!follow_grow_locked(*g_slot_pools[(size_t) st.follow_elastic], follow_start_cells())) {
+            std::fprintf(stderr, "saguaro: KV streaming: backing a state's first context cells failed\n");
+            return 0;
+        }
     }
     // a solo session's state (qsa_set_vram_elastic_main): its first cells now, before anything at load uses it
     if (!elastic_slot && st.slot_elastic >= 0 && !qsa_slots_grow_fresh(st, 1)) {
@@ -2191,11 +2611,21 @@ void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
     // an elastic state zeroes what is mapped (the rest is zeroed when it is mapped)
     int64_t live_slots = st.kv_elastic >= 0 ? pool_slots_mapped(*g_pools[(size_t) st.kv_elastic]) : st.n_slots;
     int64_t pooled_rows = st.idx_pooled_rows;
+    int64_t table_pages = st.n_pages;   // P124e: a follow pool's page table is written only where it is mapped
     if (st.slot_elastic >= 0) {
         std::lock_guard<std::mutex> lk(g_slot_mu);
         const SlotPool& p = *g_slot_pools[(size_t) st.slot_elastic];
         live_slots = slot_units_mapped(p, true, st.n_slots);
         pooled_rows = slot_units_mapped(p, false, pooled_rows);
+    }
+    if (st.follow_elastic >= 0) {
+        std::lock_guard<std::mutex> lk(g_slot_mu);
+        const SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
+        for (size_t ai = 0; ai < p.arr.size(); ++ai) {
+            const int64_t u = strata::core::slot_units_in(p.arr[ai], slot_mapped_prefix(p, ai), p.range.granularity());
+            if (!p.arr[ai].kv) pooled_rows = std::min(pooled_rows, u);
+            else table_pages = std::min(table_pages, u);
+        }
     }
     const size_t rows = (size_t) live_slots * s.n_head_kv * s.page_size;
     if (st.kv_hybrid) {
@@ -2217,7 +2647,7 @@ void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
     // A streamed state starts over with nothing resident. Its host copy is not cleared (GBs over PCIe per new
     // conversation): no reader names a cell before this sequence has written it, and a block copied in whole
     // carries the unwritten cells past the end, which nothing reads.
-    if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, stream);
+    if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, stream, table_pages);
     cudaMemsetAsync(st.idx_tail, 0, (size_t) (s.idx_block - 1) * s.idx_dim * 4, cs);
     cudaMemsetAsync(st.idx_dead, 0, (size_t) s.idx_dim * 4, cs);
     cudaMemsetAsync(st.idx_pooled, 0, (size_t) pooled_rows * s.idx_dim * 4, cs);
@@ -2242,7 +2672,10 @@ void qsa_kv_resolve(const QsaState& st, const ModelGeometry& g, const int32_t* i
 
 uint64_t qsa_buffers_bytes(const ModelGeometry& g, int64_t max_cells) {    const QsaShapes s = qsa_shapes(g);    const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);    uint64_t n = 0;    n += (uint64_t) q8k_bytes(g.n_embd);    n += (uint64_t) (g.n_embd / 32) * 34;
 // block_q8_0
-n += (uint64_t) g.n_embd * 2;    n += (uint64_t) g.n_head * 2 * g.head_dim * 4;    n += (uint64_t) g.n_head * g.head_dim * 4;    n += (uint64_t) g.n_head_kv * g.head_dim * 4 * 2;    n += (uint64_t) g.idx_key_dim * 4;    n += (uint64_t) g.idx_q_heads * g.idx_key_dim * 4;    n += (uint64_t) max_cells * 4;    n += (uint64_t) cap * 4;    n += (uint64_t) cap * g.n_head_kv * g.head_dim * 2 * 2;    n += (uint64_t) g.n_head * g.head_dim * 4;
+n += (uint64_t) g.n_embd * 2;    n += (uint64_t) g.n_head * 2 * g.head_dim * 4;    n += (uint64_t) g.n_head * g.head_dim * 4;    n += (uint64_t) g.n_head_kv * g.head_dim * 4 * 2;    n += (uint64_t) g.idx_key_dim * 4;    n += (uint64_t) g.idx_q_heads * g.idx_key_dim * 4;    // P124e (round 4): with the rule on, the block-score scratch (one fp32 per cell) lives in a follow range of
+    // its own (session_init makes it before carving this arena) - not one more thing --max-context pins at load.
+    if (!qsa_vram_follow_wanted()) n += (uint64_t) max_cells * 4;
+    n += (uint64_t) cap * 4;    n += (uint64_t) cap * g.n_head_kv * g.head_dim * 2 * 2;    n += (uint64_t) g.n_head * g.head_dim * 4;
 // attn
 n += (uint64_t) g.n_head * g.head_dim * 2;
 // attn16
@@ -2253,7 +2686,7 @@ n += (uint64_t) q8k_bytes(g.n_head * g.head_dim);
 n += strata::kernels::qsa_decode_attn_scratch_floats(cap, s) * 4 + 16;
 // attn_scratch
 return align_up16(n) + 256;}
-uint64_t qsa_buffers_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaBuffers& b) {    const QsaShapes s = qsa_shapes(g);    const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);    Cursor c{(uint8_t*) base};    b.x_q8k = c.take_bytes(q8k_bytes(g.n_embd));    b.x_q8_0 = c.take_bytes((uint64_t) (g.n_embd / 32) * 34);    b.x_bf16 = c.take<uint16_t>((uint64_t) g.n_embd);    b.q_full = c.take<float>((uint64_t) g.n_head * 2 * g.head_dim);    b.qcur = c.take<float>((uint64_t) g.n_head * g.head_dim);    b.kcur = c.take<float>((uint64_t) g.n_head_kv * g.head_dim);    b.vcur = c.take<float>((uint64_t) g.n_head_kv * g.head_dim);    b.idx_raw = c.take<float>((uint64_t) g.idx_key_dim);    b.q_idx = c.take<float>((uint64_t) g.idx_q_heads * g.idx_key_dim);    b.cell_scores = c.take<float>((uint64_t) max_cells);    b.ids = c.take<int32_t>((uint64_t) cap);    b.k_scratch = c.take<uint16_t>((uint64_t) cap * g.n_head_kv * g.head_dim);    b.v_scratch = c.take<uint16_t>((uint64_t) cap * g.n_head_kv * g.head_dim);    b.attn = c.take<float>((uint64_t) g.n_head * g.head_dim);    b.attn16 = c.take<uint16_t>((uint64_t) g.n_head * g.head_dim);    b.attn32 = c.take<float>((uint64_t) g.n_head * g.head_dim);    b.attn_q8k = c.take_bytes(q8k_bytes(g.n_head * g.head_dim));    b.attn_scratch = c.take<float>(strata::kernels::qsa_decode_attn_scratch_floats(cap, s));    return c.used;}
+uint64_t qsa_buffers_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaBuffers& b, float* cell_scores_follow) {    const QsaShapes s = qsa_shapes(g);    const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);    Cursor c{(uint8_t*) base};    b.x_q8k = c.take_bytes(q8k_bytes(g.n_embd));    b.x_q8_0 = c.take_bytes((uint64_t) (g.n_embd / 32) * 34);    b.x_bf16 = c.take<uint16_t>((uint64_t) g.n_embd);    b.q_full = c.take<float>((uint64_t) g.n_head * 2 * g.head_dim);    b.qcur = c.take<float>((uint64_t) g.n_head * g.head_dim);    b.kcur = c.take<float>((uint64_t) g.n_head_kv * g.head_dim);    b.vcur = c.take<float>((uint64_t) g.n_head_kv * g.head_dim);    b.idx_raw = c.take<float>((uint64_t) g.idx_key_dim);    b.q_idx = c.take<float>((uint64_t) g.idx_q_heads * g.idx_key_dim);    b.cell_scores = cell_scores_follow != nullptr ? cell_scores_follow : c.take<float>((uint64_t) max_cells);    b.ids = c.take<int32_t>((uint64_t) cap);    b.k_scratch = c.take<uint16_t>((uint64_t) cap * g.n_head_kv * g.head_dim);    b.v_scratch = c.take<uint16_t>((uint64_t) cap * g.n_head_kv * g.head_dim);    b.attn = c.take<float>((uint64_t) g.n_head * g.head_dim);    b.attn16 = c.take<uint16_t>((uint64_t) g.n_head * g.head_dim);    b.attn32 = c.take<float>((uint64_t) g.n_head * g.head_dim);    b.attn_q8k = c.take_bytes(q8k_bytes(g.n_head * g.head_dim));    b.attn_scratch = c.take<float>(strata::kernels::qsa_decode_attn_scratch_floats(cap, s));    return c.used;}
 // ================================ PER-STAGE TIMING, DEBUG ONLY ================================
 //
 // **THE ENGINE SPENDS 1.047 ms PER LAYER WITH THE EXPERTS OFF, AND EVERY COST MODEL IN `bench/` PREDICTS LESS
