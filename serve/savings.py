@@ -4,8 +4,9 @@ Every finished request adds its tokens to the running model's count: the prompt 
 its own cache (an API bills that as cached input, far cheaper) and what it wrote.  The count is kept per model (per run
 config) in token-savings.json beside the configs, so it adds up across starts; "this start" is the server's own.
 
-The prices are the model's own API's (the developer's, not a reseller's), per 1M tokens, as published in October 2026
-(Hy4-flash's: at its launch, November 2026).
+The prices are the model's own API's (the developer's, not a reseller's), per 1M tokens: the built-in table below and
+data/api-prices.json are prefilled from OpenRouter's public model list at each release
+(tools/refresh_prices.py), so nothing needs a hand-maintained price list.
 DeepSeek charges twice its off-peak price at its peak hours (Monday to Friday, 01:00-04:00 and 06:00-10:00 UTC; its
 Chinese public holidays are off-peak too, which this does not know - those days count as peak), so a request finished
 then is counted at that price.  A model without a known API price is counted in tokens only.  Electricity is not
@@ -43,18 +44,25 @@ def ledger_path(config: Path, env=None) -> Path | None:
     if v.lower() in ("off", "none", "0"):
         return None
     return Path(v).expanduser() if v else Path(config).parent / FILE
-PRICES_AS_OF = "2026-10"
-# per 1M tokens, in US dollars; "peak": the factor at DeepSeek's peak hours
+PRICES_AS_OF = "2026-11"
+# per 1M tokens, in US dollars; "peak": the factor at DeepSeek's peak hours; "openrouter": the family's id in
+# OpenRouter's public model list (serve/savings.py's live fetch, tools/refresh_prices.py).  The figures are the
+# OpenRouter list's of November 2026; MiniMax's and Hy4-flash's are flat (no context tiers, no peak hours).
 REFERENCES = [
     {"match": r"deepseek[-_.]?v?4\.1[-_.]?flash|deepseek[-_.]flash", "api": "DeepSeek",
+     "openrouter": "deepseek/deepseek-v4.1-flash-1017",
      "input": 0.15, "cached": 0.003, "output": 0.60, "peak": 2.0},
-    {"match": r"glm[-_.]?5\.3[-_.]?flash", "api": "Z.ai", "input": 0.15, "cached": 0.03, "output": 0.50},
-    # MiniMax's own, flat (no context tiers or peak hours for the Flash model):
-    # https://platform.minimax.io/docs/pricing/overview (read 2026-10-27)
-    {"match": r"minimax[-_.]?m3\.1[-_.]?flash", "api": "MiniMax", "input": 0.15, "cached": 0.015, "output": 0.60},
-    # Hy4-flash: Tencent's own (Tencent Cloud TokenHub, USD), https://www.tencentcloud.com/document/product/1300/78937
-    # (read 2026-11-22; its launch discount - 50% off until 2026-11-30 - not counted).  Flat: no peak hours
-    {"match": r"(?:^|[/_.-])hy[-_.]?4[-_.]?flash", "api": "Tencent", "input": 0.07, "cached": 0.003, "output": 0.281},
+    {"match": r"glm[-_.]?5\.3[-_.]?flash", "api": "Z.ai", "openrouter": "z-ai/glm-5.3-flash",
+     "input": 0.15, "cached": 0.03, "output": 0.50},
+    {"match": r"minimax[-_.]?m3\.1[-_.]?flash", "api": "MiniMax", "openrouter": "minimax/minimax-m3.1-flash",
+     "input": 0.075, "cached": 0.0075, "output": 0.30},
+    {"match": r"(?:^|[/_.-])hy[-_.]?4[-_.]?flash", "api": "Tencent", "openrouter": "tencent/hy4-flash",
+     "input": 0.035, "cached": 0.0015, "output": 0.1405},
+    # Qwen3.8-Flash-Next, every quant of it: the API's price is the family's
+    {"match": r"qwen[-_.]?3\.?8[-_.]?flash", "api": "Qwen", "openrouter": "qwen/qwen3.8-flash",
+     "input": 0.15, "cached": 0.016, "output": 0.47},
+    {"match": r"inkling[-_.]?2[-_.]?mini", "api": "Thinking Machines", "openrouter": "thinkingmachines/inkling-2-mini",
+     "input": 0.075, "cached": 0.015, "output": 0.30},
 ]
 BANDS = ("base", "peak")
 
@@ -87,6 +95,8 @@ def check_price(model: str, p: dict) -> dict:
         out["peak"] = float(f)
     if p.get("api") is not None:
         out["api"] = str(p["api"]).strip()[:40]
+    if p.get("openrouter") is not None:                   # the family's id in OpenRouter's public model list
+        out["openrouter"] = str(p["openrouter"]).strip()[:100]
     return out
 
 

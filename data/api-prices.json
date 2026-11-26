@@ -1,8 +1,9 @@
 {
- "as_of": "2026-10",
+ "as_of": "2026-11",
  "prices": {
   "deepseek-v4.1-flash": {
    "api": "DeepSeek",
+   "openrouter": "deepseek/deepseek-v4.1-flash-1017",
    "match": "deepseek[-_.]?v?4\\.1[-_.]?flash|deepseek[-_.]flash",
    "input": 0.15,
    "cached": 0.003,
@@ -11,6 +12,7 @@
   },
   "glm-5.3-flash": {
    "api": "Z.ai",
+   "openrouter": "z-ai/glm-5.3-flash",
    "match": "glm[-_.]?5\\.3[-_.]?flash",
    "input": 0.15,
    "cached": 0.03,
@@ -18,17 +20,35 @@
   },
   "minimax-m3.1-flash": {
    "api": "MiniMax",
+   "openrouter": "minimax/minimax-m3.1-flash",
    "match": "minimax[-_.]?m3\\.1[-_.]?flash",
-   "input": 0.15,
-   "cached": 0.015,
-   "output": 0.6
+   "input": 0.075,
+   "cached": 0.0075,
+   "output": 0.3
   },
   "hy4-flash": {
    "api": "Tencent",
+   "openrouter": "tencent/hy4-flash",
    "match": "(?:^|[/_.-])hy[-_.]?4[-_.]?flash",
-   "input": 0.07,
-   "cached": 0.003,
-   "output": 0.281
+   "input": 0.035,
+   "cached": 0.0015,
+   "output": 0.1405
+  },
+  "qwen3.8-flash": {
+   "api": "Qwen",
+   "openrouter": "qwen/qwen3.8-flash",
+   "match": "qwen[-_.]?3\\.?8[-_.]?flash",
+   "input": 0.15,
+   "cached": 0.016,
+   "output": 0.47
+  },
+  "inkling-2-mini": {
+   "api": "Thinking Machines",
+   "openrouter": "thinkingmachines/inkling-2-mini",
+   "match": "inkling[-_.]?2[-_.]?mini",
+   "input": 0.075,
+   "cached": 0.015,
+   "output": 0.3
   }
  }
 }

@@ -36,16 +36,36 @@ class Prices(unittest.TestCase):
         self.assertEqual(SV.reference("glm-5.3-flash")["output"], 0.50)
         mm = SV.reference("minimax-m3.1-flash")                       # (MiniMax's: flat, no peak hours)
         self.assertEqual((mm["api"], mm["input"], mm["cached"], mm["output"], mm.get("peak")),
-                         ("MiniMax", 0.15, 0.015, 0.60, None))
+                         ("MiniMax", 0.075, 0.0075, 0.30, None))
         self.assertEqual(SV.reference("MiniMax-M3.1-Flash")["api"], "MiniMax")
         hy = SV.reference("hy4-flash")                                # (Tencent's: flat, no peak hours)
         self.assertEqual((hy["api"], hy["input"], hy["cached"], hy["output"], hy.get("peak")),
-                         ("Tencent", 0.07, 0.003, 0.281, None))
+                         ("Tencent", 0.035, 0.0015, 0.1405, None))
         for name in ("Hy4-Flash", "tencent/Hy4-flash", "hy4_flash", "Hy4-Flash-Maya-GGUF"):
             self.assertEqual((SV.reference(name) or {}).get("api"), "Tencent", name)
         for name in ("why4-flash", "hy4", "hy4-pro"):
             self.assertIsNone(SV.reference(name), name)
-        self.assertIsNone(SV.reference("qwen3.8-flash-next"))
+        q = SV.reference("Qwen3.8-Flash-Next-UD-Q4_K_XL")             # (every quant of the family has the same API)
+        self.assertEqual((q["api"], q["input"], q["cached"], q["output"]), ("Qwen", 0.15, 0.016, 0.47))
+        ik = SV.reference("Inkling-2-Mini-UD-Q4_K_XL")
+        self.assertEqual((ik["api"], ik["input"], ik["cached"], ik["output"]), ("Thinking Machines", 0.075, 0.015, 0.30))
+        for name in ("qwen3.9-flash", "inkling-3-mini"):
+            self.assertIsNone(SV.reference(name), name)
+
+    def test_openrouter_ids(self):
+        """"openrouter" per family: the built-ins and data/api-prices.json name the same ids, and the built-ins
+        carry every price the shipped file does (tools/refresh_prices.py and the live fetch map by these)."""
+        doc = SV.load_price_file(SV.ROOT / "data" / SV.PRICE_FILE)
+        self.assertIsNotNone(doc)
+        by_id = {p["openrouter"]: (name, p) for name, p in doc["prices"].items()}
+        self.assertEqual(len(by_id), len(doc["prices"]))               # (no family listed twice)
+        for ref in SV.REFERENCES:
+            name, p = by_id[ref["openrouter"]]
+            for k in ("input", "cached", "output", "peak", "api"):
+                self.assertEqual(p.get(k), ref.get(k), f"{name}.{k}")  # (the fallback and the file agree)
+        self.assertEqual(set(p["openrouter"] for p in SV.REFERENCES),
+                         {"deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash", "minimax/minimax-m3.1-flash",
+                          "tencent/hy4-flash", "qwen/qwen3.8-flash", "thinkingmachines/inkling-2-mini"})
 
     def test_peak_hours(self):
         self.assertTrue(SV.deepseek_peak(TUE_PEAK))
@@ -99,11 +119,11 @@ class Counting(unittest.TestCase):
         h.add(1_000_000, 400_000, 100_000, now=TUE_PEAK)              # (Tencent has no peak hours: the base price)
         s = h.summary()
         self.assertTrue(s["priced"])
-        self.assertAlmostEqual(s["start_usd"], 0.6 * 0.07 + 0.4 * 0.003 + 0.1 * 0.281, places=6)
+        self.assertAlmostEqual(s["start_usd"], 0.6 * 0.035 + 0.4 * 0.0015 + 0.1 * 0.1405, places=6)
         self.assertEqual(h.report()["prices"][0]["api"], "Tencent")
 
     def test_reused_never_above_the_prompt_and_unknown_models(self):
-        q = SV.Ledger(self.path, "x.json", "qwen3.8-flash-next")
+        q = SV.Ledger(self.path, "x.json", "no-such-model-9000")
         q.add(100, 500, 10)
         self.assertEqual(q.report()["models"][0]["tokens"]["cached"], 100)
         self.assertEqual(q.summary(), {"usd": 0.0, "start_usd": 0.0, "priced": False})
@@ -128,9 +148,10 @@ class Counting(unittest.TestCase):
         a.set_price("deepseek-v4.1-flash", None)                        # (back to the built-in ones)
         self.assertAlmostEqual(a.summary()["usd"], 0.75, places=6)
         # a model without a built-in price can get one; nonsense is refused with nothing changed
-        q = SV.Ledger(self.path, "maya-q.json", "qwen3.8-flash-next")
+        q = SV.Ledger(self.path, "maya-q.json", "no-such-model-9000")
         q.add(2_000_000, 0, 0)
-        q.set_price("qwen3.8-flash-next", {"input": 0.5, "cached": 0.05, "output": 1})
+        self.assertIsNone(q.price("no-such-model-9000"))               # (unpriced until the page gives it one)
+        q.set_price("no-such-model-9000", {"input": 0.5, "cached": 0.05, "output": 1})
         self.assertAlmostEqual(q.report()["start"]["usd"], 1.0, places=6)
         for bad in ({"input": -1, "cached": 0, "output": 0}, {"input": "1", "cached": 0, "output": 0}, {"input": 1},
                     {"input": 1, "cached": 0, "output": 0, "peak": 0.5}):
