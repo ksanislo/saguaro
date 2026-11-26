@@ -27,27 +27,30 @@ default is on.
    - `MB.plan_parallel(doc, ctx)` - four different 2K windows starting just after every window the standard run
      read (the standard opens at `997 * k`, k = 0..5, plus the document's end for the warm-up; these open at
      `997 * 6..9`), so nothing here is reused; `{}` (skipped with a note) when the docs or context cannot hold it.
-   - `MB.parallel_phase` - writes every request first (all sent together), then reads until every one is DONE,
-     timing each answer from its own line to its own DONE.  It speaks both several-conversation protocols: the
-     rid one (`GEN ... rid=<id>` in, `T / DONE <rid>` out) and QFN's slots (`BGEN <slot>` in, `BT / BDONE <slot>`
-     out, the answer that ends at its admission completed from its control `DONE` when `BADM <slot> 0` says so),
-     and the plain `GEN` line for a single request on any engine (that is the N = 1 baseline everywhere).
+   - `MB.parallel_phase` - writes every request first (all sent together), then reads until every one has
+     ended, timing each answer from its own line to its own end.  It speaks both several-conversation protocols:
+     the rid one (`GEN ... rid=<id>` in, `T / DONE <rid>` out) and QFN's slots (`BGEN <slot>` in, `BT / BDONE
+     <slot>` out, the answer that ends at its admission completed from its control `DONE` when `BADM <slot> 0`
+     says so, and a slot the engine says died - `BRE <slot> <why>` - ends there with "failed: <why>" in place
+     of its tok/s, so a dead slot never hangs the round), and the plain `GEN` line for a single request on any
+     engine (that is the N = 1 baseline everywhere).
    - `MB.run_parallel` (the rounds, places = what the engine said or the config asks) inside `MB.run_session`
      (new `par` / `cfg_places` params, results under `run["parallel"]`, a new `several` phase in `phases`, and
      `MB.phase_line` prints a phase only when a run measured it); `MB.parallel_section` renders the table text,
      `bench_text` places it between the prompt readings and the wall time.
    - `bench(..., parallel=True)`: the plan is built from the same encoded docs and skipped for `--bench-smoke`
-     and `--compare` (an A/B stays two identical one-answer sessions); `res["parallel"]` is None when skipped, so
-     the table says "several at once: skipped (--bench-parallel off)".  CLI: `--bench-parallel on|off` (default
-     on), wired in `main`.
+     and `--compare` (an A/B stays two identical one-answer sessions); an off run gains no `parallel` key, so
+     its saguaro-bench.txt keeps the bytes of before the section (the run's console says the skip instead).
+     CLI: `--bench-parallel on|off` (default on), wired in `main`.
    - `serve/qfn_engine.py` was not touched (nothing in `engines/qfn/serve/server.py` changed, so no extractor run).
-3. **Tests** (`tools/test_bench.py`, class `BenchParallel`, 8 tests): the N selection from a config and from the
-   engine's report, `parallel_ns`, `plan_parallel`'s openings (none of them read by the standard plan, too-small
-   docs / context -> `{}`), the section's text and its place in `bench_text` (absent of --compare, the off note
-   when skipped, `several` only in the wall line of a run that measured it), and measured rounds against three
-   scripted mock engines - rid (`READY multi=2`), QFN (`INFO batch_slots=4`, incl. a slot that ends at its
-   admission), and one-at-a-time (plain GENs answered in the order sent).  No GPU, no network.
-   `tools/test_maya_hip.py`'s scripted `--bench` engine got the one extra DONE the new N = 1 round reads.
+ 3. **Tests** (`tools/test_bench.py`, class `BenchParallel`, 9 tests): the N selection from a config and from the
+    engine's report, `parallel_ns`, `plan_parallel`'s openings (none of them read by the standard plan, too-small
+    docs / context -> `{}`), the section's text and its place in `bench_text` (absent of --compare and of an off
+    run's file, `several` only in the wall line of a run that measured it), and measured rounds against four
+    scripted mock engines - rid (`READY multi=2`), QFN (`INFO batch_slots=4`, incl. a slot that ends at its
+    admission), a QFN engine that kills one slot (`BRE <slot> <why>`: the round ends, the failure is in the
+    table), and one-at-a-time (plain GENs answered in the order sent).  No GPU, no network.
+    `tools/test_maya_hip.py`'s scripted `--bench` engine got the one extra DONE the new N = 1 round reads.
 4. **Docs:** README's "Measured on Saguaro" method line and docs/RELEASE-CHECKS.md's standard line each gained a
    sentence on the new section.
 
@@ -74,13 +77,15 @@ Step 1 changed no tracked file (its notes are in scratch/, gitignored), so it ha
 ## Tests run
 
 - `python -m unittest tools.test_bench` (the module the plan names, run several times, last after all edits):
-  **47 tests, OK** - 39 pre-existing plus the 8 new `BenchParallel` ones; no ResourceWarnings left.
+  **48 tests, OK** - 39 pre-existing plus the 9 new `BenchParallel` ones; no ResourceWarnings left.  After the
+  review fixes (see `FIX-REPORT-p124l-bench-parallel.md`) `tools.test_maya_hip` (**64, OK**) and
+  `serve.test_priority` were run too, one at a time, as the review asked.
 - AST-compiled `saguaro.py`, `tools/maya_bench.py`, `tools/test_bench.py`, `tools/test_maya_hip.py`; all new diff
   lines <= 120 columns; `saguaro.py --help` shows `--bench-parallel {on,off}` with its help.
 - `scratch/par_check.py` (scratch, untracked): the pure functions and both mock protocols plus a full
   `run_session` round - checked by hand before the unittests were written.
-- Not run per the run-only-named-modules rule: `tools.test_maya_hip` and the rest of the suites (its scripted
-  engine was updated by line-by-line reasoning; it now feeds exactly the 12 lines the session reads).
+- During the branch only `tools.test_bench` was run (the run-only-named-modules rule); the review fixes then
+  ran `tools.test_maya_hip` and `serve.test_priority` as the review asked - the rest of the suites untouched.
 
 ## Open questions
 

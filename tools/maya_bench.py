@@ -489,8 +489,10 @@ class Session:
                 self.close()
                 raise RuntimeError(f"the engine stopped while loading (its log: {log_path})")
             if line.startswith("READY"):
-                self.multi = next((int(w[6:]) for w in line.split()
-                                   if w.startswith("multi=") and w[6:].isdigit()), 0)
+                words = [w for w in line.split() if w.startswith("multi=")]
+                # (a number as the server reads it; multi=<not-a-number> still said "several at once": treat it as
+                #  one place on rid-tagged lines, as the old any(...) did, rather than sending it plain GEN lines)
+                self.multi = next((int(w[6:]) for w in words if w[6:].isdigit()), 1 if words else 0)
                 break
             self.lines.append(line.rstrip())
             self.batch = max(self.batch, next((int(w[12:]) for w in line.split()
@@ -556,10 +558,11 @@ def plan_prompts(doc, ctx: int, sizes=PROMPT_SIZES, repeats=REPEATS):
 
 
 def plan_parallel(doc, ctx: int, size: int = PROMPT_SIZES[0], ns=PARALLEL_NS, step=997, after=6):
-    """The several-at-once prompts: max(ns) slices of the docs' tokens with openings after every window the
-    standard run read (`after` windows of `step`: the 2K and 8K ones, the last running past its start) - prompts
-    the engine has not read, so nothing is reused here either.  {} when the docs cannot hold them or the context
-    is too small (the section is then skipped with a note)."""
+    """The several-at-once prompts: max(ns) slices of the docs' tokens opening after every window the standard
+    run opened (`after` windows of `step`: the 2K and 8K ones - an 8K one runs far past its opening, and these
+    slices sit behind the last of those ranges, but none shares an opening with a standard window, so as in
+    plan_prompts different openings mean different prefixes and nothing is checkpoint-reused here either).  {}
+    when the docs cannot hold them or the context is too small (the section is then skipped with a note)."""
     n_max = max(ns)
     if size + 64 > ctx or len(doc) < step * (after + n_max - 1) + size:
         return {}
@@ -761,9 +764,11 @@ def run_parallel(s, plan, n_new: int, cfg_places: int, say, label: str = "") -> 
 
 def parallel_section(par) -> list:
     """saguaro-bench.txt's "several at once" part: one line a measured N - the total tok/s and each answer's own,
-    the way ref/parallel.py prints them - and the Ns this engine cannot fill."""
-    if par is None:
-        return ["several at once: skipped (--bench-parallel off)"]
+    the way ref/parallel.py prints them (an answer whose slot the engine died on prints its "failed:" line), and
+    the Ns this engine cannot fill.  Nothing at all when the section was skipped (--bench-parallel off): the
+    file keeps the bytes of before the several-at-once rounds; the console of the run says why."""
+    if not par:
+        return []
     if not par["runs"]:
         return ["several at once: " + (par.get("note") or "not measured")]
     out = [f"several at once ({par['size'] // 1024}K-token prompts sent together, {DECODE_TOKENS} tokens each, "

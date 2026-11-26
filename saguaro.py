@@ -5710,6 +5710,8 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
             prompts, warm = MB.plan_prompts(doc, ctx)
             if parallel and not compare:         # (the several-at-once rounds: same session, the engine still warm)
                 par_plan = MB.plan_parallel(doc, ctx)
+            elif not compare:                    # (off: said on the console only - the bench file keeps its old bytes)
+                say("  several at once: skipped (--bench-parallel off)")
         start = lambda c, cmd, env, tag: (cmd, env, c.get("cwd") or str(ROOT), ROOT / f"saguaro-bench{tag}.log")  # noqa
         cmd, env = bench_start_command(cfg, tok)      # (QFN's batch driver as its server starts it; the rest: SV's)
         here = start(cfg, cmd, env, "")
@@ -5728,8 +5730,8 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
                                  par=par_plan, cfg_places=MB.parallel_places(cfg))
             runs = {"this": [run]}
             res = MB.summarize([run], prompts)
-            if not smoke:                        # (the several-at-once part of the table: None when skipped)
-                res["parallel"] = run["parallel"]
+            if not smoke and parallel:           # (the section only of an on run: off keeps the old file bytes,
+                res["parallel"] = run["parallel"]  #  like --compare, which runs no such round at all)
             drafting = MB.drafting_choice(args, cfg.get("env") or {}, run["engine_lines"], res["answers"],
                                         config_family(cfg))
             new = sorted(set(MB.learned_listing(ROOT, cfg)) - set(before))
@@ -5802,8 +5804,8 @@ def bench_text(version, cfg_path, cfg, ctx, gpu_text, res, drafting, runs, t_qui
              (f"; {res['short']} ended early, left out" if res["short"] else "")]
     lines += [f"prompt reading: {n // 1024}K tokens, median {MB.fmt_stats(s, 0)} tokens/s"
               for n, s in sorted(res["prompt"].items())]
-    if "parallel" in res:      # (the several-at-once section: absent of --compare, where no such round is run)
-        lines += MB.parallel_section(res["parallel"])
+    if res.get("parallel"):    # (the several-at-once section: absent when --compare runs no such round and when
+        lines += MB.parallel_section(res["parallel"])   #  --bench-parallel off skipped it - the old file bytes)
     lines.append(f"wall time: quiet check {t_quiet:.0f} s, {MB.phase_line(runs)}; all {time.time() - t_all:.0f} s")
     return lines
 

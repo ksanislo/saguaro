@@ -498,7 +498,7 @@ class BenchParallel(unittest.TestCase):
         self.assertEqual(MB.plan_parallel(doc, 1024), {})                     # (context too small)
 
     def test_the_table_text(self):
-        self.assertEqual(MB.parallel_section(None), ["several at once: skipped (--bench-parallel off)"])
+        self.assertEqual(MB.parallel_section(None), [])            # (off: the file keeps the bytes of no section)
         lines = MB.parallel_section({"places": 2, "size": 2048, "skipped": [4],
                                      "runs": [(1, 22.4, [22.4]), (2, 41.0, [20.8, 20.2])]})
         self.assertIn("2K-token prompts sent together, 256 tokens each", lines[0])
@@ -530,8 +530,8 @@ class BenchParallel(unittest.TestCase):
                             next(i for i, x in enumerate(out) if x.startswith("wall time")))
             self.assertIn("several 4 s", out[-1])
             out = maya.bench_text(*args, dict(res, parallel=None), "no drafting", solo, 1.0, 1.0)
-        self.assertIn("several at once: skipped (--bench-parallel off)", out)
-        self.assertNotIn("several 0 s", out[-1])                   # (skipped: the phase line stays as it was)
+        self.assertEqual([x for x in out if "several at once" in x], [])   # (off: the file's old bytes: no note,
+        self.assertNotIn("several 0 s", out[-1])                   #  and the phase line stays as it was)
 
     def test_several_at_once_rid_engine(self):
         # (READY multi=2: N GEN lines with their own rid, answers on rid-tagged T / DONE lines)
