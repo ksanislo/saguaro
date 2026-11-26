@@ -255,8 +255,9 @@ is free: at its next token, the way a fair slice does (PAUSE where the engine ca
 a cut), and without waiting for `SAGUARO_FAIR_SLICE_S`; when its turn comes back it resumes at exactly the token it
 reached - nothing it had written is generated again, and the thinking budget and the loop guard count from where it
 got to - while it waits with keep-alives to its client. A prompt read is only cut short for engines that keep a
-stopped read alive (QFN's conversation stays live at the token it reached, GLM pauses by its PAUSE); an engine that
-would lose what it read finishes it. A request is never cut for one of its own or a lower priority, and requests
+stopped read alive - QFN while it runs solo (its conversation stays live at the token it reached; its batch slots
+drop a stopped read, so a batch read runs on) and GLM by its PAUSE - and an engine that would lose what it read
+finishes it. A request is never cut for one of its own or a lower priority, and requests
 with images are never cut at all, as today. Nothing is promoted by waiting by default: a low request waits
 as long as a higher-priority one uses or waits for the model, however long - a paused or waiting request is never
 dropped or errored for waiting, it ends only when its client goes away, asks to stop, or the server stops (a pause

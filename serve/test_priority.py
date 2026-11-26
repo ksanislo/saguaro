@@ -3,8 +3,8 @@ priority, the plain order for equals), a lower-priority answer or prompt read gi
 higher-priority request and continuing from exactly where it was, the request's fields (the body's "priority",
 the X-Saguaro-Priority header, the config's default, a bad value a 400) and the /metrics fields - against
 scripted engines that continue an answer or a half-read prompt from wherever the prompt says it got to, as the
-real ones do: QFN keeps a stopped read's conversation live at the token it reached (generate.cpp #1620), GLM
-pauses by its PAUSE.
+real ones do: QFN keeps a stopped read's conversation live at the token it reached - solo (generate.cpp #1620; a
+batch slot drops a cancelled read, so a batch read is never cut) - and GLM pauses by its PAUSE.
 
     python -m unittest serve.test_priority -v
 """
@@ -74,8 +74,9 @@ class ReadEngine(ResumingEngine):
     """The prompt is read first, in chunks: one None heartbeat (a PP line) per chunk, with this request's read
     progress in `_tls.own_pp` like the drivers report it.  A consumer that goes away mid-read leaves the engine
     holding what it read: the conversation stays live at that token and the next call reads on from there - QFN's
-    stopped-read behaviour (#1620, solo and batch alike).  Chunks are counted per base: a read that CONTINUED,
-    not one re-read from 0, finishes its base in exactly CHUNKS of them."""
+    stopped-read behaviour (#1620, the SOLO path: a batch slot drops a cancelled read - "a read that failed keeps
+    none" - so the server must not cut one, see the batch test below).  Chunks are counted per base: a read that
+    CONTINUED, not one re-read from 0, finishes its base in exactly CHUNKS of them."""
     keeps_stopped_read = True
     CHUNKS = 6
 
@@ -537,11 +538,20 @@ class ReadsPreempt(Env):
         self.assertNotIn("prompt read paused", log)
         self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
 
+    def test_a_batch_read_runs_to_its_end_even_for_a_high_request(self):
+        engine = ReadEngine(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        engine.batch = 4                                # the batch engine: its slots DROP a stopped read
+        out, log = self.race_read(engine)               # (BRA 0 cancel keeps none of it) - so it is not cut,
+        self.assertEqual(out["long one"][0], LONG)      #  it runs to its end and the high one goes after
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertNotIn("prompt read paused", log)
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
+
     def test_the_qfn_engine_reports_where_the_property_comes_from(self):
-        from serve.server import _qfn_engine_class     # the property: a stopped request keeps its conversation
-        cls = _qfn_engine_class()                      # live at the token it reached - generate.cpp #1620, solo
-        self.assertTrue(cls.keeps_stopped_read)        # GEN as well as the batch slots - so a read may be cut
-        self.assertFalse(cls.can_pause)                # by a STOP (it has no PAUSE line)
+        from serve.server import _qfn_engine_class     # the property: SOLO, a stopped request keeps its
+        cls = _qfn_engine_class()                      # conversation live at the token it reached - generate.cpp
+        self.assertTrue(cls.keeps_stopped_read)        # #1620 (the GEN path) - a batch slot drops a cancelled
+        self.assertFalse(cls.can_pause)                # read, so only a solo read may be cut by a STOP
 
 
 class AcrossThePause(Env):

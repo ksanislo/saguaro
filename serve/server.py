@@ -5598,11 +5598,13 @@ class Service:
                                       f"{len(paused_for)} waiting request(s); the rest after they started", flush=True)
                         # R122: a read tick and a waiter that outranks this request - give the place up at once, no
                         # timer, and only for engines that keep a stopped read: GLM by its PAUSE, QFN by its cut
-                        # (the conversation stays live at the token reached, keeps_stopped_read); every other
-                        # engine's read runs to its end rather than lose what it read.
+                        # SOLO (the conversation stays live at the token reached, keeps_stopped_read) - a QFN BATCH
+                        # slot's cancelled read is dropped, nothing of it reaches the next BGEN, so its read runs
+                        # on; every other engine's read runs to its end rather than lose what it read.
                         if (prio < PRIORITY_HIGH and t0 is None and not pausing and not emb and not self.stopping
                                 and (getattr(self.engine, "can_pause", False)
-                                     or getattr(self.engine, "keeps_stopped_read", False))):
+                                     or (getattr(self.engine, "keeps_stopped_read", False)
+                                         and not getattr(self.engine, "batch", 0)))):
                             pos = self._read_position()
                             if pos and pos[0] < pos[1] and self.fifo.waiting(above=prio) \
                                     and self.fifo.claim_yield(0.0, above=prio):
@@ -8993,15 +8995,20 @@ def _qfn_engine_class():
     class QfnEngine(QE.StrataEngine):
         """QFN's driver as this server's engine: several conversations at once are its batch slots (the FIFO's places);
         the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself).  A STOP is its
-        cut: a stopped request keeps its conversation, so an answer or a half-read prompt continues from the token
-        it reached (see keeps_stopped_read) - which is what lets a priority preemption cut a QFN read."""
+        cut: SOLO, a stopped request keeps its conversation, so an answer or a half-read prompt continues from the
+        token it reached (see keeps_stopped_read) - which is what lets a priority preemption cut a solo QFN read.
+        In a batch slot a stopped request's conversation is kept for the answer, but its half-read prompt is not:
+        a stopped batch read runs again from 0 on its next BGEN, so the preemption never cuts a batch read."""
         can_pause = False
         keeps_stopped_read = True      # R122: a stopped (cut) request keeps its conversation LIVE at the token it
-        #  reached, also in the middle of a prompt read, and the next request continues from it or parks it: the
-        #  engine's own, engines/qfn/src/program/generate.cpp #1620 ("stopped between two windows ... it stays the
-        #  live conversation", printed as "cancelled request keeps its conversation: N tokens live") - the solo GEN
-        #  path - and the batch slots' cancelled reads ("slot N: its ... read was cancelled at X of Y tokens"),
-        #  whose next BGEN reuses what was read.  Solo and batch alike.
+        #  reached, also in the middle of a prompt read, and the next request continues from it or parks it -
+        #  the SOLO GEN path only: engines/qfn/src/program/generate.cpp #1620 ("stopped between two windows ...
+        #  it stays the live conversation", printed as "cancelled request keeps its conversation: N tokens live").
+        #  A BATCH slot's cancelled read is dropped, not kept: "a read that failed keeps none" - the BRA 0 cancel
+        #  and the BSTOP path clear the slot's read and ids and hand every checkpoint back to the pool
+        #  (generate.cpp, the cancelled-read and BSTOP branches), and the driver frees the slot with nothing held
+        #  for the next BGEN (leaving "queued" it drops its held tokens) - which is why Service._sliced fires the
+        #  read preemption for this engine only while it runs solo (`not engine.batch`).
         vram_reserve = QE.StrataEngine.vram   # the VRAM give-back command; self.vram (below) is the Monitor's lines
 
         def __init__(self, *a, **kw):
