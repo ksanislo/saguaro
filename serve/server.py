@@ -674,14 +674,18 @@ class FairLock:
 
     def waiting(self, above: int | None = None) -> int:
         """The waiters in line; with `above` (R122), only those of a HIGHER priority than that level - a runner asks
-        this before it even looks at giving its place up."""
-        if above is None:
-            return len(self._queue)
-        return sum(1 for e in self._queue if self._eff(e) > above)
+        this before it even looks at giving its place up.  Under the lock like every other view of the line (the
+        values are advisory either way: `claim_yield` re-decides under the lock; this just reads the deque as the
+        thread that appends or removes an entry left it)."""
+        with self._cv:
+            if above is None:
+                return len(self._queue)
+            return sum(1 for e in self._queue if self._eff(e) > above)
 
     def highest_waiting(self):
         """The highest priority waiting (aged), None with an empty line: whose name a preemption logs."""
-        return max((self._eff(e) for e in self._queue), default=None)
+        with self._cv:
+            return max((self._eff(e) for e in self._queue), default=None)
 
     def oldest_wait(self) -> float:
         """Seconds the request first in line has been waiting (0 when nobody waits): 0 while it is being served."""
