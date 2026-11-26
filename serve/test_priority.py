@@ -718,6 +718,36 @@ class ReadsPreempt(Env):
         self.assertEqual(long_calls[1][0], long_calls[0][0])   # the same prompt: the kept read is not re-read
         self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
 
+    def test_an_mm3_solo_read_is_cut_for_a_normal_and_continues_kept(self):
+        # saguaro-mm3 solo (READY ... stop, no pause): the driver sets keeps_stopped_read for engine_kind mm3
+        # (P124j) - a cancelled read keeps what it fed (mm3_main.cpp's cancel paths) - so a STOP cuts it here.
+        engine = UnreportingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        engine.multi = 0
+        out, log = self.race_read(engine, PRIORITY_NORMAL)     # a low read steps aside for a waiting normal too
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])   # the normal one answered first
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)   # the kept read was not read again
+        long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
+        self.assertEqual(len(long_calls), 2)
+        self.assertEqual(long_calls[1][0], long_calls[0][0])   # the same prompt: nothing written yet
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt read continues from where the engine kept it", log)   # the line driver reports no figure
+
+    def test_an_mm3_multi_read_is_cut_for_a_normal_and_continues_kept(self):
+        engine = UnreportingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        engine.multi = 2                            # saguaro-mm3 --parallel: the cut ends THIS request (STOP <rid>,
+        out, log = self.race_read(engine, PRIORITY_NORMAL)    #  the test below), the others' reads and answers run on
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
+        long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
+        self.assertEqual(len(long_calls), 2)
+        self.assertEqual(long_calls[1][0], long_calls[0][0])
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt read continues from where the engine kept it", log)
+
     def test_a_solo_pause_engine_lets_its_read_finish(self):
         engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
         engine.multi = 0                            # solo AND an engine that drops a stopped read (no
@@ -751,6 +781,56 @@ class ReadsPreempt(Env):
         cls = _qfn_engine_class()                      # conversation live at the token it reached - generate.cpp
         self.assertTrue(cls.keeps_stopped_read)        # #1620 (the GEN path) - a batch slot drops a cancelled
         self.assertFalse(cls.can_pause)                # read, so only a solo read may be cut by a STOP
+
+
+class TheMultiCutNamesOneRequest(unittest.TestCase):
+    """P124j: saguaro-mm3 --parallel (READY ... stop multi=n) keeps a cut read too, so a low read is preempted
+    there as well - and the cut must end ONE conversation: the line driver's close sends `STOP <rid>`, never a
+    bare STOP, which on a multi engine ends every request the engine is running."""
+
+    class Stdin:
+        def __init__(self, eng):
+            self.eng, self.sent = eng, []
+
+        def write(self, s):
+            self.sent.append(s.strip())
+            if s.startswith("STOP "):                   # the engine sees its rid, ends that request, says DONE
+                rid = int(s.split()[1])
+                q = self.eng._routes.get(rid)
+                if q is not None:
+                    q.put(f"DONE {rid} 0 300 10.0 0.0 cancel 0 0 100 0 0")
+
+        def flush(self):
+            pass
+
+    def test_closing_a_multi_request_stops_only_its_rid(self):
+        import itertools
+        from serve.server import StrataEngine
+        eng = StrataEngine.__new__(StrataEngine)
+        eng._rids, eng._routes, eng._routes_lock, eng._sent = itertools.count(1), {}, threading.Lock(), {}
+        eng._tls, eng.multi, eng.can_stop = threading.local(), 2, True
+        eng.progress = eng.prefill_tok_s_mean = None
+        eng.proc = unittest.mock.Mock()
+        eng.proc.stdin = self.Stdin(eng)
+        got, err = [], []
+
+        def drive():
+            try:
+                gen = eng._generate_multi([1, 2, 3], 50, {}, threading.Event())
+                got.append(next(gen))                   # its read: the PP tick, where _sliced's cut would break
+                gen.close()                             # STOP + drain to the DONE, still holding the FIFO
+            except Exception as e:                      # noqa: BLE001 - reported through `err`
+                err.append(e)
+
+        th = threading.Thread(target=drive)
+        th.start()
+        while not eng._routes and not err:
+            time.sleep(0.001)
+        eng._routes[1].put("PP 1 100 300 10.0 10000.0 0")
+        th.join(10)
+        self.assertEqual(err, [])
+        self.assertEqual(got, [None])
+        self.assertEqual(eng.proc.stdin.sent[-1], "STOP 1")     # its rid alone: never an engine-wide STOP
 
 
 class AcrossThePause(Env):
