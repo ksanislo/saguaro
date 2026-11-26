@@ -1,120 +1,122 @@
-# FIX-REPORT - REVIEW-RESULT findings, one commit each (`318f5da92..761adcaa7`)
+# FIX-REPORT - REVIEW-RESULT findings, one commit each (`397d1f852..4e4d6fcec`)
 
-This is round 2 (`git diff 88809c4e..761adcaa7`, `REVIEW-RESULT.md` second round). The review's preamble
-already confirms all **seven round-1 findings are genuinely fixed**; their round-1 detail lives in the prior
-version of this file (git `318f5da92`). Round 2 opens nine new findings - two blocking HIGH on which mode a
-card gets and what memory a park really returns, three MEDIUM in the give-way path and prefix mode, four LOW.
-All nine are taken (the nits were cheap). Nothing beyond compilation was testable here (no GPU): the touched
-paths need a card + resident tier, so the proof stays `scratch/card-test-elastic-kv.sh` on mortar plus the
-named unit test.
+This is round 3 (`REVIEW-RESULT.md` third round, `git diff 88809c4e..397d1f852`). The manager's card test on
+mortar OVERRIDES the MERGE-WITH-NITS verdict: the solo session went elastic but the BATCH SLOTS and their DRAFTERS
+still pinned their host K/V for the whole `--max-context` at load (262144: 6.18 GiB "the batch slots and the
+drafters", 1048576: ~24.7 - the expert tier at 54.36 GiB instead of 68, and the two load lines unequal). That is
+the FIX-FIRST item; the review's four round-3 findings follow it. All five are taken, one commit each; the
+manager's card-test section of `REVIEW-RESULT.md` was committed with the fix. Nothing here is GPU-testable on this
+box (no card, no resident tier): what follows is code-true; the proof stays `scratch/card-test-elastic-kv.sh` on
+mortar plus the named unit test (22/22, run alone, prints "22 checks OK" at HEAD).
 
-## 1. HIGH - address-equality probe skipped on attribute-less cards, so mortar never got pieces mode -> FIXED `1002b5c78`
+## 0. FIX-FIRST (manager) - batch slots and slot drafters pinned their host K/V whole at load -> FIXED `b910fa1ab`
 
-`host_elastic_on()` (`layer.cpp`): the probe loop was seeded `bool proved = same;`, so a card that fails
-`cudaDevAttrCanUseHostPointerForRegisteredMem` (HIP) short-circuited the loop and forced `g_host_prefix = true`
-- the probe could only ever *demote* attribute-true cards, never *promote* an attribute-less flat-VA card. Now
-`bool proved = true;` and the loop runs the real `probe_registered_page_address()` per device whatever the
-attribute says (`if (!probe_registered_page_address()) proved = false;`), keeping the two stderr variants keyed
-on `same`. This is what makes the report's headline ("HIP fails the attribute but passes the probe, so mortar
-gets pieces mode") true instead of aspirational; the acceptance table now measures the intended mode.
+Diagnosis: `qsa_state_init` made a streamed state's host copy elastic only when `slot_G > 0 || g_host_main`
+(`layer.cpp:2004`). `g_host_main` (--serve) covered the solo session and the stages only - it is switched off
+before the slots are built ("the slots' own rule decides theirs") - and the slots' rule was the VRAM one:
+without `SAGUARO_ELASTIC_SLOTS=2` + VMM every slot state fell to the `kv_host_alloc` pinned-whole branch, and a
+slot drafter's elastic flag follows its slot's (`mtp.cpp:396`), so the drafters pinned whole too. That is the
+card test's 6.18/~24.7 GiB. The host copy was always orthogonal to the VRAM ring, so:
 
-## 2. HIGH - prefix mode unpinned but never released the pages -> FIXED `2b8b49c60`
+* `layer.cpp/.hpp`: new `g_host_slot` + `qsa_set_host_elastic_slots(on)` added to the 2004 condition. It is set
+  around the batch-slot construction and the slot-drafters' (`generate.cpp`, both `--serve && --batch` only - the
+  CLI `--batch` path keeps today's pinned-whole copies byte for byte) and cleared again before anything else can
+  build a state. A slot drafter needs no new plumbing: its `host_elastic` parameter already reads its slot
+  session's primary state, and `owner.host_follow = &d->kv_state()` (already wired at load) makes it grow and
+  shrink with the slot through the same `session_host_fit`/`session_slot_fit` calls.
+* `layer.cpp`: `qsa_host_backed_cells(st)` (the cells an elastic copy is pinned for, min across arrays; -1: not
+  elastic) and `qsa_host_step_cells()` (the step in cells; `INT64_MAX` on Windows) answer "already backed / more
+  than the start" without touching anything.
+* `session.cpp/.hpp`: `session_host_elastic(s)` and `session_host_backed_cells(s)` (states + `host_follow`);
+  `session_slot_fit`'s old `slot_cells < 0` early-return becomes a HOST-ONLY branch: same helpers, same step,
+  `trim` gives back - the ring half stays untouched and `slot_cells` keeps counting the ring (so the whole
+  `SAGUARO_ELASTIC_SLOTS` VRAM-budget give path, `elastic_idle`, `KMEM/HMEM` and `eidle` stay `eslots_on`-gated
+  exactly as before).
+* `generate.cpp`: a `ehost_on`/`efit_on` (`eslots_on || ehost_on`) + `ehost_step` pair makes every slot-fit site
+  see a slot elastic in EITHER half - `slot_admit_fit` (admit: device sync, fit-with-trim to prompt+max_new,
+  idle-slot drops now also drop slots holding host cells past the start step, error line keeps its "no RAM"
+  wording via `qsa_host_pin_failed`), `slot_fit` (skips only when NEITHER half trails; a host-only failure returns
+  "no memory" straight away - the RAM give-way already ran inside `qsa_host_grow`, and there is no VRAM budget to
+  hand over), the decode gate `slot_grow_or_end` (its `backed` precheck now checks host-backed cells too, so no
+  window can touch cells the slot has not pinned; both call sites `14499`/`15541`), the queued-read and fast-lane
+  read fits, `PFMULTI`, and `ram_reclaim` (a slot past `ehost_step` of host cells is a parkable donor: persist,
+  trim, zero - and the park line's GiB delta (read from `qsa_kv_host_bytes`) is real released RAM, not a
+  promise).
+* Load: each slot's states and, via `host_follow`, its drafter pin ONE start step (`session_host_fit(*u, 1)`, per
+  stage under the right `OnDevice`) right after the solo session's own start and before the manager's "every
+  session" line, which already counts backed bytes when anything is elastic. The number that line splits out as
+  "the batch slots and the drafters" is now `holders x one step` - IDENTICAL at 262144 and 1048576 - and all of
+  it happens before `pin_cache_complement` sizes the expert tier from the free RAM (generate.cpp:9039), so
+  `--resident-budget-gib 68` is filled to the ceiling at both contexts again.   `slot_mem_note` prints a slot's
+  host MiB so the "elastic slot N grows at" lines carry numbers in this config too.
+* Kept as it is: the solo path (manager's instruction), the pinned-whole fallback when the elastic pool cannot be
+  made, and `SAGUARO_KV_HOST_ELASTIC=0`: with the feature off no state is elastic, every new predicate says so,
+  and every widened site behaves exactly as it did - the OFF path stays byte-identical, so the card script's
+  criterion D holds unchanged. The card script itself needs no edit: criterion A already compares the two load
+  lines, and the fix makes them equal.
 
-`host_prefix_reregister_locked` (`layer.cpp`) unregistered with `cudaHostUnregister` only; the range is
-`MAP_NORESERVE`, so touched pages stay populated and a park reported RAM it kept holding (the pieces path
-pairs every unregister with `MADV_DONTNEED` per piece). Now, when the call is giving memory back
-(`pages < old_backed` - the trim, or the `pages <= 0` unback), each array's given-back run
-`[prefix_bytes(pages), prefix_bytes(old_backed))` is `madvise(..., MADV_DONTNEED)`-ed after the unregister and
-before any re-registration, whole registered run on the `pages <= 0` path. Grows (`pages >= old_backed`) madvise
-nothing, and the `!whole` grow fallback runs no madvise either - so live data is never zeroed by this change;
-only bytes a trim is discarding are. `qsa_host_trim`/`solo_host_trim` now report RAM the RSS actually drops.
+## 1. MEDIUM - `relieve_ram` held `complement_mu_` across the grace sleep and the madvise -> FIXED `9d4d04f05`
 
-## 3. MEDIUM - give-way still raced `complement_offsets_` writers (grace covered readers only) -> FIXED `398ced7ff`
+The r2 comment (and FIX-REPORT 3) said the grace wait and the madvise stay OUTSIDE the lock; the `lock_guard` was
+function-scoped and they did not. So one give-way stalled every `commit_exchanges`/`commit_flip`/`install_resident`
+- the decode path's exchange commits and prefetch installs - for the grace window (250 ms default) plus the
+discard, exactly when RAM is short. The lock scope now closes after the phase-1 loop (the snapshot, the sort and
+the offset trims), and the sleep, the `MADV_DONTNEED` loop and the log line run without it; `runs`/`gave` were
+already locals. This is safe, not just shorter: a trimmed range's offset reads `kNoComplement` to every writer
+forever (`exchange_cache_complement` and every copy check take their destination from a LIVE slot's offset, read
+under the lock), so a writer released during the grace window can hand an incoming expert some OTHER slot's range -
+bytes are never written into a range phase 1 flipped away, and the round-2 writer-race fix stays intact. Lock order
+unchanged (one-way `install_resident -> ForesightSwap::hold -> smu_`). The comment now describes what the code
+does instead of what it promised.
 
-Took the review's first option (a source-level mutex), the cheaper of the two it offered. Added
-`complement_mu_` (`expert_source.hpp`); `relieve_ram`'s snapshot and every phase-1 offset trim hold it, and the
-three writers - `commit_exchanges`, `commit_flip`, `install_resident` (the `ram_install`/prefetch path) - now
-hold it from reading a slot's place through `exchange_cache_complement` flipping it. A slot relief trimmed
-answers `kNoComplement` to a writer that read it earlier, so the incoming expert just stays file-backed instead
-of naming a place phase 2 discards (the silent zeroed-weights class the round-1 finding 2 fixed for readers).
-The grace `sleep` and the `madvise` stay OUTSIDE the lock, so relief never hands a sleeping thread to the decode
-path's offset updates. Lock order: relief takes `g_host_mu` (grow) then `complement_mu_`; no offset writer
-takes `g_host_mu`, so there is no cycle. (Declined the alternative "refuse relief while `!staged_.empty()`" - a
-prefetch that passed its `!= kNoComplement` check tens of ms earlier is not covered by a `staged_`/in-flight
-test, which is exactly the interleaving.)
+## 2. LOW - a refused device alias left the registration standing, poisoning every later grow -> FIXED `3abe15417`
 
-## 4. MEDIUM - give-way's page arithmetic assumed a 4 KiB-aligned arena -> FIXED `8bd4b4744`
+`host_prefix_reregister_locked`: `cudaHostRegister` could succeed while `cudaHostGetDevicePointer` refused or
+answered null; both loops then fell to rollbacks that unregister only the arrays whose alias HAD arrived (the
+step-down give-back skips `rd[i] == null`), so the refused array's run stayed registered, uncounted in
+`g_kv_host_bytes`, and every later `cudaHostRegister` at that address failed with it. Both failure branches now do
+what the pieces path has always done at its `d != a` bail - `if (e == cudaSuccess) cudaHostUnregister(at)`.
 
-`relieve_ram` (`expert_source.cpp`): `lo`/`hi` are rounded relative to `complement_host_`, which is page-aligned
-only on the `posix_memalign` arenas. On the pageable fallback (cudaHostAlloc refused, `std::malloc`,
-`complement_pinned_ == complement_registered_ == false`, so neither early-out fired) every `madvise` returned
-`EINVAL` (swallowed), the `munlock` rounding stopped matching `complement_locked_`, and `gave` was still returned
-and printed. Added a bail: `if (((uintptr_t) complement_host_ & (page - 1)) != 0) return 0;` (the review's first
-option - bail rather than round-and-skip partial pages). Page-aligned arenas stay eligible.
+## 3. LOW - a failed prefix TRIM re-registered the run it had just discarded -> FIXED `dc36d24eb` + `4e4d6fcec`
 
-## 5. MEDIUM - prefix mode installed the device base where code reads host memory -> FIXED `9d621f1bb`
+The trim madvises `[prefix(pages), prefix(old_backed))` per array, then - if the smaller prefix is refused - the
+fallback started at `pg = p.backed = old_backed`: re-registering that re-faulted the discarded run's ZERO pages
+into RAM (re-pinning the room the park came to give) and stood the copy on a prefix whose tail was now zeros. The
+walk-down starts at `pages` on the trim path (the r2 nit 5 warn line becomes honest on purpose, not by accident);
+the grow path is unaffected (min/`trimming` keeps the old start there).
 
-In prefix mode `cudaHostGetDevicePointer` answers with something other than the host address (that is the mode's
-reason to exist) and `host_apply` writes that value into `QsaState::host`, but `host_both` in the park/restore
-fast path (`conversation_snapshot.cpp:128-135`) counts an unrecognized pointer as host and would `std::memcpy`
-the whole conversation through the GPU alias (harmless on flat-VA HIP where `d == a`, wrong on the WDDM/dxg
-class). Took the review's safe rule via a narrow predicate instead of rewriting `host_both`: a new
-`qsa_host_elastic_prefix()` (`layer.cpp`/`.hpp`) reports the mode; `conversation_snapshot` adds
-`host_end_is_cpu(st)` and threads a `cpu_ends` flag through `transfer`/`transfer_jobs`, keeping a prefix-mode
-state's pool ends on the driver copy (`copy_nonblocking`, which maps those bytes from both sides) while plain
-host buffers - the parked image's own memory - keep the threaded fast path (the 11-19 park-stall fix is not
-regressed). Applied at the four pool-copy sites (save, restore, restore_prefix, kv_source) and in `verify`.
-`keep_host0`/prompt-cache keep-records already re-stage on a remap (address-keyed, degrades to re-staging).
-The REPORT open question 1 now requires the real-hardware run to include a stream park/restore, not just a grow.
+## 4. LOW - a failed prefix GROW could truncate or null a live copy -> FIXED `4e4d6fcec`
 
-## 6. LOW - growth line printed once per state; pieces line had no timing -> FIXED `9d452f5c4` + `761adcaa7`
-
-Took the cheap half. Added the elapsed ms to the pieces-mode "backs N cells now" line (`layer.cpp`) so it matches
-the prefix line and the script's `(…, N ms)` criteria. Did NOT aggregate one line per grow *call* across a
-session's states: a grow call is inherently per state (one `HostPool` per QSA layer), so aggregating is a plumbing
-change across `session.cpp`/`generate.cpp` the review itself only "suggests". Instead the report (steps 2+3 item
-3 and open question 7) and the card script are restated: the raw count is one line per QSA layer per boundary
-crossing, and the script's growth block now collapses the lines to one per backed size.
-
-## 7. LOW - give-way held `g_host_mu` across all-device syncs + the 250 ms grace -> FIXED (named) `761adcaa7`
-
-The review offers "mention or avoid"; taking "mention" (avoiding means phase 2 outside the lock, a redesign
-it rates unnecessary - "Relief is a rare already-slow path"). REPORT step 2+3 item 4 now states plainly that one
-give-way holds layer's `g_host_mu` across that sync AND the grace window and that other threads' grows/trims and
-the `HMEM` status read wait it out - named in the plan's "no mid-read stalls" rather than hidden.
-
-## 8. LOW - pieces pinning failure lost its CUDA error string -> FIXED `c1f547f8d`
-
-Kept the `SAGUARO_KV_HOST_MIB reached` cap wording and appended `cudaGetErrorString`: the pieces path captures
-the refusing `cudaError_t` (`why`) and the prefix path gets an `err` out-param from
-`host_prefix_reregister_locked` (set to whichever call refused, `cudaHostRegister` or `cudaHostGetDevicePointer`),
-so a mortar log can tell a driver limit from an unregistered range from plain OOM.
-
-## 9. LOW - report accuracy (doubling/gave wording not both modes) -> FIXED `ca9fe3e5f` + `761adcaa7`
-
-* `relieve_ram`'s `gave` summed each trimmed slot's whole blob (`s.len`) even when its page-run was empty, so
-  the give-way reported relief that freed nothing and the grow retried to a second failure - `gave` now counts
-  only the discarded run bytes (`hi - lo`), matching the function header's "the bytes `gave` counts are the bytes
-  discarded". (`ca9fe3e5f`)
-* REPORT corrected (`761adcaa7`): step 2+3 item 3 - the doubling (`kv_host_grow_pages`) is a **prefix-mode**
-  behaviour, pieces mode pins the asked step; the "handful of lines" wording is gone; the pieces line carries ms.
-  The one-step park floor is left as-is (already report-documented open question 3, Ken's call, both modes agree).
+Took the review's proposal and sharpened it: the grow fallback gets exactly ONE attempt - re-registering the old
+prefix (`old_backed`) - and no step-down. A step-down below `old_backed` was worse than the null case the finding
+names: it stood the conversation on a device base ending BELOW its live cells (the next read writes past it). One
+attempt usually succeeds (the failed target attempt's RAM is back by the time the fallback runs), so the copy
+stands exactly where it did before the failed grow and only the grow is reported (`ok = false`, the caller's
+relief retry then sees the true `p.backed` instead of the walk-down's 0 and can recover); if even the old,
+already-populated run is refused (relief already failed - a driver limit), nothing can stand, the null + the
+caller's refusal line are the honest answer, `ram_reclaim` parks what can park, and a later grow re-registers the
+still-populated pages whole. Pieces mode's rollback-to-`had` never dropped a failed step below the old prefix;
+prefix mode now agrees.
 
 ## Not taken from the review
 
-* Nothing declined. Finding 6's "log once per grow call (aggregate the session's states)" and finding 7's
-  "phase 2 outside the lock" were the two changes the review itself offered as alternatives to the cheaper ones
-  taken (restate the report / name the stall); each is a cross-file plumbing change or a redesign the review
-  explicitly rates not-required for a rare, already-slow path, so the honest-cheap fix (report + script wording,
-  adding the missing ms) was taken instead.
+* Nothing declined. The one place the report deviates from the finding's literal wording is 4: the review's
+  "one-time ok = false return keeping the last full prefix (retrying the old size before stepping down)" is
+  implemented as "retry the old size once and do not step down on a grow at all" - stepping below the standing
+  prefix re-breaks exactly what the finding asks to make benign.
 
 ## Verification
 
-* `ninja -C scratch/build-p124e` -> clean incremental rebuild from `318f5da92`, every edited TU
-  (`layer.cpp`, `expert_source.cpp`, `conversation_snapshot.cpp`) compiles, `saguaro-qfn` links; the warning set
-  is only the pre-existing HEAD ones (three `-Wmisleading-indentation`/two unused locals in `layer.cpp`, none in
-  the other two files) - the `t0 set but used nowhere` warning the review's finding 6 implies even got fixed.
-* `ctest --test-dir scratch/build-p124e -R '^kv_host_growth_test$'` -> 100% passed, **run alone** (the only test
-  module the plan names). No other test module was run; no GPU here.
-* `serve/qfn_engine.py` / `engines/qfn/serve/server.py` untouched (no flag plumbing added, so no
-  `extract_qfn_engine.py` re-run needed); `scratch/` artifacts (the card script edits) stay uncommitted.
+* `ninja -C scratch/build-p124e` -> clean incremental rebuild through every fix, ends "no work to do" at HEAD
+  `4e4d6fcec` (`saguaro-qfn` links; the only warning in touched files is the pre-existing HEAD unused-`w`).
+* `ctest --test-dir scratch/build-p124e -R '^kv_host_growth_test$'` -> 100% passed, run ALONE (the only test
+  module the plan names; the pure helpers it covers are untouched by these fixes and stay 22 checks). No other
+  test module was run; no GPU here.
+* `serve/qfn_engine.py` / `engines/qfn/serve/server.py` are still absent from `git diff --name-only
+  88809c4e..HEAD` (no flag plumbing added, so no `extract_qfn_engine.py` re-run). `scratch/` stays gitignored.
+* For mortar (card script, unchanged): A must now pass - the "every session" line shows the SAME small start for
+  solo AND slots+drafters at 262144 and 1048576 (about one 32768-cell step per holder, both contexts), the expert
+  tier keeps `--resident-budget-gib 68` filled at load in both, and the "grow with their conversations" clause
+  stays; C must show slot copies ("elastic slot N grows at ... host K/V") growing per use and BIDLE/ram_reclaim
+  lines giving RAM back; D (`SAGUARO_KV_HOST_ELASTIC=0`) must still print the OLD pinned-whole figures byte for
+  byte with no "the host copy backs" lines anywhere.
