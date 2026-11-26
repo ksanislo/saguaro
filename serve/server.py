@@ -1522,6 +1522,8 @@ class StrataEngine:
                 self.keeps_stopped_read = self.can_pause and Path(exe).name.lower() != "maya-metal"
                 if self.info.get("engine_kind") == "mm3":   # P124j: MM3 keeps a cancelled read too (solo and multi), so a cut read resumes
                     self.keeps_stopped_read = True
+                if "keepread" in f[2:]:   # P124u: an engine that says it keeps a stopped prompt read (DS4's READY word, P124k) gets the flag by its word, not its name
+                    self.keeps_stopped_read = True
                 break
         loading.set()
         if self.max_context <= 0:
