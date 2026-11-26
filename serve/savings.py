@@ -293,17 +293,24 @@ class PriceBook:
         self.live_file = self.folder / LIVE_FILE if self.folder is not None else None    # the cache, by the ledger
         self.disk = load_price_file(self.repo_file)
         self.live = bool(live)
-        self.live_doc = load_live_file(self.live_file) if self.live_file is not None else None
+        self.live_doc: dict | None = None
         self.lock = threading.Lock()          # one fetch at a time; the network happens outside it
         self.next_try = 0.0
         self.error: str | None = None
         self.thread: threading.Thread | None = None
+        if self.live:
+            self.read_live_cache()            # (a default, off start touches nothing of the live cache at all)
+        self.start()                          # (at start, when the cache is older; never blocks)
+
+    def read_live_cache(self):
+        """The cached fetch and when to ask again, read from beside the count: while the setting is on - at the
+        start, and when the page turns it on - so a start with it off neither reads the file nor logs about it."""
+        self.live_doc = load_live_file(self.live_file) if self.live_file is not None else None
         if self.live_file is not None:
             try:
                 self.next_try = self.live_file.stat().st_mtime + self.FETCH_EVERY
             except OSError:
                 pass
-        self.start()                          # (at start, when the cache is older; never blocks)
 
     def stale(self) -> bool:
         return time.time() >= self.next_try
@@ -329,8 +336,12 @@ class PriceBook:
 
     def set_live(self, on: bool):
         """Settings > Savings: on starts the daily fetch right away; off means the shipped table only - no network,
-        and the cached fetch is ignored while off."""
-        self.live = bool(on)
+        and the cached fetch is ignored while off.  Turning it on reads the cache back (an on spell before this
+        start counts again at once, and its age says whether a refetch is due)."""
+        on = bool(on)
+        if on and not self.live:
+            self.read_live_cache()
+        self.live = on
         self.start()
 
     def _fetch(self):

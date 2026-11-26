@@ -553,6 +553,26 @@ class OpenRouterPrices(unittest.TestCase):
             led.book.start()
         net.assert_called_once()                                               # (the off spell dials nothing after)
 
+    def test_the_off_start_touches_nothing_of_the_live_cache(self):
+        """A default (off) start does not read the live cache at all: a corrupt leftover says nothing, and the
+        page turning the setting on reads it back - a fresh one counts at once, with no fetch."""
+        import io
+        from contextlib import redirect_stdout
+        (self.save / SV.LIVE_FILE).write_text("{not the cache")             # (a corrupt leftover from an on spell)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            led = self.ledger()                                             # (off, the default)
+        self.assertEqual(out.getvalue(), "")                                 # (no "price cache ... ignored" line)
+        self.assertIsNone(led.book.live_doc)
+        self.write_cache({"as_of": "2026-11-25", "prices":
+                          {"glm-5.3-flash": {"input": 0.2, "cached": 0.02, "output": 0.6}}}, time.time())
+        with mock.patch.object(SV.urllib.request, "urlopen") as net:
+            led.set_live(True)                                               # (the page's switch: the cache reads back)
+            led.report()
+            self.assertEqual(led.price("glm-5.3-flash")["input"], 0.2)       # (the on spell's fetch counts again)
+        net.assert_not_called()                                              # (a fresh cache: nothing dialled yet)
+        self.assertEqual(led.report()["prices_source"]["from"], "openrouter")
+
     def test_the_environment_beats_the_switch_while_running(self):
         """SAGUARO_LIVE_PRICES=0 is not only the start's answer: the page's switch cannot override it either, and a
         refused request starts no fetch and writes nothing; an env that agrees with the page works as before."""
