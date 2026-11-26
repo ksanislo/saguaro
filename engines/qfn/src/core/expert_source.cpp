@@ -3495,48 +3495,57 @@ uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
     // complement_offsets_ (commit_exchanges/commit_flip/install_resident) from reading a slot's place through
     // naming it for an incoming expert.  Without it a writer that passed its != kNoComplement check before the
     // flip could adopt a slot relief had just trimmed, and phase 2 would discard the expert bytes copied there -
-    // silent wrong weights.  The grace wait and the madvise stay OUTSIDE the lock.
-    std::lock_guard<std::mutex> cmu_lk(complement_mu_);
-    for (size_t i = 0; i < complement_offsets_.size(); ++i) {
-        if (complement_offsets_[i] == kNoComplement) continue;
-        const uint64_t len = layer_blob_bytes_[(size_t) (i / (size_t) n_expert_)];
-        slots.push_back({i, complement_offsets_[i], len});
-    }
-    std::sort(slots.begin(), slots.end(), [](const Slot& a, const Slot& b) { return a.off > b.off; });
-    for (const Slot& s : slots) {
-        if (gave >= bytes) break;
-        if (s.off < keep_below) continue;   // (straddling or inside the registered prefix: stays)
-        // page-run [lo, hi) of this slot's bytes (a shared boundary page stays for the neighbour)
-        const uint64_t lo = (s.off + page - 1) / page * page;
-        const uint64_t hi = (s.off + s.len) / page * page;
-        // the offset flip is a release store the lock-free readers race with: each sees the old offset (and the
-        // grace window below covers its read) or kNoComplement (and reads the files) - never a torn middle
-        std::atomic_ref<uint64_t>(complement_offsets_[s.index]).store(kNoComplement, std::memory_order_release);
-        if (hi > lo) {
-            // its working-set lock first, in EVERY backing mode: the lock covers [lock_off, lock_off + locked)
-            // whatever the registration state, and the paced/CS-T complement is BOTH a registered prefix AND an
-            // mlock'ed tail above it (lock_off = the registered share) - exactly the bytes the trims sit on
-            // (keep_below = the pin limit).  Registered pages the kernels must not lose are the prefix, and slots
-            // inside it are skipped above; a locked page survives MADV_DONTNEED (the kernel's zap skips it, the
-            // call still answers 0), so without this unlock the runs below are claimed but never given back.
-            const uint64_t a = (uint64_t) (uintptr_t) (complement_host_ + lo);
-            const uint64_t lock_lo = (uint64_t) (uintptr_t) complement_host_ + complement_lock_off_;
-            const uint64_t lock_hi = lock_lo + complement_locked_;
-            const uint64_t u0 = std::max(a, lock_lo), u1 = std::min(a + (hi - lo), lock_hi);
-            if (complement_locked_ > 0 && u1 > u0) {
-                strata::platform::unlock_resident((void*) u0, u1 - u0);
-                // the only writer of the counter once serving runs (pin sets it, close() frees the arena): the
-                // atomic_ref only makes the load-time/teardown reads of locked_bytes() race-free
-                std::atomic_ref<uint64_t>(complement_locked_).store(complement_locked_ - (u1 - u0),
-                                                                    std::memory_order_relaxed);
-            }
-            runs.push_back({lo, hi});
-            // P124e r2 finding 9: `gave` counts the bytes this call DISCARDS (the header's promise, and what the
-            // grow retry needs freed) - a slot whose bytes sit on shared boundary pages leaves no interior run to
-            // discard, and counting its whole blob reported relief that freed nothing while the grow retried.
-            gave += hi - lo;
+    // silent wrong weights.
+    // P124e r3 finding 1: the scope is now literally phase 1, as the comment always promised.  Held across the
+    // grace sleep and the madvise it stalled every offset writer - the decode path's commit_exchanges/commit_flip/
+    // install_resident - for the whole relief window (default 250 ms) exactly when RAM is short, and the give-way
+    // happens on the grow that is already holding layer.cpp's g_host_mu.  That is still SAFE (a trimmed range's
+    // offset reads kNoComplement to every writer forever: exchange_cache_complement and the copy checks take their
+    // `at` from a LIVE slot, so bytes are never written into a range phase 1 flipped away), but a quarter-second
+    // pause of the expert tier's own commits per relief is not.  `runs` and `gave` are locals; phase 2 needs no lock.
+    {
+        std::lock_guard<std::mutex> cmu_lk(complement_mu_);
+        for (size_t i = 0; i < complement_offsets_.size(); ++i) {
+            if (complement_offsets_[i] == kNoComplement) continue;
+            const uint64_t len = layer_blob_bytes_[(size_t) (i / (size_t) n_expert_)];
+            slots.push_back({i, complement_offsets_[i], len});
         }
-    }
+        std::sort(slots.begin(), slots.end(), [](const Slot& a, const Slot& b) { return a.off > b.off; });
+        for (const Slot& s : slots) {
+            if (gave >= bytes) break;
+            if (s.off < keep_below) continue;   // (straddling or inside the registered prefix: stays)
+            // page-run [lo, hi) of this slot's bytes (a shared boundary page stays for the neighbour)
+            const uint64_t lo = (s.off + page - 1) / page * page;
+            const uint64_t hi = (s.off + s.len) / page * page;
+            // the offset flip is a release store the lock-free readers race with: each sees the old offset (and the
+            // grace window below covers its read) or kNoComplement (and reads the files) - never a torn middle
+            std::atomic_ref<uint64_t>(complement_offsets_[s.index]).store(kNoComplement, std::memory_order_release);
+            if (hi > lo) {
+                // its working-set lock first, in EVERY backing mode: the lock covers [lock_off, lock_off + locked)
+                // whatever the registration state, and the paced/CS-T complement is BOTH a registered prefix AND an
+                // mlock'ed tail above it (lock_off = the registered share) - exactly the bytes the trims sit on
+                // (keep_below = the pin limit).  Registered pages the kernels must not lose are the prefix, and slots
+                // inside it are skipped above; a locked page survives MADV_DONTNEED (the kernel's zap skips it, the
+                // call still answers 0), so without this unlock the runs below are claimed but never given back.
+                const uint64_t a = (uint64_t) (uintptr_t) (complement_host_ + lo);
+                const uint64_t lock_lo = (uint64_t) (uintptr_t) complement_host_ + complement_lock_off_;
+                const uint64_t lock_hi = lock_lo + complement_locked_;
+                const uint64_t u0 = std::max(a, lock_lo), u1 = std::min(a + (hi - lo), lock_hi);
+                if (complement_locked_ > 0 && u1 > u0) {
+                    strata::platform::unlock_resident((void*) u0, u1 - u0);
+                    // the only writer of the counter once serving runs (pin sets it, close() frees the arena): the
+                    // atomic_ref only makes the load-time/teardown reads of locked_bytes() race-free
+                    std::atomic_ref<uint64_t>(complement_locked_).store(complement_locked_ - (u1 - u0),
+                                                                        std::memory_order_relaxed);
+                }
+                runs.push_back({lo, hi});
+                // P124e r2 finding 9: `gave` counts the bytes this call DISCARDS (the header's promise, and what the
+                // grow retry needs freed) - a slot whose bytes sit on shared boundary pages leaves no interior run to
+                // discard, and counting its whole blob reported relief that freed nothing while the grow retried.
+                gave += hi - lo;
+            }
+        }
+    }   // complement_mu_ goes here: the grace wait and the madvise run WITHOUT it (P124e r3 finding 1)
     if (gave == 0) return 0;
     if (!runs.empty()) {
         // phase 2, after the grace window: what remains are CPU-lane readers that latched a blob pointer before
