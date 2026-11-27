@@ -4,7 +4,9 @@
 #include "strata/core/conversation_file.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
+#include "strata/core/session_log.hpp"
 
+#include <memory>
 #include <string>
 
 namespace strata::core {
@@ -104,10 +106,15 @@ bool conversation_snapshot_capture_bytes(const ConversationKvReuse& reuse, const
 // the uniquely owned reusable buffers, including on failure.
 // Caller admits the estimate before invoking capture. Allocation failures propagate
 // to the RAM policy; the active session is never modified by capture.
+// `live_from` (PLAN-p124a2, manager review 2026-11-26): take the running state as a host copy of this
+// checkpoint - the turn capture's own host copy of it, for the same tokens - instead of reading it off the
+// device, and refuse (false, nothing captured) if its arrays do not match this session's. The K/V is still
+// captured normally. The caller has established the session has not run since that copy (park::reuse_turn_state).
 bool conversation_snapshot_save(SavedConversation& image, const ConversationView& view,
                                 const SessionState& session, const ModelGeometry& g,
                                 const QsaState& draft, std::string& error,
-                                ConversationKvReuse reuse = {}, size_t* reused_bytes = nullptr);
+                                ConversationKvReuse reuse = {}, size_t* reused_bytes = nullptr,
+                                const ConversationCheckpoint* live_from = nullptr);
 // Disk save without capturing the K/V on the host: `meta` gets everything but the K/V (running state copied,
 // checkpoints as given by the view), `sources` one streamed source per QSA layer then the draft.  Caller has
 // synchronized and must not run the session until the file is written.
@@ -144,7 +151,8 @@ bool conversation_snapshot_capture_bytes(const ConversationKvReuse& reuse, const
                                          size_t& bytes, std::string& error);
 bool conversation_snapshot_save(SavedConversation& image, const ConversationView& view, const SessionState& session,
                                 const ModelGeometry& g, const QsaState* draft, std::string& error,
-                                ConversationKvReuse reuse = {}, size_t* reused_bytes = nullptr);
+                                ConversationKvReuse reuse = {}, size_t* reused_bytes = nullptr,
+                                const ConversationCheckpoint* live_from = nullptr);
 bool conversation_snapshot_validate(const SavedConversation& image, const SessionState& session,
                                     const ModelGeometry& g, const QsaState* draft, std::string& error);
 ConversationRestore conversation_snapshot_restore(const SavedConversation& image, SessionState& session,
@@ -157,6 +165,23 @@ ConversationRestore conversation_snapshot_restore_prefix(const SavedConversation
 bool conversation_snapshot_sources(SavedConversation& meta, std::vector<SessionKvSource>& sources,
                                    const ConversationView& view, const SessionState& session,
                                    const ModelGeometry& g, const QsaState* draft, std::string& error);
+// PLAN-p124a2: a park's image built by ADOPTING the whole-capture K/V a turn save (session_log_capture) already
+// holds: every part aliases one block of the capture's host buffer (`turn`, kept alive by the returned image),
+// so the K/V is not copied a second time and the device is not touched for it. The running state is copied from
+// the capture's host copy and the checkpoint tree from the view, as conversation_snapshot_save would. The bytes
+// are the same ones conversation_snapshot_save would capture for the same session at the same token count -
+// the caller has established that nothing has rewritten the session since the capture (park::adopt_turn_capture).
+// Returns false, leaving `image` empty, when the capture does not line up with this session (multi-stage, not
+// whole, a part split across segments, any extent mismatch): the caller captures normally.
+// `aliased_bytes`: the K/V bytes the image adopts instead of allocating (output only).
+bool conversation_snapshot_from_capture(SavedConversation& image, const ConversationView& view,
+                                        const SessionState& session, const ModelGeometry& g, const QsaState* draft,
+                                        std::shared_ptr<const SessionLogTurn> turn, std::string& error,
+                                        size_t* aliased_bytes = nullptr);
+// The K/V bytes a whole capture of this session at `upto` tokens holds: every part of every owned layer plus the
+// draft (0 when the layouts refuse). A park that adopts a capture subtracts this from its allocation estimate.
+size_t conversation_snapshot_kv_bytes(const SessionState& session, const ModelGeometry& g, const QsaState* draft,
+                                      int64_t upto);
 bool conversation_session_read_limits(SessionReadLimits& limits, const SessionState& session, const ModelGeometry& g,
                                       const QsaState* draft, uint64_t max_tokens, uint64_t max_checkpoints,
                                       std::string& error);
