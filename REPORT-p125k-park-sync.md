@@ -3,8 +3,9 @@
 Branch `saguaro/q1-p125k-park-sync`, engine tree `engines/qfn`. Follows P124a2
 (ref/REPORT-p124a2-park-overlap.md, ref/REVIEW-p124a2-park-overlap.md), which made the park adopt the turn save's
 host copy; what is left is the WAIT itself: `sync 2471 ms` on a 1,206-token park, and a 281-token restore that cost
-1,066 ms with a 1 ms split (ref/REPORT-p124a2 §1 lines 66-68). Nothing was run on a GPU here; §1 re-anchors every
-sync/wait on these paths at this tip.
+1,066 ms with a 1 ms split (ref/REPORT-p124a2 §1 lines 66-68). Nothing was run on a GPU here. §1 re-anchors
+every sync/wait on these paths as they stood at the merge tip (what each must wait for, what it waits for
+today); §2 is what this branch changed.
 
 ## 1. Every sync / wait on the park, restore, snapshot and checkpoint paths
 
@@ -69,14 +70,99 @@ Every one of them waits for the whole device today; what they must wait for is t
 compute (its session/window/drafter streams) and, after a restore, only its own copy stream + the residency
 kernels queued behind the copies.
 
-## 2. The fix
+## 2. The fix: a park/restore waits only for its own bytes
 
-(step 2 - in progress)
+The wait narrows on three fronts; the copy contract does not move: **every park copy lands before the park
+returns, and every restore's bytes land before it returns** - the guarantees the plan names ("no reuse of the
+source cells before the copy; no use of restored cells before their bytes") stay host-ordered, and where the
+consumer is a stream the event form already existed (`order_after_queued`, conversation_copy.hpp - kept).
 
-## 3. Tests
+* **The pre-copy waits (:335/:395/:225/:552/:603) narrow to this conversation's own streams.** `sync()` already
+  honored the `device_sync_override` hook (its FAST_LANE branch); what was missing was anyone setting it for the
+  main conversation. `conversation_detail::narrow_sync` (conversation_copy.hpp) is the hook function: this
+  thread's private copy stream plus the scope's (device, stream) pairs on the device the wait runs on
+  (`park::wait_streams`, the pure decision, now unit-tested) - no `cudaDeviceSynchronize`, no capture-lock
+  acquisition (only device syncs invalidate in-flight captures, capture_lock.hpp:2-3). `LightSync` (the slot
+  save's scope) was hoisted into `ConvStreams`/`ConvSyncScope` (generate.cpp) - same semantics, now also
+  covering the copy stream; `persist_slot`'s `light` path is byte-identical.
+* **The post-copy wait (`conversation_checkpoint_restore` :242) is the copy stream alone.** Every copy above it
+  rides the private stream and lands per copy, so `copy_done()` (conversation_state.cpp, timed into `sync_ms`)
+  replaces the device sync - this is the 281-token restore that cost 1,066 ms with a 1 ms split. For the same
+  reason `refresh_residency` (conversation_snapshot.cpp) launches its map-reset/ring-refill kernels on the copy
+  stream on the restore paths (stream-ordered right after the pool copies, waited by the same wait) instead of
+  the legacy stream; the direct-copy path (`conversation_kv_copy`, queued mode) keeps its legacy launch +
+  ordering event + caller's device sync exactly as before. A restore thread that cannot get a copy stream (the
+  #2409 full-card case) falls back to the legacy launch with an immediate wait there - never less drained than before.
+* **The serve loop arms the scope** (`park_own_ok() && add_main_streams(...)`) around: the switch's park
+  (including `live_from_checks` and the spill), the borrow's prefix restore, the incoming restore, the session
+  file's context restore, the cut read's checkpoint restore, and the main turn save. The stream set is this
+  conversation's: `main_stream` (every session call, :4494), and with `--mtp` `ver`/`ver_b` (on a single card
+  the main verify windows, and a slot's batched draft prefill on the SHARED drafter, writes the draft K/V pool
+  the park saves - `park_draft` :10746; the verifiers' side streams fork/join through their own stream,
+  verify.cpp:1200-1204/:1478/:1542, so waiting for it waits for them) and `mtp.stream()` (the final draft cell
+  may still be queued, conversation_state.cpp:378-381). What stays OUTSIDE the scope is the whole point: other
+  conversations' queued windows on streams the parked conversation never touches, the expert tier's background
+  fills (legacy stream, e.g. expert_cache.cpp:737), PLE io, the adaptive tier, the session-dir writer (no device).
+* **The gate**: `park_own_ok() = stages.empty() && !pipe && !conc_serving && !in_prompt_read` - the whole model
+  on one card with no read running beside. A layer split moves the conversation's work onto per-stage streams
+  (and `pipe`'s pipelined decode onto `pl_stream`/snap side streams) that this list cannot bound, and concurrent
+  doorbell serving has a second thread queueing on this thread's streams: those shapes arm nothing and keep the
+  whole-device sync, byte-identical to today. `serve/qfn_engine.py` and `engines/qfn/serve/` are untouched -
+  no new stdout field, the park/restore lines' `split: ... sync N ms ...` plus `wait N ms` keep their format
+  (`sync` is now the narrowed wait; `wait` is still the time outside the clocks).
 
-(step 3 - pending)
+## 3. Tests run
 
-## 4. Open questions
+* `park_policy_test.cpp`: nine fake-stream checks on the narrowed wait-set - the device's share of a scope is
+  waited (own queued work: source cells not reused before their copy, restored cells not read before their
+  bytes), a stream of the OTHER device is not waited from this one, an unrelated conversation's stream is
+  never waited under a scope, and no scope means the whole-device sync, as before. **65 checks passed**
+  (56 at the merge tip + 9), standalone (`g++ -std=c++20 -I engines/qfn/include ...` into scratch/) and as
+  the `park_policy_test` target of the real build - each run one at a time. This is the only test module the
+  plan names; nothing ran on a GPU here.
+* Engine build proof: `QFN_GGML_DIR=/data/llm/maya/third_party/llama.cpp tools/qfn/build.sh scratch/build-p125k`
+  (CUDA, sm_75, /usr/local/cuda-13.1/bin/nvcc, fresh build dir, llama.cpp at the pinned 3cf03257f):
+  **QFN BUILD OK 179/179**, `saguaro-qfn` linked; `ninja -n -C scratch/build-p125k strata` reports *no work to
+  do* at tip. The one `generate.cpp` warning in the log (:15814 unused `w`) predates this branch.
+* Card test (manager, after): parks/restores during 2-3 busy conversations - the park line's `sync` part must
+  fall from the wait-storms (2471 ms) to this conversation's own drain, so the whole park approaches its
+  `copy` figure; reads/decode flat. `ref/mortar-park-new-20261126.log`'s shape: single card, conversations
+  interleaved through the switch - the gated shape. If the log still shows big `sync` there, the scope is not
+  being armed for that shape and the `park_own_ok` terms are the first thing to read.
 
-(to be written with the final report)
+## 4. Files changed
+
+* `engines/qfn/include/strata/core/park_policy.hpp` - `wait_streams` (the pure wait-set decision).
+* `engines/qfn/src/core/conversation_copy.hpp` - `narrow_sync` (the override hook: copy stream + the device's
+  scoped streams).
+* `engines/qfn/src/core/conversation_state.cpp` - `SyncRec` hoisted, `copy_done`, and
+  `conversation_checkpoint_restore` ends on the copy stream instead of the device sync.
+* `engines/qfn/src/core/conversation_snapshot.cpp` - `refresh_residency` takes a stream; the restore paths pass
+  the copy stream (legacy + immediate wait for the no-copy-stream thread); `conversation_kv_copy` unchanged.
+* `engines/qfn/src/program/generate.cpp` - the hoisted `ConvStreams`/`ConvSyncScope` (also used by the
+  FAST_LANE slot save), `park_own_ok`/`add_main_streams`, and the six arming sites above.
+* `engines/qfn/src/core/park_policy_test.cpp` - 56 -> 65 checks.
+* `REPORT-p125k-park-sync.md` - this file.
+
+## 5. Open questions
+
+* **`ver`/`ver_b` in the single-card slot shape**: they are in the wait set because a slot's batched draft
+  prefill on the shared drafter writes the draft K/V pool the main park reads - correct, but it means a busy
+  slot group's queued window is (partly) waited at the switch. The card run shows whether that matters; if it
+  does, the narrowing is a separate drafter-pool idle gate (persist_slot's `mtp.idle` precedent) that would let
+  `ver`/`ver_b` leave the set.
+* **The multi-GPU / pipelined shapes stay whole-device** (`park_own_ok`). Bounding them means attributing the
+  stage devices' window/pl_stream/snap streams per conversation - the same mechanism, more streams; the gate
+  keeps them byte-identical until that is done on the card.
+* **`copy_done` replaces the device sync at :242 for every caller**, scope or not: it rests on every restore
+  copy riding the private copy stream (true today: `copy()` is always `copy_nonblocking`, and the residency
+  refresh now too). A future restore-path copy that launches elsewhere must not bypass it - the same contract
+  `copy_stream_done` carries for `conversation_checkpoint_save`.
+* Whether the 2471 ms was the expert tier's legacy-stream fills or another conversation's window is not
+  provable from the log alone; the narrowed wait excludes both, which is why the card run is the real test.
+* The slot `copy_from_slot`/admission syncs (:14486-:14515) keep their device syncs: the source there is
+  ANOTHER session's cells, whose producer streams are that slot's - a different scope, not this plan's
+  "its own bytes".
+* The adopted park (P124a2) already had no device traffic; what the switch still paid was this step's target -
+  the restore side and the pre-syncs. The remaining restore-without-copies slowness the P124a2 report points
+  at (a `SessionDir::claim` writer wait, host-side) is untouched and still the next thread if the card says so.
