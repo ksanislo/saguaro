@@ -1,4 +1,9 @@
-"""Real pipe/process protocol regression for a native ERR that leaves its process alive."""
+"""Real pipe/process protocol regression for a native ERR that leaves its process alive.
+
+P124x (d): the engine releases a timed-out window's GPU waits itself; when they DRAINED and its verifier
+re-armed, the line says "released and the GPU finished (#267)" and the server ends the request only - a
+did-not-drain line, a timed-out line without the note, and a drained-but-still-closed (split) line end the
+engine.  The fake speaks each of those shapes, in its --mode."""
 import os
 from pathlib import Path
 import sys
@@ -8,7 +13,7 @@ import time
 import unittest
 import json
 import urllib.request
-from serve.server import StrataEngine, Service, ChatTemplate, EngineDied, serve
+from serve.server import StrataEngine, Service, ChatTemplate, EngineDied, fatal_engine_line, serve
 from serve.test_server import ByteTokenizer
 
 FAKE=r'''
@@ -25,8 +30,18 @@ for line in sys.stdin:
    if mode=='invalid':print('ERR prompt exceeds context',flush=True)
    else:
     kind='verify batch' if mode=='batch' else 'verify'
-    print(f'ERR {kind}: timed out at layer 18; its GPU waits were released and the GPU finished (#267)',flush=True)
-    print('DONE 0 1 0 1 error',flush=True)
+    if mode=='recovered':
+     # the engine drained its waits and re-armed: the request ends with this line, the engine idles for
+     # the next GEN (the engine's timeout path answers ERR and returns to stdin - no DONE follows)
+     print(f'ERR {kind}: timed out at layer 18; its GPU waits were released and the GPU finished (#267)',flush=True)
+    elif mode=='split':
+     # drained, but the split verifier stays closed: the fatal shape P124x review F3 must keep fatal
+     print(f'ERR {kind}: timed out at layer 18; its GPU waits were released and the GPU finished, but the verifier cannot take another window (#267)',flush=True)
+     print('DONE 0 1 0 1 error',flush=True)
+    else:
+     # no drain (or no note at all from the DONE it still prints): the verifier cannot take another window
+     print(f'ERR {kind}: timed out at layer 18; its GPU waits were released but the GPU did not finish within 5 s (#267)',flush=True)
+     print('DONE 0 1 0 1 error',flush=True)
    continue
   print('T 90\nDONE 1 1 0 1 stop',flush=True)
 '''
@@ -81,6 +96,33 @@ class FatalRecovery(unittest.TestCase):
         e=self.engine('batch')
         with self.assertRaises(EngineDied):list(e.generate([1],8,{},threading.Event()))
         self.wait_dead(e)
+
+    def test_a_drained_267_timeout_ends_the_request_not_the_engine(self):
+        # P124x (d): waits released AND the GPU finished - the engine re-armed its verifier.  The request ends
+        # with the engine's error and the SAME engine takes the next one: no kill, no minute-long reload.
+        e=self.engine('recovered');svc=self.service(e)
+        with self.assertRaises(ValueError):self.run_request(svc)     # the ERR ends this request
+        self.assertEqual(svc.history[-1]['finish'],'error')
+        self.assertTrue(e.alive(),'a drained #267 release must not end the engine');self.assertIs(svc.engine,e)
+        result=self.run_request(svc)                                 # and it did take the next one
+        self.assertIs(svc.engine,e);self.assertEqual(result[-1][1]['completion_tokens'],1)
+    def test_the_drained_but_still_closed_split_note_is_fatal(self):
+        # P124x review F3: a split verifier that re-poisons on drain says so - keeping it (server-wise) would
+        # only let the next request die on "an earlier window never finished".
+        e=self.engine('split')
+        self.feed(e,['ERR verify: timed out at layer 18; its GPU waits were released and the GPU finished, '
+                     'but the verifier cannot take another window (#267)\n','DONE 0 1 0 1 error\n'],0)
+    def test_fatal_engine_line(self):
+        # the pump's classifier, on the engine's exact words
+        self.assertFalse(fatal_engine_line('INFO park_pool=1 park_swap_mib=256'))
+        self.assertFalse(fatal_engine_line('ERR prompt exceeds context'))
+        self.assertFalse(fatal_engine_line('ERR verify: timed out at layer 42; its GPU waits were released and the GPU finished (#267)'))
+        self.assertFalse(fatal_engine_line('ERR verify batch: timed out at layer 20; its GPU waits were released and the GPU finished (#267)'))
+        self.assertTrue(fatal_engine_line('ERR verify: timed out at layer 42; its GPU waits were released but the GPU did not finish within 5 s (#267)'))
+        self.assertTrue(fatal_engine_line('ERR verify batch: timed out at layer 20'))   # no note (an older engine): fatal
+        self.assertTrue(fatal_engine_line('ERR verify: timed out at layer 42; its GPU waits were released and the GPU finished, but the verifier cannot take another window (#267)'))
+        self.assertTrue(fatal_engine_line('ERR verify: an earlier window never finished on the GPU (#267); restart the engine'))
+        self.assertTrue(fatal_engine_line('ERR verify batch: an earlier window never finished (#267)'))
 
     def feed(self,e,lines,slots):
         import queue

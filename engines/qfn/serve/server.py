@@ -899,6 +899,23 @@ SLOT_LINES = ("BT ", "BDONE ", "BRP ", "BRA ", "BRE ")
 FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed out at layer ",
                   "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
 
+# PLAN-p124x (d): a timed-out window is fatal only when its GPU waits did NOT drain. The engine releases the
+# window's waits itself on its 20 s per-layer timeout; when the GPU finishes right after (the #267 note the
+# engine prints, released_note in verify.cpp), no spin kernel is left and the verifier re-arms: the request ends
+# with this error, the engine stays fit for the next one - the shape the 9070 XT box needed, where every such
+# timeout restarted a one-minute reload while five requests waited and the host thrashed. "did not finish
+# within 5 s", and every "an earlier window never finished", still invalidate the engine (and a timed-out line
+# without the finished-note, whatever an older engine prints, stays fatal: safer).
+RECOVERED_267 = "released and the GPU finished (#267)"
+
+
+def fatal_engine_line(line: str) -> bool:
+    """True for the engine's #267 words that mean the verifier cannot take another window."""
+    if not line.startswith(FATAL_PREFIXES):
+        return False
+    timed_out = line.startswith("ERR verify: timed out at layer ") or line.startswith("ERR verify batch: timed out at layer ")
+    return not (timed_out and RECOVERED_267 in line)
+
 
 def parse_engine_stage_line(line: str) -> list[dict] | None:
     """Accept only the engine's final, contiguous stage plan (inclusive layer ends)."""
@@ -1349,9 +1366,11 @@ class StrataEngine:
             if line.startswith("INFO ") and self._session_note(line):
                 continue                                # a session note: shown and kept, never an answer
             # checked before batch routing: a fatal line is never a slot's own
-            if line.startswith(FATAL_PREFIXES):
+            if fatal_engine_line(line):
                 # release_gpu_waits invalidates the verifier, even if the native
-                # process stays alive and prints DONE afterwards.
+                # process stays alive and prints DONE afterwards.  (A timed-out window whose waits drained is not
+                # one of those: the engine re-armed its verifier, P124x - the request ends with the error, the
+                # engine keeps the next one.)
                 if self.proc is proc:
                     self.silent_note = "Unrecoverable native verification failure: " + line[4:].strip()
                     self.ended = True
