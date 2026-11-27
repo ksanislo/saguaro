@@ -1002,16 +1002,22 @@ Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::
     }
     if (cudaDeviceSynchronize() != cudaSuccess) return fail("KV streaming: the residency maps did not reset");
     // P125g step 4 (PLAN-p125g): the line names what is PINED NOW at the load and what one conversation at this
-    // context can grow it to - the arena starts at 0 MiB, the old whole-max allocation started at %.2f GB.  The
-    // eager fallback (no lazy arena) has it all pinned at the load, as it always did, and says so the same way.
-    // tools/mem_vs_ctx.py reads the "… of pinned RAM" figure as the engine's declared pin: it says what is pinned
-    // now, like the INFO context= line's kv_ram_bytes.
-    const uint64_t pin0 = K->pinned_now();
-    std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM "
-                         "(%.2f GB), pinned latent cache grows with use: %llu MiB of pinned RAM at start, up to "
-                         "%.2f GB\n", dev_, (long long) cells, (long long) ctx,
-                 ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9, (unsigned long long) (pin0 >> 20),
-                 (double) K->host_bytes / 1e9);
+    // context can grow it to - the arena starts at 0 MiB, where the old whole-max allocation started at its full
+    // size.  The eager fallback (no lazy arena) has it all pinned at the load, as it always did - telling it to
+    // "grow with use" up to that same figure would be self-contradicting, so its line names the pinned cache as
+    // what it is.  Either line states the engine's declared pin for tools/mem_vs_ctx.py: the "up to M GB" ceiling
+    // of the lazy line, the whole-cache figure standing before "of pinned RAM" on the fallback's.
+    if (K->arena.empty())
+        std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM "
+                             "(%.2f GB), pinned latent cache: %.2f GB of pinned RAM at the load, the whole cache "
+                             "(no lazy arena on this device)\n", dev_, (long long) cells, (long long) ctx,
+                     ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9, (double) K->host_bytes / 1e9);
+    else
+        std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM "
+                             "(%.2f GB), pinned latent cache grows with use: %llu MiB of pinned RAM at start, up to "
+                             "%.2f GB\n", dev_, (long long) cells, (long long) ctx,
+                     ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9,
+                     (unsigned long long) (K->pinned_now() >> 20), (double) K->host_bytes / 1e9);
     return K;
 }
 

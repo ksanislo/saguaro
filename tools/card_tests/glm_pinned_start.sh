@@ -12,8 +12,10 @@
 # What it does, once per context in $CTXS (default "32768 262144"):
 #   start a test copy of the card's GLM config on its own port with its own session dir, engine log and config
 #   copy (api_key dropped - the readiness poll and the requests send none), wait for /health;
-#   read the pinned start from the engine log: "pinned latent cache grows with use: N MiB of pinned RAM at start"
-#   (no such line = streaming off at that context = 0 pinned, which is the point of the comparison);
+#   read the pinned start from the engine log: the lazy arena says "pinned latent cache grows with use: N MiB of
+#   pinned RAM at start", the eager fallback "pinned latent cache: X GB of pinned RAM at the load, the whole cache"
+#   (counted here in MiB - not 0, not the same at every context, and that is exactly what the comparison flags);
+#   no such line = streaming off at that context = 0 pinned, which is the point of the comparison;
 #   one short warm-up request, then one fresh ~TOKENS-token prompt (a different seed word per context, so neither
 #   run reuses the other's read) and the wall seconds of that read.
 # PASS: every context starts at the SAME pinned figure (and that figure is 0 - nothing pinned at the load), and
@@ -130,12 +132,20 @@ import json, sys, urllib.request
 print(json.load(urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/v1/models"))["data"][0]["id"])
 PY
 ) || fail "no model id on :$PORT"
-    # the pinned start, from the engine's own line (absent = streaming off = 0 MiB pinned)
+    # the pinned start, from the engine's own line.  Lazy arena: "pinned latent cache grows with use: N MiB ... at
+    # start".  Eager fallback: "pinned latent cache: X GB of pinned RAM at the load, the whole cache" - not 0 and
+    # not equal across contexts, so the verdict flags it, which is the point.  No line = streaming off = 0 MiB.
     PIN=$(grep -oE "pinned latent cache grows with use: [0-9]+ MiB of pinned RAM at start" "$ELOG" 2>/dev/null \
           | grep -oE "[0-9]+ MiB" | grep -oE "[0-9]+" | tail -1)
+    if [ -z "$PIN" ]; then
+        GB=$(grep -oE "pinned latent cache: [0-9.]+ GB of pinned RAM at the load" "$ELOG" 2>/dev/null \
+             | grep -oE "[0-9]+\.[0-9]+" | tail -1)
+        [ -n "$GB" ] && PIN=$(awk -v g="$GB" 'BEGIN {printf "%d", g * 1e9 / 1048576}')
+    fi
     PIN=${PIN:-0}
     echo "ctx $CTX: pinned latent cache at the load: $PIN MiB"
-    grep -oE "pinned latent cache grows with use: .*" "$ELOG" 2>/dev/null | tail -1 || echo "  (no KV streaming line: streaming off at this context)"
+    grep -oE "pinned latent cache(:| grows with use:).*" "$ELOG" 2>/dev/null | tail -1 \
+        || echo "  (no KV streaming line: streaming off at this context)"
     # warm-up: one short request (the first of a fresh engine pays the kernel graph builds)
     printf '{"model": "%s", "max_tokens": 8, "temperature": 0, "messages": [{"role": "user", "content": "Reply with the word OK."}]}' "$MODEL" > "$DIR/body_warm_$CTX.json"
     curl -s -o /dev/null -m 900 -X POST "http://127.0.0.1:$PORT/v1/chat/completions" \
