@@ -1,17 +1,19 @@
-# MANAGER: FIX-FIRST (card test, mortar, 2026-11-26 13:24-13:30 MST, commit ae2dac446)
-HOST side now PASSES: "1.30 GiB of pinned RAM for the K/V of every session" at BOTH --max-context 262144 and 1048576
-(the solo session 0.46 GiB, the batch slots and the drafters the rest), and the expert RAM tier is 68.00 GiB at both.
-VRAM side FAILS: the GPU expert cache holds 2256 experts at 262144 but only 843 at 1048576 ("resident RAM mode: 68.00 GiB
-of experts in RAM (page-locked), 2256 / 843 in the GPU cache"), and the prompt path's lendable slots are 1915 vs 618
-("933 of 1915" / "618 of 618 lendable slots ... will read their experts from the pack"). Result: the same 29,571-token
-read takes 36 s (820 tok/s) at 262144 and 256 s (115 tok/s) at 1048576.
-So some DEVICE (VRAM) allocation is still sized by --max-context at load, and the expert cache gets what is left.
-Fix (Ken's acceptance: just HAVING 1M set must not hurt; memory follows use):
-1. List every VRAM allocation made at load whose size depends on --max-context (grep the KV-streaming / QSA / attention
-   / RoPE-YaRN tables / position buffers / prompt-chunk scratch / MTP drafter K/V / index buffers in engines/qfn/src;
-   compare the two load logs' VRAM lines if the engine prints them). Write each with file:line and its size at 262144 and
-   1048576 into FIX-REPORT.md.
-2. Make each one sized by use (a start step, grown with the conversation like the host K/V now is) or by the VRAM window
-   (32768 cells), never by --max-context. Nothing may change for a conversation that really grows past 262144.
-3. The card test must then show the SAME GPU expert-cache count and the same lendable slots at both contexts.
-Build for CUDA sm_75 in a NEW build dir under scratch/; no GPU runs. Commit each part.
+# MANAGER: FIX-FIRST round 5 (card test, mortar RX 9070 XT, 2026-11-26 17:38-17:42 MST, commit 67e1244e6)
+Host side still PASSES (1.30 GiB pinned K/V at 262144 and 1048576; expert RAM tier 68 GiB at both). VRAM side improved
+but FAILS, and 262144 got WORSE than round 3:
+- VRAM IN USE BEFORE THE EXPERT CACHE: 262144 "8.67 GiB of 15.92" (7.25 free) vs 1048576 "12.08 GiB of 15.92" (3.84 free)
+  -> ~3.4 GiB is still allocated by --max-context somewhere between model load and the expert-cache sizing, and no
+  log line names it. GPU expert cache 1925 vs 1057 slots; 30K read 679 tok/s vs 240 tok/s.
+- At 262144 the cache fell from 2256 slots (round 3, ae2dac446) to 1925 and the read from 820 to 679 tok/s: the new
+  VRAM path costs ~1 GiB even at the default context.
+Do, in order, committing each:
+1. A load-time accounting line: every VRAM allocation >= 64 MiB made before the expert cache is sized, its name and
+   size (one line each, or one table), and ONE line saying whether the elastic VRAM path is ENGAGED on this device
+   (VMM / hipMemAddressReserve available and used) or fell back - with the reason.
+2. From that accounting (read the code paths it names), find the ~3.4 GiB that still scales with --max-context and the
+   ~1 GiB the new path costs at 262144; fix both. If HIP lacks what the elastic VRAM path needs, say so in FIX-REPORT
+   with the evidence and implement the fallback that still satisfies the rule on this device (e.g. size the start step
+   only and grow by re-allocation outside the hot path, or let the expert cache give VRAM back as a conversation grows).
+3. Acceptance (Ken): at 262144 and 1048576 the same VRAM in use before the expert cache, the same expert-cache slots,
+   the same 30K read speed; and 262144 no worse than round 3 (2256 slots, ~820 tok/s on mortar).
+Build for CUDA sm_75 in a NEW build dir under scratch/; no GPU runs.
