@@ -4678,6 +4678,11 @@ class Service:
                 stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
                 stat.read_eng_n, stat.read_eng_ms = 0, None   # (the engine's live pair restarts with the read)
                 stat.read_leg_ms = 0.0                  # (P124v2: and so does its own elapsed span)
+                if stat.engine_t0 is not None:
+                    # (P124v2 review nit 3: the open leg's start re-baselines too - _read_span_s adds
+                    #  now - engine_t0 to the span, and the counter going backwards mid-admission would
+                    #  otherwise carry the PREVIOUS read's whole time into the new read's span)
+                    stat.engine_t0 = now
                 self._read_open(stat, now)              # (counts from nothing again; the engine's counter reset)
             d = n_read - stat.read_pos
             stat.read_pos = n_read
