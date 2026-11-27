@@ -10568,6 +10568,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             park_lim.severe_bytes = (uint64_t) o.conversation_cache_min_free_mib << 20;
             park_lim.psi = env_num("SAGUARO_PARK_PSI", 10.0);
             park_lim.idle_s = env_num("SAGUARO_PARK_IDLE_S", 0.0);
+            park_lim.swap_bytes = (uint64_t) env_num("SAGUARO_PARK_SWAP_MIB", 256.0) << 20;
             if (o.conversation_cache_pool) {
                 // one pool with the live K/V: every batch slot at --max-context (the solo session alone without --batch)
                 const uint64_t per_token = strata::core::qsa_kv_bytes_per_cell(g) * (uint64_t) std::max<int64_t>(0, g.n_qsa_layers());
@@ -10577,18 +10578,25 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (o.serve && o.conversation_cache_mib > 0)
                 std::fprintf(stderr, "saguaro serve: conversation cache: %s%lld MiB for up to %d parked conversations; they "
-                                     "leave when available RAM is under %lld MiB%s%s, unsaved ones only under %lld MiB\n",
+                                     "leave when available RAM is under %lld MiB%s%s%s, unsaved ones only under %lld MiB\n",
                              o.conversation_cache_pool ? "one pool with the live K/V (--max-context x batch slots), " : "",
                              (long long) o.conversation_cache_mib, o.conversation_cache_slots,
                              (long long) (park_lim.free_bytes >> 20),
                              park_lim.psi > 0 ? (" or memory stalls pass " + std::to_string(park_lim.psi).substr(0, 5)).c_str() : "",
+                             park_lim.swap_bytes > 0
+                                 ? (", or swap in use passes " + std::to_string(park_lim.swap_bytes >> 20) +
+                                     " MiB (P124x)").c_str()
+                                 : "",
                              park_lim.idle_s > 0 ? (", or after " + std::to_string((long long) park_lim.idle_s) + " s idle").c_str() : "",
                              (long long) o.conversation_cache_min_free_mib);
         }
         if (o.serve) {
-            std::printf("INFO park_pool=%d park_pool_mib=%lld park_free_mib=%lld park_psi=%.1f park_idle_s=%lld\n",
+            // park_swap_mib= joins the INFO line (P124x): the server's parser reads the keys it knows and ignores
+            // the rest; an external one keyed on the exact token count must key on names instead (report 4).
+            std::printf("INFO park_pool=%d park_pool_mib=%lld park_free_mib=%lld park_psi=%.1f park_idle_s=%lld park_swap_mib=%lld\n",
                         o.conversation_cache_pool ? 1 : 0, (long long) (park_lim.pool_bytes >> 20),
-                        (long long) (park_lim.free_bytes >> 20), park_lim.psi, (long long) park_lim.idle_s);
+                        (long long) (park_lim.free_bytes >> 20), park_lim.psi, (long long) park_lim.idle_s,
+                        (long long) (park_lim.swap_bytes >> 20));
             std::fflush(stdout);
         }
         auto park_clock = [] { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); };
@@ -18388,6 +18396,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::ifstream psi("/proc/pressure/memory");
                 if (psi) mem.psi_some10 = pk::psi_some10(psi);
             }
+            // P124x: what the kernel has already moved to swap.  The credit above is a bet that the pinned tier
+            // stays resident; with swap over the bar the bet is lost and the raw reading decides again (mortar ran
+            // 2-5 GiB of swap behind a credited-calm `available` while the releases did nothing).
+            if (park_lim.swap_bytes > 0) mem.swap_used = strata::core::host_swap_used_bytes();
             const bool pressed = pk::pressure_need(mem, park_lim) > 0;
             // the hard floor is judged raw: below it the releases must run however big the credit is (F1)
             const bool hard = pk::severe(mem, park_lim);
@@ -18398,8 +18410,11 @@ vs.d_skip_usage = gs.d_skip_usage;
             // the freed blocks the park pool keeps mapped are RAM nobody uses: they go before any conversation
             if (pressed && pooled > 0) {
                 const size_t n = strata::core::parked_block_pool_trim(0);
-                std::fprintf(stderr, "saguaro serve: conversation cache: memory pressure (%.1f GiB free): %zu MiB of "
-                                     "pooled park buffers go back to the OS\n", free_gib, n >> 20);
+                char sw[64] = "";
+                if (mem.swap_used && *mem.swap_used > 0)
+                    std::snprintf(sw, sizeof sw, ", %.1f GiB in swap", (double) *mem.swap_used / 1073741824.0);
+                std::fprintf(stderr, "saguaro serve: conversation cache: memory pressure (%.1f GiB free%s): %zu MiB of "
+                                     "pooled park buffers go back to the OS\n", free_gib, sw, n >> 20);
                 return;   // (the next tick samples again)
             }
             if (conversations.size() == 0) return;
@@ -18419,6 +18434,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::snprintf(why, sizeof why, "budget: the live K/V holds %.1f of the pool's %.1f GiB",
                                   (double) strata::core::qsa_kv_host_bytes() / 1073741824.0,
                                   (double) park_lim.pool_bytes / 1073741824.0);
+                else if (pk::swap_high(mem, park_lim))
+                    std::snprintf(why, sizeof why, "pressure: %.1f GiB free, %.1f GiB already in swap (P124x: the host is "
+                                                   "out of RAM, the engine's own pinned tier gives no calm)",
+                                  free_gib, mem.swap_used ? (double) *mem.swap_used / 1073741824.0 : 0.0);
                 else if (mem.psi_some10 && pk::psi_high(mem, park_lim) && !pressed)
                     std::snprintf(why, sizeof why, "pressure: memory stalls %.1f, %.1f GiB free", *mem.psi_some10, free_gib);
                 else if (mem.own_pinned > 0)

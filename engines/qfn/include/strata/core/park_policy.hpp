@@ -6,10 +6,11 @@
 //     be able to pin for live context anyway.  Their budget is what the live K/V does not hold right now, so a slot
 //     that grows or a new conversation shrinks it and the oldest parked entries leave.
 //   * They never take room from the weights or from live context: when the host's available RAM falls under the
-//     floor (or the kernel reports memory stalls), they are released until it is back above it.  The engine's own
-//     pinned weights and K/V pool are credited back when judging that (Memory::own_pinned) - down to the hard
-//     floor: a resident-RAM engine is meant to hold most of the host, and dropping parks cannot change that, but
-//     below the hard floor the raw reading decides and the releases fire anyway (PLAN-p124a).
+//     floor (the kernel reports memory stalls, or swap is already in use - P124x), they are released until it is
+//     back above it.  The engine's own pinned weights and K/V pool are credited back when judging that
+//     (Memory::own_pinned) - down to the hard floor: a resident-RAM engine is meant to hold most of the host, and
+//     dropping parks cannot change that, but below the hard floor - or with the kernel already moving pages to
+//     swap - the raw reading decides and the releases fire anyway (PLAN-p124a, PLAN-p124x).
 //   * Otherwise they stay: nothing expires by age unless SAGUARO_PARK_IDLE_S says so.
 // An entry whose session file is written leaves at once.  One that is not yet on disk has its write started now (no
 // write delay) and its RAM goes back when the write ends; it is dropped unwritten only when the available RAM is
@@ -32,6 +33,13 @@ struct Limits {
     uint64_t severe_bytes = 2560ull << 20;   // --conversation-cache-min-free-mib: under this, unsaved entries go too
     double psi = 10.0;                       // SAGUARO_PARK_PSI: memory "some avg10" above this is pressure (0: off)
     double idle_s = 0.0;                     // SAGUARO_PARK_IDLE_S: an entry idle longer than this leaves (0: never)
+    // SAGUARO_PARK_SWAP_MIB: swap in use above this means the host is out of RAM, and the own_pinned credit
+    // stops (P124x - the mortar box ran 2-5 GiB of swap with the credit calling everything calm).  The default
+    // separates a storm from dust: every mortar abort line carried 392 MiB to 5.9 GiB of swap, while a calm
+    // box's residual swap (idle daemons paged out once) sits in the tens of MiB; swap only drains when its
+    // owners swap pages back in or exit, so the bar is deliberately above dust - it holds while swap holds,
+    // which is exactly "the host moved working pages to disk and they are still there".  0: off.
+    uint64_t swap_bytes = 256ull << 20;
 };
 
 struct Memory {
@@ -45,6 +53,11 @@ struct Memory {
     // `severe_bytes` the RAW reading is what is short - a host genuinely full is not the resident mode working, and
     // its parks must go (F1).  The admission checks keep the raw reading too, so a full host still stops a park.
     uint64_t own_pinned = 0;
+    // PLAN-p124x: bytes of swap the kernel already has in use (SwapTotal - SwapFree).  The credit above is a bet that
+    // pinned expert RAM will not be reclaimed into swap; when it has been - swap is in use - the bet is lost and the
+    // raw reading decides again: on the mortar box the host ran 2-5 GiB of swap and 100k+ major faults while the
+    // credited `available` still read calm, so the parks never gave back before the storm.
+    std::optional<uint64_t> swap_used;
 };
 
 struct Entry {
@@ -87,15 +100,24 @@ inline std::optional<double> psi_some10(std::istream& in) {
 
 inline bool severe(const Memory& m, const Limits& l) { return m.available && *m.available < l.severe_bytes; }
 
+/// P124x: swap the kernel already holds above the limit - the host is out of RAM NOW, and the pinned tier is not
+/// "the resident mode working" any more: it is the reason the rest had to move to disk.  (0 swap limit: off.)
+inline bool swap_high(const Memory& m, const Limits& l) {
+    return l.swap_bytes > 0 && m.swap_used && *m.swap_used > l.swap_bytes;
+}
+
 /// The bytes pressure asks back: up to an eighth above the floor, so one release does not leave it at the edge.
 /// The engine's own pinned tier and live K/V pool (`own_pinned`: RAM no release gives back) are credited first -
 /// the floor guards against a shortage no parked conversation caused, not against the resident RAM mode working.
 /// The credit stops at the hard floor: under `severe_bytes` the raw reading is asked for back, so the floor still
 /// fires on a host genuinely full however much the engine itself pins (PLAN-p124a review F1 - with the credit
 /// unbounded, `pressed` could never go true on a resident-RAM box and no release, unsaved ones included, ran).
+/// And it stops when swap is already in use (PLAN-p124x): the credit's premise was that the pinned tier stays
+/// resident; on a host that is swapping it does not, and the raw shortfall is what the parks must answer to.
 inline uint64_t pressure_need(const Memory& m, const Limits& l) {
     if (l.free_bytes == 0 || !m.available) return 0;
-    const uint64_t avail = severe(m, l)
+    const bool credit_off = severe(m, l) || swap_high(m, l);
+    const uint64_t avail = credit_off
         ? *m.available
         : (*m.available > UINT64_MAX - m.own_pinned ? UINT64_MAX : *m.available + m.own_pinned);
     if (avail >= l.free_bytes) return 0;
