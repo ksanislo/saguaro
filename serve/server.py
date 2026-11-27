@@ -8911,25 +8911,136 @@ def index_html() -> bytes:
     return body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
 
 
+# ------------------------------------------------- the engine's own load lines, as the load's progress (P125m phase 2)
+# What the loading screen and the switch bar show is NOT a timer: it is what the engine is writing to its log right
+# now, mapped through a small table of that engine's load milestones - shards read, experts pinned, cards ready ...
+# The lines come from each engine's own sources (src/, engines/qfn/src/) and from what this server already reads of
+# them (narrate_start, ik2_log_facts, _context_cost); the tables are tested against recorded lines in
+# serve/testdata/.  A line the table does not know keeps the last value: the bar never jumps on noise.  The
+# percentages say where a milestone sits in a usual load of that engine - the last stretch is quick and lands late,
+# and the engines that write little while they load (hy4, mm3) simply hold longer between their lines.
+def _between(lo: float, hi: float):
+    """A milestone's percentage from a counter line "N / M": `lo` at none, `hi` at all of them."""
+    def f(m):
+        n, d = int(m.group(1)), int(m.group(2))
+        return lo + (hi - lo) * (min(1.0, n / d) if d > 0 else 0.0)
+    return f
+
+
+# Each table: (pattern, percentage, the step's words), scanned in order, first match wins; a line none of them
+# knows keeps the last (pct, step).  The families are maya_quants.family_of's, plus "qfn" (the batch engine); an
+# engine with no table (the mock) simply never moves the bar.
+LOAD_MILESTONES = {
+    "glm": [
+        (re.compile(r"PLE on\b"), 12, "setting up the expert fast path"),
+        (re.compile(r"expert arena:"), 18, "making room for the experts in RAM"),
+        (re.compile(r" loaded .*GiB at"), 55, "experts read into RAM"),
+        (re.compile(r"(?:CUDA|HIP)\d+ VRAM before the expert pool"), 70, "cards ready: the context first"),
+        (re.compile(r"expert cache \d+ slots, "), 82, "filling the GPU's expert cache"),
+        (re.compile(r"session is up"), 95, "almost ready"),
+    ],
+    "deepseek": [
+        (re.compile(r"saguaro ds4: loading \d+ experts"), 5, "reading the pack's expert list"),
+        (re.compile(r"saguaro ds4: copying experts (\d+) / (\d+)"), _between(65, 82),
+         "pinning the experts for the CPU lane"),
+        (re.compile(r"saguaro ds4: experts (\d+) / (\d+)"), _between(8, 65), "copying the experts into RAM"),
+        (re.compile(r"saguaro ds4: CUDA\d+ layers \["), 88, "cards ready: layers placed"),
+    ],
+    "qfn": [
+        (re.compile(r"^\[strata\].*engine started"), 2, "the engine starts"),
+        (re.compile(r"reading the model's geometry from"), 6, "reading the pack"),
+        (re.compile(r"native pack: \d+ experts"), 10, "shards read: the pack's index"),
+        (re.compile(r"PLE table .* in "), 14, "reading the PLE table"),
+        (re.compile(r"experts via mmap"), 18, "mapping the experts from the model files"),
+        (re.compile(r"expert arena:"), 18, "making room for the experts in RAM"),
+        (re.compile(r"(?:CUDA|HIP)\d+ context ready, .* before expert arena registration"), 24, "cards ready"),
+        (re.compile(r"expert arena read "), 68, "experts read into RAM"),
+        (re.compile(r"expert arena checksum"), 74, "experts pinned in RAM"),
+        (re.compile(r"expert cache:?\s+\d+ slots, "), 84, "filling the GPU's expert cache"),
+        (re.compile(r"session is up"), 95, "almost ready"),
+    ],
+    "ik2": [
+        (re.compile(r"saguaro ik2: \d+ layers.*?\d+ shards"), 8, "shards read"),
+        (re.compile(r"kv cache: "), 30, "allocating the K/V cache"),
+        (re.compile(r"experts in pinned "), 60, "experts pinned in RAM"),
+        (re.compile(r"expert cache, GPU \d+: \d+ slots"), 85, "cards ready"),
+    ],
+    "hy4": [
+        (re.compile(r"CPU lane: \d+ experts re-coded at 4 bits"), 55, "recoding the CPU lane's experts"),
+        (re.compile(r"measuring this PC once"), 70, "measuring this PC once"),
+        (re.compile(r"drafting trial: "), 80, "trying the drafters"),
+    ],
+    "minimax": [
+        (re.compile(r"reading the model's files for NaN/Inf"), 45, "checking the model's files"),
+        (re.compile(r"CPU lane"), 68, "measuring the CPU lane"),
+    ],
+}
+
+
+def load_progress(family: str, line: str, pct=None, step: str = "") -> tuple:
+    """One engine log line against the engine's milestone table: the (pct, step) after it.  A line the table does
+    not know keeps the last value - and both stay None/"" until a table line has been seen."""
+    for rx, p, s in LOAD_MILESTONES.get(family) or []:
+        m = rx.search(line)
+        if m:
+            v = p(m) if callable(p) else p
+            return (None if v is None else int(v)), (s(m) if callable(s) else s)
+    return pct, step
+
+
 class LoadState:
     """What the "starting" service answers with while the engine is not there yet (issue #20 phase 1): the model's
     name, and that the load runs.  main() hands the real Service over on the same socket (take_over); a load that
-    fails says so here instead (fail), and the port keeps answering with it."""
+    fails says so here instead (fail), and the port keeps answering with it.  Phase 2 (P125m): /health carries the
+    load's real progress - the engine's own load lines, read as they land in its log, through the family's
+    milestone table (LOAD_MILESTONES): {"pct": 0..100 | null, "step": the current step's words}."""
 
     def __init__(self, model: str, log_path=None, api_key: str = "", supervisor: str | None = None, port=8095,
-                 config_path=None, switching: bool = False):
+                 config_path=None, switching: bool = False, family: str = ""):
         self.model, self.log_path = model, log_path
         self.api_key, self.supervisor, self.port = api_key, supervisor, port
         self.config_path = str(config_path) if config_path else None
         self.switching = bool(switching)          # this start is the other half of a model switch (P125m): the page
                                                   #  that shows the app keeps it and waits, and /v1/models keeps listing
+        self.family = family or ""                # the engine's family: which milestone table its log lines read by
         self.t0 = time.time()
         self.status, self.error = "loading", None
         self.failed_seen = threading.Event()      # a /health that told the supervisor about the failure
+        # the progress (P125m): the engine's log read as it lands, through the family's milestone table.  The first
+        # look starts where this start began (the log file still holds the earlier starts' lines); a line that
+        # died mid-load keeps the last value, so the bar waits rather than jumping back.
+        self.pct, self.step = None, ""
+        self._pos = None                          # bytes of the log read so far (None: take the size on first look)
+        self._log_lock = threading.Lock()
+        if log_path:
+            with contextlib.suppress(OSError):
+                self._pos = Path(log_path).stat().st_size
 
     def fail(self, error) -> None:
         """The load failed (issue #20): the standing page shows this, /health says {"status": "failed"} with it."""
         self.status, self.error = "failed", str(error) or type(error).__name__
+
+    def _advance_progress(self) -> None:
+        """Read what the engine wrote to its log since the last look and run every new line through the family's
+        milestone table (load_progress): /health's pct and step follow the engine's own load, not a timer."""
+        if not self.log_path:
+            return
+        with self._log_lock:
+            try:
+                with open(self.log_path, "rb") as f:
+                    if self._pos is None:
+                        f.seek(0, 2)
+                        self._pos = f.tell()
+                        return
+                    f.seek(self._pos)
+                    chunk = f.read(262144)                     # (a 256 KiB step of the log, per look at most)
+                    cut = chunk.rfind(b"\n") + 1               # only complete lines: the half one is read again
+                    if cut:
+                        self._pos += cut
+                for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+                    self.pct, self.step = load_progress(self.family, line, self.pct, self.step)
+            except OSError:
+                pass                                           # (no log yet, or it moved: wait for the next look)
 
     def last_log_line(self) -> str:
         """The engine log's last line, trimmed - what the loading screen shows while it waits ("" before the
@@ -8954,8 +9065,10 @@ class LoadState:
         # model name, how long the load has run, and what the engine was last saying.  A failed load adds the error
         # and, when a different config loaded before, what the page's button would start (never under a supervisor,
         # which owns starts and switches itself).
+        self._advance_progress()     # (P125m: the progress the answer carries is the engine's own lines, read now)
         out = {"status": self.status, "model": self.model, "elapsed_s": int(time.time() - self.t0),
-               "line": self.last_log_line(), "supervisor": self.supervisor}
+               "line": self.last_log_line(), "supervisor": self.supervisor,
+               "pct": self.pct, "step": self.step}
         if self.status == "loading" and self.switching:
             out["switch"] = True      # (P125m: a page that shows the app keeps it on screen and says "loading <model>")
         if self.status == "failed":
@@ -9956,7 +10069,8 @@ def main() -> int:
     # "switch", /v1/models keeps listing, and a page that already shows the app keeps it on screen and waits.
     load_state = LoadState(cfg.get("model_name", "qwen3.8-flash-next"), log_path=cfg.get("log"),
                            api_key=api_key, supervisor=supervisor, switching=os.environ.get("SAGUARO_SWITCH") == "1",
-                           config_path=str(Path(a.config).resolve()) if a.config else None)   # (as write_last_good keeps it)
+                           family=maya_quants.family_of(cfg) if cfg and kind != "mock" else "",   # (P125m: whose
+                           config_path=str(Path(a.config).resolve()) if a.config else None)   # (milestones its log has)
     try:
         httpd = serve_loading(load_state, host=a.host, port=a.port)
     except OSError:

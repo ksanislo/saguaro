@@ -18,6 +18,9 @@ export function startingView(h) {
     name: h.model ? modelLabel(h, {compact: true}) : "",
     elapsed: h.elapsed_s != null ? ago(+h.elapsed_s || 0) : "",
     line: h.line || "",
+    // (P125m: the load's progress is the engine's own lines, mapped by the server: a percent and the step's words)
+    pct: !failed && h.pct != null && h.pct !== "" ? Math.max(0, Math.min(100, Math.round(+h.pct || 0))) : null,
+    step: failed ? "" : (h.step || ""),
     error: failed ? (h.error || "the model did not start") : "",
     lastGood: h.last_good || null,                 // ({config, time}: the server says none under a supervisor)
     restarting: h.restarting || null,              // (this page asked: waiting for that start to answer)
@@ -49,7 +52,11 @@ export function StartingPage() {
         <div class="start__spin" aria-hidden="true"></div>
         <h1 class="start__title">Loading the model</h1>
         ${v.name ? html`<p class="start__model">${v.name}</p>` : null}
-        <p class="start__meta">${v.elapsed ? `it has been running for ${v.elapsed}` : ""}${v.line ? html` · <code>${v.line}</code>` : null}</p>`
+        ${v.pct != null ? html`
+          <div class="start__prog" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${v.pct}>
+            <i style=${`width:${v.pct}%`}></i></div>
+          <p class="start__meta">${v.step ? html`<b>${v.step}</b> · ` : null}${v.pct}%${v.elapsed ? ` · it has been running for ${v.elapsed}` : ""}</p>`
+        : html`<p class="start__meta">${v.elapsed ? `it has been running for ${v.elapsed}` : ""}${v.line ? html` · <code>${v.line}</code>` : null}</p>`}`
       : html`
         <div class="start__spin" aria-hidden="true"></div>
         <h1 class="start__title">Saguaro</h1>`}

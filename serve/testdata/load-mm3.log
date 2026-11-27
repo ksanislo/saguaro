@@ -1,0 +1,4 @@
+saguaro mm3: NOTE: mbind to NUMA node 1 failed: the pool's pages go where they are touched
+saguaro mm3: layer 0's router: reading the model's files for NaN/Inf (layers 0-59) ...
+saguaro mm3: CPU lane vs staging (measured): an expert 2.40 ms on the CPU lane (+0.30 ms each more), staging 1.85 ms
+saguaro mm3: kv gather check layer 3 pos 8192: 6 host blocks copied (6 slots), ok
