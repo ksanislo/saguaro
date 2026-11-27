@@ -10870,7 +10870,7 @@ int main(int argc, char** argv) {
                                         .c_str(),
                                     ids.size());
                     } else
-                        std::printf("@END error out_of_memory 0 %zu 0 0\n", ids.size());
+                        std::printf("@END error out_of_memory %zu 0 0 0\n", ids.size());
                     std::fflush(stdout);
                     continue;
                 }
