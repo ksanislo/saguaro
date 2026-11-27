@@ -23230,7 +23230,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             // the whole exit save gets --session-dir-exit-s (10 s).  Past it the rest is skipped: what is on disk
             // stays what the last turn left, and the exit is never blocked by the save (the P125a box spent minutes here)
             const auto t_save = std::chrono::steady_clock::now();
-            const auto exit_deadline = t_save + std::chrono::duration<double>(o.session_dir_exit_s);
+            const auto exit_deadline = t_save + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(o.session_dir_exit_s));
             std::fprintf(stderr, "saguaro serve: session dir: saving the live conversation and %zu slot(s) at exit "
                                  "(up to %.0f s)\n", bs.size(), o.session_dir_exit_s);
             sdir->begin_exit();
