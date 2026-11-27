@@ -3209,6 +3209,28 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 return false;
             }
         }
+        // P125j: is this the chunk a run paused between two layers (or the one a park handed back)?  Its
+        // saved residual rows go up into m.R in place of the embeddings, and the layer loop below starts at
+        // the saved layer: the layers below it have already written this chunk's K/V cells, GDN/conv state
+        // and indexer tails into the session, so only the rows carry across the pause.  The PLE rows rebuild
+        // from the tokens as usual, and `normed` stays false, so the first half recomputes its norms from
+        // these rows.  A pause that does not match this run's shape is never wrong, only unapplied: the
+        // chunk is then read again whole, which rewrites the same cells (the PLE advance idempotent).  The
+        // decision sits at the chunk's top because the embeddings below are skipped on a resume, and the
+        // copy goes up on the compute stream and waits for it: a previous chunk's layer kernels (if any are
+        // still queued on m.cs) finish before the rows overwrite the buffer they read.
+        bool lp_resume = false;
+        int64_t l_from = LB;
+        if (lp_on && pause_.tokens > 0 && pause_.pos0 == pos0 + c0 && pause_.layer > LB && pause_.layer < LE &&
+            strata::program::layer_pause::resumes({c0, pause_.layer, pause_.tokens}, c0, n, C) &&
+            pause_.rows.size() == (size_t) T * D &&
+            cudaMemcpyAsync(m.R, pause_.rows.data(), pause_.rows.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, m.cs) == cudaSuccess &&
+            cudaStreamSynchronize(m.cs) == cudaSuccess) {
+            lp_resume = true;
+            l_from = pause_.layer;
+            pause_ = SavedPause{};   // consumed: this chunk and every later one read in full from here on
+        }
         // C-4: the whole chunk's rows in one gather (the same per-element arithmetic as the per-token path, so the
         // same bits); a chunk with picture rows, or a token outside the table, takes the per-token path
         if (!lp_resume) {   // P125j: a resumed chunk has its rows in m.R already - no embeddings for it
@@ -3562,24 +3584,6 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             cudaSetDevice(pd);
         }
         host_setup_ms += ms_since(tsetup);
-        // P125j: is this the chunk a run paused between two layers (or the one a park handed back)?  Its
-        // saved residual rows go up into m.R in place of the embeddings, and the layer loop starts at the
-        // saved layer: the layers below it have already written this chunk's K/V cells, GDN/conv state and
-        // indexer tails into the session, so only the rows carry across the pause.  The PLE rows rebuild
-        // from the tokens as usual, and `normed` stays false, so the first half recomputes its norms from
-        // these rows.  A pause that does not match this run's shape is never wrong, only unapplied: the
-        // chunk is then read again whole, which rewrites the same cells (the PLE advance idempotent).
-        bool lp_resume = false;
-        int64_t l_from = LB;
-        if (lp_on && pause_.tokens > 0 && pause_.pos0 == pos0 + c0 && pause_.layer > LB && pause_.layer < LE &&
-            strata::program::layer_pause::resumes({c0, pause_.layer, pause_.tokens}, c0, n, C) &&
-            pause_.rows.size() == (size_t) T * D &&
-            cudaMemcpy(m.R, pause_.rows.data(), pause_.rows.size() * sizeof(float),
-                       cudaMemcpyHostToDevice) == cudaSuccess) {
-            lp_resume = true;
-            l_from = pause_.layer;
-            pause_ = SavedPause{};   // consumed: this chunk and every later one read in full from here on
-        }
         bool normed = false;   // F-2: the previous half's write already normed R for this half (grs, xn16)
         // #579 #613 (opt-in diagnosis, SAGUARO_PF_STEP_SYNC=1): the compute and copy streams are waited for after each
         // step named below, a step that took over 250 ms is logged, and a stall's report names the step it is in.
