@@ -613,3 +613,45 @@ class OpenRouterPrices(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenamedConfigs(unittest.TestCase):
+    """C122 renamed maya-<x>.json to saguaro-<x>.json without moving the ledger's entry (and an older rename had left
+    maya-maya-<x>.json): a start under the new name folds the older names' counts into it, once."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / SV.FILE
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_older_names_fold_into_the_new_one(self):
+        band = lambda i, o, n: {"base": {"input": i, "cached": 0, "output": o, "requests": n},
+                                "peak": {"input": 0, "cached": 0, "output": 0, "requests": 0}}
+        doc = {"since": 100.0, "prices": {}, "models": {
+            "maya-maya-l-hip.json": {"since": 100.0, "model": "glm-5.3-flash", "bands": band(10, 1, 1)},
+            "maya-l-hip.json": {"since": 200.0, "model": "glm-5.3-flash", "bands": band(29328, 1204, 13)},
+            "saguaro-l-hip.json": {"since": 300.0, "model": "glm-5.3-flash", "bands": band(21512, 320, 8)},
+            "maya-s-v2-iq2_xxs-hip.json": {"since": 150.0, "model": "glm-5.3-flash", "bands": band(5, 5, 1)},
+            "maya-other.json": {"since": 120.0, "model": "another-model", "bands": band(7, 7, 1)}}}
+        self.path.write_text(json.dumps(doc), encoding="utf-8")
+        SV.Ledger(self.path, "saguaro-l-hip.json", "glm-5.3-flash", "Maya-L")
+        m = json.loads(self.path.read_text(encoding="utf-8"))["models"]
+        self.assertNotIn("maya-l-hip.json", m)
+        self.assertNotIn("maya-maya-l-hip.json", m)
+        self.assertEqual(m["saguaro-l-hip.json"]["bands"]["base"],
+                         {"input": 10 + 29328 + 21512, "cached": 0, "output": 1 + 1204 + 320, "requests": 22})
+        self.assertEqual(m["saguaro-l-hip.json"]["since"], 100.0)          # (the earliest)
+        self.assertIn("maya-s-v2-iq2_xxs-hip.json", m)                    # (another config of the same model: kept)
+        self.assertIn("maya-other.json", m)
+
+    def test_a_second_start_changes_nothing(self):
+        self.path.write_text(json.dumps({"since": 1.0, "prices": {}, "models": {
+            "maya-l-hip.json": {"since": 1.0, "model": "glm-5.3-flash", "bands": {"base": {"input": 5}}}}}), encoding="utf-8")
+        SV.Ledger(self.path, "saguaro-l-hip.json", "glm-5.3-flash")
+        first = self.path.read_text(encoding="utf-8")
+        SV.Ledger(self.path, "saguaro-l-hip.json", "glm-5.3-flash")
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["models"]["saguaro-l-hip.json"]["bands"]["base"]["input"], 5)
+        self.assertEqual(json.loads(first)["models"].keys(), json.loads(self.path.read_text(encoding="utf-8"))["models"].keys())

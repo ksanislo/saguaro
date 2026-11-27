@@ -410,6 +410,36 @@ def zero() -> dict:
     return {b: {"input": 0, "cached": 0, "output": 0, "requests": 0} for b in BANDS}
 
 
+def bare_config_name(key: str) -> str:
+    """A ledger key without its config-family prefixes (saguaro-, maya-, also stacked: maya-maya-l-hip.json)."""
+    k = str(key)
+    while k.startswith(("saguaro-", "maya-")):
+        k = k.split("-", 1)[1]
+    return k
+
+
+def fold_renamed(models: dict, key: str, model) -> list:
+    """C122 renamed maya-<x>.json to saguaro-<x>.json (and an older rename left maya-maya-<x>.json): fold the entries
+    of THIS config kept under its older names into `key` - counts summed per band, the earliest `since` kept - and drop
+    them. Only an entry of the same model (or one that names none) is folded, never another config's."""
+    folded, want = [], bare_config_name(key)
+    for k in [k for k in list(models) if k != key and bare_config_name(k) == want]:
+        old = models.get(k) or {}
+        if old.get("model") not in (None, model):
+            continue
+        me = models.setdefault(key, {"since": old.get("since") or time.time(), "bands": zero()})
+        if old.get("since") and (not me.get("since") or old["since"] < me["since"]):
+            me["since"] = old["since"]
+        for b, c in (old.get("bands") or {}).items():
+            dst = me.setdefault("bands", {}).setdefault(b, {})
+            for f, v in (c or {}).items():
+                if isinstance(v, (int, float)):
+                    dst[f] = dst.get(f, 0) + v
+        del models[k]
+        folded.append(k)
+    return folded
+
+
 def cost(bands: dict, ref: dict | None) -> float | None:
     """The API's charge for these tokens, in dollars (None: no known price)."""
     if ref is None:
@@ -454,6 +484,7 @@ class Ledger:
                     self.doc = d
             except (OSError, ValueError):
                 pass
+        folded = fold_renamed(self.doc["models"], key, model)   # (entries of this config under its older names)
         me = self.doc["models"].setdefault(key, {"since": time.time(), "bands": zero()})
         me.update(model=model, quant=quant)
         if names and names[0]:                         # (the two parts the page names this model with, as /health says
@@ -465,6 +496,9 @@ class Ledger:
             me["bands"].setdefault(b, zero()[b])
         if not isinstance(self.doc.get("prices"), dict):
             self.doc["prices"] = {}
+        if folded:
+            print(f"[saguaro] savings: {', '.join(folded)} folded into {key} (the config's older names)", flush=True)
+            self._save()
 
     def price(self, model: str | None) -> dict | None:
         """The model's prices: the page's (Settings > Savings), else the file's / built-in ones; None: none known."""
