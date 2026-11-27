@@ -96,6 +96,8 @@ set(STRATA_METAL_HOST_SOURCES
   ${S}/core/peer_experts.cpp ${S}/core/arch_defaults.cpp ${S}/core/vmm.cpp ${S}/core/conversation_file.cpp
   ${S}/kernels/ngram.cpp ${S}/ngram/ple_reader.cpp ${S}/platform/direct_file.cpp
   ${S}/prefill/prefill.cpp
+  ${S}/core/session_dir.cpp ${S}/core/session_log.cpp ${S}/core/numa_place.cpp   # Saguaro: saved conversations, the
+  ${S}/platform/numa.cpp ${S}/platform/numa_cpus.cpp                               # session log, NUMA placement (a no-op off Linux)
   ${S}/spec/suffix_drafter.cpp ${S}/spec/controller.cpp ${S}/spec/draft_policy.cpp ${S}/spec/draft_source.cpp
   ${S}/kernels/cpu/pool.cpp ${S}/kernels/cpu/expert_layout.cpp ${S}/kernels/cpu/native_expert.cpp
   ${S}/kernels/cpu/hadamard.cpp ${S}/kernels/cpu/tq_cpu.cpp)   # Gyro: the Hadamard rotation, the scalar trellis rows

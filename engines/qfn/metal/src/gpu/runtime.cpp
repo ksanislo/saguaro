@@ -420,6 +420,27 @@ Error host_register(void* p, size_t bytes, unsigned) {
     return kSuccess;
 }
 Error host_unregister(void* p) { return free_alloc(p); }
+
+Error pointer_kind(const void* p, int* kind, int* dev) {
+    Runtime& r = rt();
+    std::lock_guard<std::mutex> lk(r.mu);
+    const uint64_t a = (uint64_t) (uintptr_t) p;
+    *kind = 0;
+    *dev = -1;
+    auto it = r.by_gpu.upper_bound(a);
+    if (it != r.by_gpu.begin() && (--it, a < it->first + it->second.bytes)) {
+        *kind = 2;
+        *dev = 0;
+        return kSuccess;
+    }
+    auto ic = r.by_cpu.upper_bound((uintptr_t) p);
+    if (ic != r.by_cpu.begin()) {
+        --ic;
+        auto ia = r.by_gpu.find(ic->second);
+        if (ia != r.by_gpu.end() && (uintptr_t) p < ic->first + ia->second.bytes) { *kind = 1; *dev = 0; }
+    }
+    return kSuccess;
+}
 Error host_device_pointer_raw(void** dev, void* host) {
     size_t off = 0;
     const Alloc* a = find(host, &off);

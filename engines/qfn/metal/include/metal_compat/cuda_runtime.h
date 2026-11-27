@@ -38,6 +38,7 @@ inline constexpr cudaMemcpyKind cudaMemcpyDefault = strata::gpu::kCopyDefault;
 inline constexpr unsigned cudaHostAllocDefault = strata::gpu::kHostAllocDefault;
 inline constexpr unsigned cudaHostAllocPortable = strata::gpu::kHostAllocPortable;
 inline constexpr unsigned cudaHostAllocMapped = strata::gpu::kHostAllocMapped;
+inline constexpr unsigned cudaHostAllocWriteCombined = 4;   // (CUDA's value; unified memory: host_alloc ignores it)
 inline constexpr unsigned cudaHostRegisterPortable = strata::gpu::kHostRegisterPortable;
 inline constexpr unsigned cudaHostRegisterMapped = strata::gpu::kHostRegisterMapped;
 inline constexpr unsigned cudaHostRegisterReadOnly = strata::gpu::kHostRegisterReadOnly;
@@ -49,8 +50,12 @@ enum cudaStreamCaptureMode { cudaStreamCaptureModeGlobal = 0, cudaStreamCaptureM
 // (the compute capability is asked by the 0.1.45 Turing defaults in verify.cpp: no answer here, which reads as "not a Turing card")
 enum cudaDeviceAttr {
     cudaDevAttrClockRate = 13, cudaDevAttrMultiProcessorCount = 16, cudaDevAttrIntegrated = 18,
-    cudaDevAttrComputeCapabilityMajor = 75, cudaDevAttrComputeCapabilityMinor = 76
+    cudaDevAttrComputeCapabilityMajor = 75, cudaDevAttrComputeCapabilityMinor = 76,
+    cudaDevAttrCanUseHostPointerForRegisteredMem = 91
 };
+// (Saguaro's host code asks where a pointer lives: the conversation park's threaded copy and the YaRN re-rotation)
+enum cudaMemoryType { cudaMemoryTypeUnregistered = 0, cudaMemoryTypeHost = 1, cudaMemoryTypeDevice = 2, cudaMemoryTypeManaged = 3 };
+struct cudaPointerAttributes { cudaMemoryType type = cudaMemoryTypeUnregistered; int device = -1; void* devicePointer = nullptr; void* hostPointer = nullptr; };
 
 // ---- errors, devices
 inline cudaError_t cudaGetLastError() { return strata::gpu::get_last_error(); }
@@ -71,12 +76,26 @@ inline cudaError_t cudaDeviceGetAttribute(int* v, cudaDeviceAttr a, int d) {
         case cudaDevAttrClockRate: return strata::gpu::device_clock_khz(v, d);
         case cudaDevAttrComputeCapabilityMajor:
         case cudaDevAttrComputeCapabilityMinor: return strata::gpu::compat_detail::bad();
+        // a registered page's GPU address is its buffer's gpuAddress, not the host address: no
+        case cudaDevAttrCanUseHostPointerForRegisteredMem: *v = 0; return cudaSuccess;
     }
     return strata::gpu::compat_detail::bad();
 }
 inline cudaError_t cudaDeviceCanAccessPeer(int* v, int d, int p) { return strata::gpu::device_can_access_peer(v, d, p); }
 inline cudaError_t cudaDeviceEnablePeerAccess(int p, unsigned f) { return strata::gpu::device_enable_peer_access(p, f); }
 inline cudaError_t cudaDeviceDisablePeerAccess(int) { return cudaSuccess; }   // a Mac has one GPU: nothing to disable
+// no PCI bus on Apple Silicon: callers keep their "-" / no-NUMA fallback
+inline cudaError_t cudaDeviceGetPCIBusId(char*, int, int) { return strata::gpu::compat_detail::bad(); }
+inline cudaError_t cudaPointerGetAttributes(cudaPointerAttributes* a, const void* p) {
+    int k = 0, d = -1;
+    const cudaError_t e = strata::gpu::pointer_kind(p, &k, &d);
+    *a = cudaPointerAttributes{};
+    a->type = (cudaMemoryType) k;
+    a->device = d;
+    if (k == cudaMemoryTypeDevice) a->devicePointer = const_cast<void*>(p);
+    if (k == cudaMemoryTypeHost) a->hostPointer = const_cast<void*>(p);
+    return e;
+}
 
 // ---- memory and copies
 template <class T> inline cudaError_t cudaMalloc(T** p, size_t n) { return strata::gpu::malloc_device(p, n); }

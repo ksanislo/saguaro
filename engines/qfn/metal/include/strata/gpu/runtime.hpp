@@ -88,6 +88,11 @@ template <class T> inline Error host_device_pointer(T** dev, void* host, unsigne
 }
 Error host_register(void* p, size_t bytes, unsigned flags);
 Error host_unregister(void* p);
+/// What `p` is (cudaPointerGetAttributes): 2 = a GPU address of one of this runtime's buffers (the CPU cannot read it),
+/// 1 = a CPU address of a host allocation or registered range, 0 = memory this runtime does not know (plain host
+/// memory).  *dev is 0 for 1 and 2, -1 for 0.  (Saguaro: the host code asks it since its conversation-park and YaRN
+/// re-rotation paths.)
+Error pointer_kind(const void* p, int* kind, int* dev);
 Error memset_device(void* p, int value, size_t bytes);
 Error memset_async(void* p, int value, size_t bytes, Stream s = nullptr);
 
