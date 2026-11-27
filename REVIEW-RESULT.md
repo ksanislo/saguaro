@@ -24,22 +24,17 @@ Commit each; unit tests where the code allows (the relief freeing to the driver;
 Card test after: the 546K request must answer (needle "7319" found); load + speed unchanged; a SIGTERM after growth
 exits 0 with no SIGSEGV.
 
-## MANAGER UPDATE (one read pass, 2026-11-27 ~13:20 PST) - the likely cause; START HERE, skip the broad survey
-The gather's buffers (m.emb, m.tok_dev, m.cs) are sized by the CHUNK, but m.emb and the rest of the prompt
-workspace are a bump allocation from the BORROWED region = expert-cache slots LENT to the read (prefill.cpp:343,
-:538, carve :1738; "a loan of 2061 slots" in the card log). The elastic-slots give-way picks its range ONCE at setup:
-  generate.cpp:13726-13729   v.top = v.cache->slots(); for (p : pf_parts) if (p.first >= 0) v.top = min(v.top, p.first);
-                             v.lo = v.top;
-but the loan is re-sized PER REQUEST (p.first recomputed: generate.cpp:9883, :13247). Round 8 made the 546K read's
-staging large (786432 cells) -> its loan grew to 2061 slots -> p.first moved far BELOW the v.top captured at setup.
-The give at 13860-13904 then moves experts into / unmaps chunks of slots [v.lo, v.top) that are INSIDE the active
-loan (c0..c1 -> qsa_slot_budget_give, then round 9's free-to-driver). When the read crosses the 32768 start step the
-context state grows -> a give -> the read's own workspace is unmapped -> the next iq_embed_rows (the gather) touches
-it -> SIGSEGV. Fits: in the gather, the first chunk past 32768, right after a give, only since the loan got big.
-(The K/V give-way kvg gets this right: kvg_start(lend_first) at generate.cpp:9958 / :23615.)
-FIX: the elastic-slots give must never take a slot inside an ACTIVE loan: clamp each give to the CURRENT loan
-boundary (min over parts of p.first_now / p.first at the time of the give, not at setup), and when the loan grows
-past v.lo, either refuse the give (so the grow takes driver memory / refuses cleanly) or shrink the loan first.
-Verify the same for every other path that unmaps / moves cache slots during a read (vram relief, free_to_driver,
-trims). Unit test: a fake cache with a loan resized after setup; a give must not touch [p.first, slots).
+## MANAGER UPDATE 2 (deeper read, ~13:40 PST) - the first update's cause is DISPROVED; use this instead
+The loan IS kept above the elastic-slots give line (generate.cpp:16221-16228: room_p = slots - give_top(cache); the
+chunk halves until need_p <= room_p), and laying a loan out takes every resident in it off host_res
+(:16262-16268, kNotResident), so the gives at 13836-13904 neither unmap nor move into an active loan AS WRITTEN.
+Open lead (unconfirmed): TWO give-ways start from the same line at setup - kvg (kvg_start(lend_first) :9958; kvg.lo
+counts down from kvg.top) and the elastic slots gv (v.top = min(slots, p.first) :13726; v.lo counts down) - and each
+counts down on its own. If both are on in this rig (KV streaming + --batch) they can hand out the SAME chunks twice.
+DO THIS FIRST (cheap, decisive): a debug guard SAGUARO_DEBUG_SLOT_GUARD=1 that, on every unmap / remap / move-into /
+free-to-driver / budget give of a cache slot or chunk (kvg, gv, vram relief, free_to_driver, trims, the loan's own
+relayout), checks it against (a) the active loan [p.first_now, slots) of every part on that cache and (b) every
+chunk already handed out by the OTHER give-way, and prints one line naming the path, the slots/chunks and who owns
+them (then aborts with that line). Then the 40K-token repro at --max-context 1048576 on the card (the manager runs
+it) names the culprit in one run. Fix that path; keep the guard (off by default).
 Build ONLY the QFN engine (tools/qfn/build.sh <new dir>, AVX floor) - not the whole project.
