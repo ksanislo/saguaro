@@ -7,6 +7,7 @@
 #endif
 #include "strata/prefill/warm_policy.hpp"
 #include "strata/prefill/kv_prefix_keep.hpp"
+#include "strata/program/layer_pause.hpp"
 #include <atomic>
 #if defined(__cpp_lib_atomic_wait)
 #define STRATA_ATOMIC_WAIT 1   // #1488: std::atomic::wait / notify_all are a GCC 11 library feature; GCC 10 spins instead
@@ -1183,6 +1184,7 @@ void Prefill::reset() {
     release();
     impl_.reset(new Impl);
     stats_ = PrefillStats{};
+    pause_ = SavedPause{};   // P125j: the buffers it rows would go back into are gone
 }
 
 void Prefill::release() {
@@ -1940,6 +1942,38 @@ bool Prefill::relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::
 }
 
 int64_t Prefill::chunk() const { return impl_->T; }
+
+bool Prefill::layer_pause_wanted() {
+    static const bool on = [] {
+        const char* v = std::getenv("SAGUARO_LAYER_PAUSE");
+        return v == nullptr || std::atoi(v) != 0;   // default on; 0 = the plain between-chunk stop
+    }();
+    return on;
+}
+
+int64_t Prefill::paused_chunk() const { return pause_.tokens > 0 ? pause_.pos0 : -1; }
+int64_t Prefill::paused_layer() const { return pause_.tokens > 0 ? pause_.layer : -1; }
+int64_t Prefill::paused_tokens() const { return pause_.tokens; }
+int64_t Prefill::paused_chunk_index() const { return pause_.tokens > 0 ? pause_.chunk : -1; }
+
+void Prefill::take_pause_rows(std::vector<float>& rows) {
+    rows = std::move(pause_.rows);
+    pause_ = SavedPause{};   // with the rows gone the record means nothing: keep the two in step
+}
+
+size_t Prefill::pause_rows_bytes() const { return pause_.rows.size() * sizeof(float); }
+
+bool Prefill::give_pause(int64_t pos0, int64_t layer, int64_t tokens, std::vector<float>&& rows) {
+    pause_ = SavedPause{};
+    if (tokens <= 0 || rows.empty()) return false;
+    pause_.pos0 = pos0;
+    pause_.layer = layer;
+    pause_.tokens = tokens;
+    pause_.rows = std::move(rows);
+    return true;
+}
+
+void Prefill::clear_pause() { pause_ = SavedPause{}; }
 int64_t Prefill::stage_cells() const { return impl_->stage_cells; }
 bool Prefill::kv_keep_wanted() { return kv_keep_env(); }
 void Prefill::kv_keep_invalidate() {
@@ -2937,6 +2971,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     const auto& stop_cb = job ? job->should_stop : should_stop;
     const auto& layer_cb = job ? job->on_layer_pass : on_layer_pass;   // U5 read heartbeat (output only)
     const float* const* const embd_rows = job ? job->embd_rows : this->embd_rows;
+    // P125j: a STOP taken between a chunk's LAYER passes, not only before the chunk.  Only the solo prompt
+    // path can pause this way: a queued job, a batched chunk or a layer-split stage ends its run in ways
+    // (hand-offs, per-segment callbacks) the saved rows do not cover, and picture rows upload per chunk.
+    // With SAGUARO_LAYER_PAUSE=0 (or no callback set) this is false for every run and nothing below runs.
+    const bool lp_on = !job && hand_in_ == nullptr && next_ == nullptr && !bat && embd_rows == nullptr &&
+                       stop_between_layers != nullptr && layer_pause_wanted();
     for (size_t i = 0; i < std::max<size_t>(1, bsegs.size()); ++i) {
         const core::SessionState& x = bsegs.empty() ? ss : *bsegs[i].ss;
         if (job && &x != m.ss && m.ss->ple.ready() && !x.ple.ready() && stage_lb_ <= 1 && 1 < stage_le_) {
@@ -3174,8 +3214,31 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 return false;
             }
         }
+        // P125j: is this the chunk a run paused between two layers (or the one a park handed back)?  Its
+        // saved residual rows go up into m.R in place of the embeddings, and the layer loop below starts at
+        // the saved layer: the layers below it have already written this chunk's K/V cells, GDN/conv state
+        // and indexer tails into the session, so only the rows carry across the pause.  The PLE rows rebuild
+        // from the tokens as usual, and `normed` stays false, so the first half recomputes its norms from
+        // these rows.  A pause that does not match this run's shape is never wrong, only unapplied: the
+        // chunk is then read again whole, which rewrites the same cells (the PLE advance idempotent).  The
+        // decision sits at the chunk's top because the embeddings below are skipped on a resume, and the
+        // copy goes up on the compute stream and waits for it: a previous chunk's layer kernels (if any are
+        // still queued on m.cs) finish before the rows overwrite the buffer they read.
+        bool lp_resume = false;
+        int64_t l_from = LB;
+        if (lp_on && pause_.tokens > 0 && pause_.pos0 == pos0 + c0 && pause_.layer > LB && pause_.layer < LE &&
+            strata::program::layer_pause::resumes({pause_.chunk, pause_.layer, pause_.tokens}, c0, n, C) &&
+            pause_.rows.size() == (size_t) T * D &&
+            cudaMemcpyAsync(m.R, pause_.rows.data(), pause_.rows.size() * sizeof(float),
+                            cudaMemcpyHostToDevice, m.cs) == cudaSuccess &&
+            cudaStreamSynchronize(m.cs) == cudaSuccess) {
+            lp_resume = true;
+            l_from = pause_.layer;
+            pause_ = SavedPause{};   // consumed: this chunk and every later one read in full from here on
+        }
         // C-4: the whole chunk's rows in one gather (the same per-element arithmetic as the per-token path, so the
         // same bits); a chunk with picture rows, or a token outside the table, takes the per-token path
+        if (!lp_resume) {   // P125j: a resumed chunk has its rows in m.R already - no embeddings for it
         bool batched = hand_in_ == nullptr && m.tok_dev != nullptr;
         const core::NativeEmbed* nemb = core::native_embed();
         const core::WeightRef* wemb = nemb ? nullptr : m.wt->find("token_embd.weight");
@@ -3234,16 +3297,21 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 ++t;
             }
         }
-        if (hand_in_ == nullptr) gr_broadcast(m.emb, m.R, T, m.cs);
+        }   // (!lp_resume: the chunk's embeddings, or the rows a layer pause saved, are in m.R now)
+        if (!lp_resume && hand_in_ == nullptr) gr_broadcast(m.emb, m.R, T, m.cs);
         // ---- the PLE rows of the whole chunk, one batched SSD request on a thread (see ple_gather).  A later chunk's
         // were read ahead during the previous chunk; the first chunk's are read beside layer 0 - they are needed from
-        // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt)
-        if (ple_on && !ple_next.valid())
+        // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt).
+        // P125j: a chunk that RESUMES above layer 1 runs no PLE block at all (m.ple_emb's only readers are the
+        // l == max(LB,1) blocks, which l_from skips), so its rows are neither gathered (~84 MB of SSD) nor landed
+        // (~84 MB of H2D) - and the next chunk's gather restarts at its own top, as it does after the first chunk.
+        const bool ple_reads = l_from <= std::max<int64_t>(LB, 1);   // ple_on means LB <= 1: this is l_from <= 1
+        if (ple_on && ple_reads && !ple_next.valid())
             ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
                 strata::aux_cpus::pin_current_thread();
                 return ple_gather(c0, b, ple_next_err);
             });
-        bool ple_pending = ple_on;
+        bool ple_pending = ple_on && ple_reads;
         // the chunk's rows onto the device just before layer 1 reads them, and the next chunk's gather started
         auto ple_land = [&]() -> bool {
             if (!ple_pending) return true;
@@ -3540,7 +3608,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 std::fprintf(stderr, "saguaro pf-step: chunk from token %lld, layer %lld: %s took %.0f ms (%s / %s)\n",
                              (long long) p0, (long long) layer, what, ms, cudaGetErrorString(a), cudaGetErrorString(b));
         };
-        for (int64_t l = LB; l < LE; ++l) {
+        for (int64_t l = l_from; l < LE; ++l) {   // P125j: a resumed chunk starts at its saved layer
             bool pass_staged = false;   // U5 read heartbeat: this layer pass copied the K/V prefix from RAM
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
             if (l > LB) pf_step("reading the prompt (batched, step sync): the experts and the rest of layer", l - 1);
@@ -5438,8 +5506,52 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     if (sg.job->on_layer_pass)
                         sg.job->on_layer_pass(l - LB, LE - LB, pass_staged, LB, job->pos0 + sg.off);
             } else if (layer_cb) layer_cb(l - LB, LE - LB, pass_staged, LB, p0);
+            // P125j: a STOP that arrived inside the chunk is taken here, at a layer pass's end: the layers
+            // up through l have read this chunk (their K/V cells, GDN/conv state and indexer tails hold
+            // its tokens) and layer l + 1 has not.  Finish the layer (its work is done at the heartbeat
+            // point but still queued on the stream), save the chunk's residual rows, and end the run as a
+            // cut read at layer l + 1 - the caller keeps it with the conversation, and the next run of the
+            // same tokens goes on here instead of at the chunk's end (the request waiting for this read
+            // stops waiting after one layer pass, not after the chunk).
+            if (lp_on) {
+                const strata::program::layer_pause::Point lp =
+                    strata::program::layer_pause::pause_point(c0, l, LB, LE, n, C);
+                if (lp.chunk >= 0 && stop_between_layers()) {
+                    if (cudaStreamSynchronize(m.cs) != cudaSuccess) {
+                        err = "prefill: syncing the compute stream for a layer pause";
+                        return false;
+                    }
+                    pause_ = SavedPause{};
+                    pause_.pos0 = pos0 + c0;
+                    pause_.layer = lp.layer;
+                    pause_.tokens = lp.tokens;
+                    pause_.chunk = c0 / std::max<int64_t>(C, 1);   // the run's own chunk size: C, not m.T
+                    pause_.rows.resize((size_t) lp.tokens * D);
+                    const bool landed = cudaMemcpy(pause_.rows.data(), m.R, pause_.rows.size() * sizeof(float),
+                                                   cudaMemcpyDeviceToHost) == cudaSuccess;
+                    if (!landed) {
+                        pause_ = SavedPause{};
+                        err = "prefill: downloading the paused chunk's rows";
+                        return false;
+                    }
+                    std::fprintf(stderr, "saguaro prefill: the read paused at chunk %lld (the chunk from token "
+                                         "%lld), layer %lld of %lld: %llu MiB of chunk rows kept with it\n",
+                                 (long long) (c0 / std::max<int64_t>(C, 1)), (long long) (pos0 + c0),
+                                 (long long) lp.layer, (long long) LE,
+                                 (unsigned long long) (strata::program::layer_pause::state_bytes(lp.tokens, D) >> 20));
+                    std::fflush(stderr);
+                    err = "layer paused";
+                    return false;
+                }
+            }
         }
         if (!ple_land()) return false;   // a stage that ends before layer 1: the rows land anyway, the next gather starts
+        if (ple_on && !ple_reads && ple_next.valid()) {   // P125j: a chunk before a resumed one read its rows ahead:
+            if (!ple_next.get()) {                        // waited out, landed nowhere - and no stale gather left
+                err = ple_next_err;                       // in ple_next for the NEXT chunk's top to mistake for its own
+                return false;
+            }
+        }
         if (issuer.joinable()) {
             issuer.join();
             stats_.ms_experts_host += iss_ms;
@@ -6086,6 +6198,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         err = drain_err;
         return false;
     }
+    // P125j: a run that read past a saved pause's chunk WITHOUT going on inside it (its chunk grid did not
+    // match, so the chunk was read again whole) leaves those rows with nothing to go on - the chunk is
+    // complete in the session now.  A run that ended short of it (stop_at_chunk) keeps the pause armed.
+    if (pause_.pos0 >= 0 && pause_.pos0 < pos0 + (stopped_at() >= 0 ? stopped_at() : n)) pause_ = SavedPause{};
     // SAGUARO_MMQ_DIRECT=1 with SAGUARO_MMQ_DIRECT_LOG=1 (a check, not a default): each stage's totals so far - how many
     // resident experts its prompt MMQ read in their slots, of all its resident and streamed ones
     if (mmq::direct_mode() == 1) {

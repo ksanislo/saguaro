@@ -1662,7 +1662,8 @@ class StrataEngine:
             self.last.update(offloaded=int(f[15]))
         for tok in f[16:]:                                # key=value fields after the positional ones (the prompt's
             key, eq, value = tok.partition("=")           # first chunk and its streamed expert blobs)
-            if eq and key in ("chunk", "experts_streamed"):
+            if eq and key in ("chunk", "experts_streamed",
+                              "paused_layer", "paused_chunk", "paused_at"):   # P125j: where a layer pause cut it
                 try:
                     self.last[key] = int(value)
                 except ValueError:
