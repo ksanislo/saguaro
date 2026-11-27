@@ -342,6 +342,38 @@ what you changed there):
 One card streams nearly every expert over PCIe for each chunk, so fewer, larger chunks pay off on long prompts. On a
 split, a prompt that fits one chunk runs the cards one after the other, while two or more keep both busy.
 
+## Turbo
+
+Turbo trades quality for speed on purpose - benchmarks and playing with the engine. It has two halves that never
+switch each other on:
+
+- **The Turbo button** (Settings > Chat defaults, beside the model's parameters) is the model's fastest settings.
+  The page's half is greedy decoding and the fastest thinking level. The engine's half is written into the run
+  config and starts Saguaro again as a saved engine setting does (where the server can restart; one answer at a
+  time the server holds without a restart): context 32768 on GLM and MiniMax, the fastest drafter the pack has
+  (DSpark on DeepSeek and MiniMax, MTP on QFN - GLM keeps the drafter the setup measured) with DSpark's draft
+  floor at `0.3` and `SAGUARO_DS4_DSPARK_CUM=0.3`, DeepSeek's prompt lookup on, and where the engine has expert
+  skipping the rows in the tables above:   `SAGUARO_GLM_MISS_SKIP_W=0.16` with `SAGUARO_GLM_MISS_SKIP_FROM=23` and
+  `SAGUARO_GLM_RESIDENT_TOPK=4`, `SAGUARO_DS4_RAM_SKIP_W=0.14` and `SAGUARO_DS4_RESIDENT_TOPK=3` (the measured
+  values sit in the two RESIDENT_TOPK rows above, each of them flagged there as changing the answers). On
+  the smallest quants (GLM and DeepSeek Maya-XS) it keeps every routed expert: the cap only gained a few percent
+  there and their answers went bad. What the button changed is kept in the config's `"turbo"` note and switching
+  it off puts every one of them back. Inkling 2 and Hy4-Flash have no Turbo at all (no expert skipping, no
+  drafter set up): no button, and their requests run exact.
+- **The live per-request Turbo** is lossy speed that rides on the request: `"turbo": {"drop": N, "skip":
+  "off"|"ssd"|"ram"}` on a chat / messages / responses body - the engine's line gets `turbo_drop=N` and
+  `turbo_skip=ssd|ram`: run the top-k without its N lightest routed experts (renormalised), and leave out an
+  expert the SSD tier would serve, or one VRAM does not hold. It applies to that chat's tokens only; every other
+  chat in the batch stays exact. The web app's own chats run with the model's live default (Settings > Turbo,
+  live: Drop experts, Skip slow experts) unless the chat's own bolt says otherwise, and it persists between
+  restarts in the sidecar `<config minus .json>.turbo.json` beside the run config - never in the config itself,
+  not listed as a model, and deleted with it. **An API request gets Turbo only from its own field** (PLAN-p124s):
+  neither the page's panel nor the button ever switches Turbo on for one.
+
+The button never touches the live half, and no `SAGUARO_*TURBO*` environment variable exists: what the engine
+skips it says through the rows named above, and what a request skips through its keys. The Skip choice only
+shows where the engine applies it (a QFN from before its skip build says so and the page hides it).
+
 ## The expert pool's size
 
 What each GPU's VRAM holds besides the model's dense weights, its context state and the drafter goes to experts (the

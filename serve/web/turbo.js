@@ -117,8 +117,13 @@ export function TurboButton() {
   if (S.health && S.health.supervisor) return null;   // (under llama-swap the engine settings are its config)
   const t = S.turbo;
   if (t.unavailable || t.supported === false) return null;   // (Inkling 2, Hy4-Flash: their engines have no Turbo)
-  const tip = t.on ? "Turbo ON: trades quality for maximum speed (greedy decoding, no thinking, expert skipping, aggressive drafting). Click to put your settings back."
-                   : "Turbo: trades quality for maximum speed, for benchmarks and playing with the engine. Your own settings come back when you switch it off.";
+  // one place that says what Turbo is on now: the button's own state.  What exactly it changes this model
+  // has, the dialog says from the server's plan rows before anything is written (engineLines); the live
+  // options are a separate choice below (TurboLive), which this button never touches.
+  const tip = t.on ? "Turbo ON: this model runs its fastest settings - greedy decoding, no thinking and what "
+                    + "else the engine has for speed. Click to put your settings back."
+                   : "Turbo: trades quality for maximum speed, for benchmarks and playing with the engine. It says "
+                   + "what it changes before it changes it; your own settings come back when you switch it off.";
   return html`<button type="button" class=${`turbo${t.on ? " turbo--on" : ""}${t.busy ? " turbo--busy" : ""}`} aria-pressed=${t.on ? "true" : "false"}
       title=${tip} disabled=${t.busy} onClick=${() => setTurbo(!t.on)}>
     <svg class="turbo__flame" viewBox="0 0 24 24" aria-hidden="true">

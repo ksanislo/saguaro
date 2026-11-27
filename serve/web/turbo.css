@@ -15,7 +15,6 @@
 .turbo__flame { width: 20px; height: 20px; flex: none; overflow: visible; transform-origin: 50% 90%; }
 .turbo__outer { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; stroke-linecap: round; transition: fill var(--st-dur) var(--st-ease); }
 .turbo__inner { fill: none; stroke: none; }
-.turbo__state { font-weight: 500; font-size: var(--st-fs-xs); color: var(--st-ink-muted); letter-spacing: .02em; }
 
 /* on: the flame fills, the button warms and the flame flickers a little */
 .turbo--on { color: #b8420c; border-color: color-mix(in srgb, var(--turbo-b) 55%, transparent);
