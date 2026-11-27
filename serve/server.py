@@ -846,6 +846,17 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+class EngineStartFailed(RuntimeError):
+    """The engine process died before it said READY (P125m phase 2): the crash page shows its exit code and its
+    last engine-log lines, so it carries them (`exit_code`, from the process; `lines`, the engine's own ~20 lines
+    from the log).  exit_code is None only when the process would not report one (it never started)."""
+
+    def __init__(self, message: str, exit_code=None, lines=None):
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.lines = list(lines or [])
+
+
 class LendTimeout(ValueError):
     """A VLEND / VRECLAIM got no answer within its wait (PLAN-vision-fast-start review 4): the engine was busy reading
     its prompt and did not reach a settle.  Distinct from an ERR refusal (the engine alive and saying "no room"): on a
@@ -1453,6 +1464,53 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             print(f"[saguaro] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
 
 
+def engine_log_tail(log: str | None, offset: int = 0, n: int = 20) -> list:
+    """The last ~n non-empty lines the engine wrote to its log at or after `offset` (P125m phase 2): the crash page
+    shows these - the engine's own reason is in them (shards read, experts pinned ... and the line or traceback
+    that ended it).  [] when there is no log or nothing in it from this start; each line trimmed to 500 chars."""
+    if not log:
+        return []
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2)
+            start = max(offset, f.tell() - 65536)              # (enough for n lines, never an earlier start's whole log)
+            f.seek(start)
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    text = text[1:] if start > offset else text                # (not a line cut in half at the window's edge)
+    return [x.rstrip()[:500] for x in text.splitlines() if x.strip()][-n:]
+
+
+# Windows NTSTATUS codes of a process the system ended (a crash, not an exit the engine chose): the same table the
+# batch driver keeps (engines/qfn/serve/server.py), so both engines' crashes say the same thing on the page.
+_WIN_CRASH = {0xC0000135: "a DLL the program needs was not found", 0xC00000FD: "stack overflow",
+              0xC0000005: "bad memory access", 0xC000001D: "illegal instruction (the CPU lacks an instruction it used)",
+              0xC0000409: "fast-fail / stack buffer overrun", 0xC0000374: "the heap was corrupted"}
+
+
+def engine_exit_words(rc):
+    """What the engine process's exit status says, in words (P125m phase 2, the crash page): "killed by signal 9
+    (SIGKILL - the system's out-of-memory killer ends it this way)" on Linux/macOS, a named Windows crash code, or
+    "exit code N"; "" when there is no status (None: the process never reported one)."""
+    if rc is None:
+        return ""
+    if rc < 0 and os.name != "nt":
+        import signal
+        try:
+            sig = signal.Signals(-rc)
+            extra = " - the system's out-of-memory killer ends it this way" if sig.name == "SIGKILL" else ""
+            return f"killed by signal {-rc} ({sig.name}, {signal.strsignal(sig) or sig.name}{extra})"
+        except (ValueError, AttributeError):
+            return f"killed by signal {-rc}"
+    code = rc & 0xFFFFFFFF
+    if code in _WIN_CRASH:
+        return f"exit code 0x{code:08X}: {_WIN_CRASH[code]}"
+    if 0xC0000000 <= code < 0xD0000000:
+        return f"exit code 0x{code:08X} (a system error status)"
+    return f"exit code {rc}"
+
+
 class StrataEngine:
     """The resident engine: `saguaro-glm --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -1534,7 +1592,18 @@ class StrataEngine:
             # its output closed: it is gone, even before the OS says so (as _pump) - alive() is False at once, not
             # only after the process is reaped (a busy CI runner saw it alive right after a failed restart)
             self.ended = True
-            raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
+            # P125m phase 2: a crash mid-load gets the crash page - the process's exit code and the engine's own
+            # last lines from the log go on the exception, so main() can hand them to the standing page.
+            code = self.exit_code()
+            lines = engine_log_tail(log, log_start)
+            for closer in (self.proc.stdin, self.proc.stdout):        # (its pipes and our handle on its log go back)
+                with contextlib.suppress(OSError, ValueError):
+                    closer.close()
+            if self.log is not subprocess.DEVNULL:
+                with contextlib.suppress(OSError):
+                    self.log.close()
+            raise EngineStartFailed("the engine exited before it was ready" + (f" (see {log})" if log else ""),
+                                    exit_code=code, lines=lines)
         # (#1026) a start that came out short of its VRAM reserve (INFO reserve_short=<MiB>) - the engine measured
         # what it allocates after its experts' plan and keeps that free from its next start on: started once more
         # now, so the first start after an update or a new setting never serves with the reserve used up
@@ -9006,19 +9075,43 @@ class LoadState:
         self.t0 = time.time()
         self.status, self.error = "loading", None
         self.failed_seen = threading.Event()      # a /health that told the supervisor about the failure
+        # the crash of a load (P125m phase 2): the engine process's exit code and its last lines, set by fail()
+        # when the load died (an EngineStartFailed / qfn's EngineDied carries them); None/[] otherwise.
+        self.exit_code, self.crash_lines = None, []
         # the progress (P125m): the engine's log read as it lands, through the family's milestone table.  The first
         # look starts where this start began (the log file still holds the earlier starts' lines); a line that
         # died mid-load keeps the last value, so the bar waits rather than jumping back.
         self.pct, self.step = None, ""
         self._pos = None                          # bytes of the log read so far (None: take the size on first look)
+        self.log_start = 0                        # where this start's lines begin (the crash page's log tail)
         self._log_lock = threading.Lock()
         if log_path:
             with contextlib.suppress(OSError):
-                self._pos = Path(log_path).stat().st_size
+                self._pos = self.log_start = Path(log_path).stat().st_size
 
     def fail(self, error) -> None:
-        """The load failed (issue #20): the standing page shows this, /health says {"status": "failed"} with it."""
+        """The load failed (issue #20): the standing page shows this, /health says {"status": "failed"} with it.
+        A load that died with the engine (P125m phase 2) carries its exit code and last lines on the exception
+        (EngineStartFailed from the line engine, the batch driver's EngineDied) - those make it a crash the page
+        draws with the code, the engine's ~20 lines and the two ways out; a config error (no engine died) stays the
+        plain error page."""
         self.status, self.error = "failed", str(error) or type(error).__name__
+        code = getattr(error, "exit_code", None)
+        self.exit_code = code if isinstance(code, int) else None
+        lines = [str(x) for x in (getattr(error, "lines", None) or []) if str(x).strip()]
+        if self.exit_code is not None and not lines:
+            lines = engine_log_tail(self.log_path, self.log_start)   # (died but attached no lines: its log has them)
+        self.crash_lines = lines[-20:]
+
+    @property
+    def crashed(self) -> bool:
+        """The load failed with the engine process having died (not a config error): the crash page shows."""
+        return self.status == "failed" and (self.exit_code is not None or bool(self.crash_lines))
+
+    def restartable(self) -> bool:
+        """Whether this standing page can end the start with RESTART_EXIT so saguaro.py starts a config again: not
+        under a supervisor (it owns the starts) and only where saguaro.sh / START-SAGUARO.bat started this server."""
+        return not self.supervisor and bool(os.environ.get("SAGUARO_RESTART_ON_UPDATE"))
 
     def _advance_progress(self) -> None:
         """Read what the engine wrote to its log since the last look and run every new line through the family's
@@ -9077,6 +9170,16 @@ class LoadState:
                 lg = read_last_good()
                 if lg and lg["path"] != self.config_path:
                     out["last_good"] = lg
+            if self.crashed:
+                # (P125m phase 2: the crash page - the engine's exit code, its last ~20 lines, and the way out)
+                out["crashed"] = True
+                out["exit_code"] = self.exit_code
+                out["exit"] = engine_exit_words(self.exit_code)
+                out["lines"] = self.crash_lines
+                if self.config_path and self.restartable():
+                    # (the "load again" button: shown only where this page can actually end the start and retry,
+                    #  i.e. not under a supervisor and only when saguaro.sh / START-SAGUARO.bat started this server)
+                    out["again"] = Path(self.config_path).name
         return out
 
     def models_listing(self) -> dict:
@@ -9148,6 +9251,29 @@ def start_last_good(state: LoadState) -> dict:
     print(f"[saguaro] starting again with {lg['config']} (the last config that worked) ...", flush=True)
     threading.Thread(target=_restart_after_answer, daemon=True).start()
     return lg
+
+
+def start_again(state: LoadState) -> dict:
+    """The crash page's "load again" button (P125m phase 2): start this very config again - the one whose engine
+    died mid-load.  It is the same RESTART_EXIT note the last-good button leaves, only for the current config, so it
+    works when saguaro.py started this server and no supervisor owns the starts; after the operator fixed what the
+    engine's last lines say (or to ride out a one-off crash) the page just tries it once more."""
+    if state.supervisor:
+        raise ValueError(f"this server runs under {state.supervisor}, which starts, stops and switches the "
+                         "models: change models there (pick another model id), not here")
+    if not state.config_path:
+        raise ValueError("this server runs without a config of its own: it cannot start one again by itself")
+    p = Path(state.config_path)
+    if not p.is_file():
+        raise ValueError(f"{p.name} is gone, so it cannot be started again")
+    if not os.environ.get("SAGUARO_RESTART_ON_UPDATE"):
+        raise ValueError("this server was not started by saguaro.sh or START-SAGUARO.bat, so it cannot start "
+                         f"again by itself: start it again: python saguaro.py --config {p}")
+    (ROOT / models.SWITCH_FILE).write_text(json.dumps({"config": str(p), "port": state.port,
+                                                       "why": "load again", "time": time.time()}), encoding="utf-8")
+    print(f"[saguaro] starting again with {p.name} (load again after the crash) ...", flush=True)
+    threading.Thread(target=_restart_after_answer, daemon=True).start()
+    return {"config": p.name, "path": str(p)}
 
 
 def make_loading_handler(state: LoadState):
@@ -9261,6 +9387,19 @@ def make_loading_handler(state: LoadState):
                         self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
                         return
                     self._json(200, {"starting": lg["config"]})
+                return
+            if path == "/api/load-again":                   # (the crash page's "load again": start this config over)
+                if self._authorized() and not self._foreign_page():
+                    if state.status != "failed":
+                        self._json(409, {"error": {"type": "invalid_request_error",
+                                                   "message": "nothing failed to load again"}})
+                        return
+                    try:
+                        out = start_again(state)
+                    except ValueError as e:
+                        self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                        return
+                    self._json(200, {"starting": out["config"]})
                 return
             if state.switching and path in ("/v1/chat/completions", "/v1/responses", "/v1/messages"):
                 # (P125m: the chat API keeps answering through a switch, and names the model it is waiting for -
