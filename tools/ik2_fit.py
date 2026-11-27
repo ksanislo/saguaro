@@ -54,6 +54,10 @@ AMD_RESERVE_UNDER_GB = 20.0                         # an AMD card under this kee
 # What that 1 GiB reserve (the engine's default: 1.5) and the 32K scratch (BASE_GIB counts 262K's) leave the plan
 # beside every expert: the one-T4 quant at 32K is resident on an RX 9070 XT, 15.5 of its 15.9 GiB used (measured)
 AMD_SMALL_CREDIT_GIB = 1.0
+KV_START = 32768                                    # SAGUARO_IK2_KV_START (P125e a1, the elastic start step): the
+                                                    #  positions of the global layers' K / V the engine commits at the
+                                                    #  load when the ceiling's cache would leave the experts no tier
+                                                    #  (src/ik2/ik2_plan.hpp; 0 in the engine: the whole ceiling)
 
 
 def subprocess_error():
@@ -90,6 +94,13 @@ def need_gib(ctx: int, kv: str = DEFAULT_KV, experts_gib: float = EXPERTS_GIB) -
     return DENSE_GIB + experts_gib + ctx * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB
 
 
+def kv_committed(ctx: int, kv_start: int = KV_START) -> int:
+    """The positions of the global layers' K / V the engine commits at the load (SAGUARO_IK2_KV_START, P125e a1):
+    the K / V a conversation USES at its start - a small start step, not the --max-context ceiling.  A kv_start of
+    0 or one past the ceiling is the ceiling itself (the engine's ik2plan::kv_committed)."""
+    return ctx if kv_start <= 0 or kv_start >= ctx else kv_start
+
+
 def plan(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False, experts_gib: float = EXPERTS_GIB) -> dict:
     """What this card holds at `ctx`: {"resident": every expert in VRAM, "need_gib", "layout": "resident" or
     "offload", "tier_gib": the experts' GiB the card keeps, "ram_gib": the engine's RAM, "kv_streamed": the cache of
@@ -97,7 +108,11 @@ def plan(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False, expe
     leave the card first (the offload path, the cache in VRAM); the cache streams only where it alone does not fit
     beside the dense weights and a tier of OFF_TIER_MIN_GIB - on AMD as on NVIDIA (hip: an AMD card under
     AMD_RESERVE_UNDER_GB has AMD_SMALL_CREDIT_GIB more room, its layout's smaller reserve).  A card whose VRAM is not
-    known (0): resident - the engine measures at its start."""
+    known (0): resident - the engine measures at its start.  Where the ceiling's whole cache would leave the experts
+    no tier but the committed start step (kv_committed, SAGUARO_IK2_KV_START) leaves every expert in VRAM, the plan
+    returns resident with "kv_committed" < ctx: the engine lays the global K / V out for the commit, the experts
+    keep the freed GiB, and conversations run to the commit until step 2 grows the cache into the ceiling
+    (P125e a1, src/ik2/ik2_plan.hpp - where the cache streams the elastic start is not taken)."""
     ex = float(experts_gib)
     if not vram_gb:
         return {"resident": True, "need_gib": None, "layout": "resident", "tier_gib": ex, "ram_gib": HOST_GIB,
@@ -119,6 +134,13 @@ def plan(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: bool = False, expe
         n_res = max(1, min(FULL_VISITS, int((room - dense - OFF_ROOM_GIB - OFF_TIER_MIN_GIB - ring) // vis)))
         kv_ram = (FULL_VISITS - n_res + 1) * vis
         tier = room - dense - n_res * vis - ring - OFF_ROOM_GIB
+    committed = kv_committed(ctx)
+    ck_gib = committed * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB
+    if committed < ctx and not kv_ram and DENSE_GIB + ex + ck_gib + PLAN_RESERVE_GIB <= room:
+        # (the elastic start step (P125e a1): the ceiling's cache would crowd the experts off the card, the
+        #  committed start step leaves every expert in VRAM - resident, and the conversation runs to the commit)
+        return {"resident": True, "need_gib": need, "layout": "resident", "tier_gib": ex, "ram_gib": HOST_GIB,
+                "kv_streamed": False, "kv_ram_gib": 0.0, "kv_committed": committed}
     tier = round(max(0.0, min(ex, tier)), 1)
     return {"resident": False, "need_gib": need, "layout": "offload", "tier_gib": tier,
             "ram_gib": round(ex - tier + OFF_HOST_GIB + (kv_ram + STREAM_HOST_GIB if kv_ram else 0.0), 1),
@@ -158,6 +180,9 @@ def verdict(vram_gb: float, ram_gb: float, ctx: int, kv: str = DEFAULT_KV, hip: 
         return "streamed", (f"every expert in VRAM; about {p['kv_ram_gib']:.1f} GB of the cache in RAM (KV streaming), "
                             "read over the bus at every token - slower the deeper a chat goes")
     if p["resident"]:
+        if p.get("kv_committed") and p["kv_committed"] < ctx:
+            return "fast", (f"every expert in VRAM; the cache is laid out for {p['kv_committed'] // 1024}K of the "
+                            f"{ctx // 1024}K ceiling - chats run to {p['kv_committed'] // 1024}K until it can grow")
         return "fast", "every expert in VRAM"
     if ram_gb and ram_gb < p["ram_gib"]:
         return "does not fit", too_small_line(ram_gb, vram_gb, p["ram_gib"])
@@ -223,15 +248,17 @@ def draft_fits(vram_gb: float, ctx: int, kv: str = DEFAULT_KV, experts_gib: floa
     FP16 context rows, else FP8 ones (a 24 GB card drafts at 262,144 as the engine does).
     The offload path with the whole cache in VRAM: the tier gives the drafter's room, at most half of its own - the
     verify window's staging and at least DRAFT_MIN_ROWS of FP8 context rows (the last positions) with it (upstream
-    v1.1.75).  VRAM not known: True (the engine measures)."""
+    v1.1.75).  An elastic start (plan's "kv_committed"): the drafter's room is sized for the commit like the
+    engine's draft_room.  VRAM not known: True (the engine measures)."""
     if not vram_gb:
         return True
     p = plan(vram_gb, ctx, kv, hip, experts_gib)
     if p["resident"]:    # (the engine's own sum; the drafter's context rows FP16, else FP8: half of them)
         small = hip and float(vram_gb) < AMD_RESERVE_UNDER_GB   # (amd_layout's SAGUARO_IK2_RESERVE_MB=1024)
-        used = float(experts_gib) + PLAN_DENSE_GIB + ctx * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB + \
+        ctx_eff = p.get("kv_committed") or ctx                  # (elastic start: rows are laid out for the commit)
+        used = float(experts_gib) + PLAN_DENSE_GIB + ctx_eff * KV_BYTES.get(kv, KV_BYTES["f16"]) / GIB + \
             (1.0 if small else PLAN_RESERVE_GIB)
-        return float(vram_gb) - MARGIN_GIB >= used + draft_gib(ctx, gguf) - ctx * DRAFT_TOKEN_BYTES / GIB / 2
+        return float(vram_gb) - MARGIN_GIB >= used + draft_gib(ctx_eff, gguf) - ctx_eff * DRAFT_TOKEN_BYTES / GIB / 2
     least = draft_gib(0, gguf) + OFF_WIN_STAGE_GIB + min(ctx, DRAFT_MIN_ROWS) * DRAFT_TOKEN_BYTES / GIB / 2
     return not p["kv_streamed"] and (p["tier_gib"] + OFF_ROOM_GIB + MARGIN_GIB) / 2 >= least
 
