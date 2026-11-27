@@ -1657,6 +1657,12 @@ int serve(maya::ds4::Model& m, const std::string& eos_list, bool spec, float con
         // checkpoint 1, which the prompt's own end overwrites as before - so the next request still shares the
         // conversation up to it
         if (from > 0 && from < r.ids.size()) m.checkpoint(1);
+        // (the read's base over the pipe, as the GLM engine says it before every read (generate.cpp's prep_prompt):
+        //  what the state already holds and this read goes on from.  The server's continue line after a priority cut
+        //  carries the engine's own figure (P124b), and its driver reads THIS line for it - a stopped read's keep
+        //  reaches the line as the next read's reused, never as a claim the server had to guess)
+        std::printf("RESUME%s %zu\n", tag.c_str(), from);
+        std::fflush(stdout);
         P.from = from;
         P.done = from;
         P.keep_at = from + keep_step;   // (keepread: the first of the read's keep points, `keep_step` tokens in)
