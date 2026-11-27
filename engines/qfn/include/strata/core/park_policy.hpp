@@ -152,20 +152,33 @@ inline std::vector<Action> plan(const std::vector<Entry>& entries, uint64_t park
     return out;
 }
 
-/// PLAN-p124a2: a park that follows its own conversation's turn save does not have to capture the K/V a second
-/// time - it can adopt the host copy the capture just made (conversation_snapshot_from_capture). Figures only:
-/// `captured`  - a WHOLE (not delta) capture of this same place is still alive (its file write has not ended,
-///               so its buffers exist; the turn hold keeps only a weak reference to them);
+/// PLAN-p124a2: a park that follows its own conversation's turn save does not have to capture a second
+/// time - the capture already holds a host copy of everything the park would copy. Figures only:
+/// `captured`  - a WHOLE (not delta) capture of this same place is still held (the turn hold keeps a strong
+///               reference to it until this park, a continuing request or a rewrite clears it - the card run
+///               of 2026-11-26 showed the parks that follow a FINISHED file write are the slow ones, so the
+///               hold outlives the writer);
 /// `single_stage` - no layer split: one session's snapshot is what the capture covered;
-/// `no_retained`  - the cache's retained K/V is not the source (with it, the park already copies no prefix);
 /// `nothing_ran`  - no request began since the capture, so the session still holds exactly the captured bytes;
 /// `same_tokens`  - the parked conversation has the token count, ids and steering mode the capture took;
 /// `no_images`    - neither the capture nor the park carries image keys (an image list is not compared).
-/// All six must hold for the adoption; anything else captures the park normally. The result is byte-identical
-/// either way: the adoption aliases the same bytes, it does not invent them.
+/// These five say the capture's RUNNING STATE (its `meta.live`, a whole copy whatever the K/V capture held)
+/// is byte-identical to what this park would copy off the device - the host copy the turn save just made for
+/// the same token count. It holds even with the cache's retained K/V in play, which concerns only the K/V.
+inline bool reuse_turn_state(bool captured, bool single_stage, bool nothing_ran, bool same_tokens,
+                             bool no_images) {
+    return captured && single_stage && nothing_ran && same_tokens && no_images;
+}
+
+/// The whole-image adoption (conversation_snapshot_from_capture): the five terms above plus
+/// `no_retained` - the cache's retained K/V is the source already (with it, the park copies no prefix, and
+/// the adoption's aliased K/V has nothing to reuse). All six must hold for it; anything else captures the
+/// K/V normally - and where only `no_retained` fails, the park still skips the running state's device copy
+/// (reuse_turn_state). The result is byte-identical either way: adoption aliases the same bytes, it does
+/// not invent them.
 inline bool adopt_turn_capture(bool captured, bool single_stage, bool no_retained, bool nothing_ran,
                                bool same_tokens, bool no_images) {
-    return captured && single_stage && no_retained && nothing_ran && same_tokens && no_images;
+    return no_retained && reuse_turn_state(captured, single_stage, nothing_ran, same_tokens, no_images);
 }
 
 }  // namespace strata::core::park

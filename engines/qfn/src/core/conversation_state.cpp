@@ -329,7 +329,8 @@ bool conversation_snapshot_capture_bytes(const ConversationKvReuse& reuse, const
 bool conversation_snapshot_save(SavedConversation& image, const ConversationView& view,
                                 const SessionState& ss, const ModelGeometry& g,
                                 const QsaState* draft, std::string& error,
-                                ConversationKvReuse reuse, size_t* reused_bytes) {
+                                ConversationKvReuse reuse, size_t* reused_bytes,
+                                const ConversationCheckpoint* live_from) {
     size_t estimate = 0;
     if (!conversation_snapshot_capture_bytes(reuse, view, ss, g, draft, estimate, error) || !sync(error)) return false;
     // Build into a new object so a failure cannot publish a partial snapshot.
@@ -351,7 +352,21 @@ bool conversation_snapshot_save(SavedConversation& image, const ConversationView
     {   // (the park/restore split: the live session's running state - the park's largest copy, and until
         //  PLAN-p124a the only part of it no clock measured: a 62-layer model carries ~237 MB here)
         const auto t_state = std::chrono::steady_clock::now();
-        const bool state_ok = conversation_checkpoint_save(captured.live, ss, g, error);
+        bool state_ok;
+        if (live_from != nullptr) {
+            // (PLAN-p124a2, manager review 2026-11-26: a park right after its conversation's turn save takes the
+            //  running state from the capture's host copy - the same bytes, nothing ran since - instead of
+            //  reading ~237 MB off the device while that save's file is still being written out)
+            captured.live.gdn = conversation_detail::copy_beating(live_from->gdn);
+            captured.live.ple = conversation_detail::copy_beating(live_from->ple);
+            captured.live.tails = conversation_detail::copy_beating(live_from->tails);
+            captured.live.dead = conversation_detail::copy_beating(live_from->dead);
+            captured.live.block_pos = conversation_detail::copy_beating(live_from->block_pos);
+            captured.live.rope_level = live_from->rope_level;
+            state_ok = conversation_checkpoint_validate(captured.live, ss, g, error);
+        } else {
+            state_ok = conversation_checkpoint_save(captured.live, ss, g, error);
+        }
         conversation_detail::snapshot_split().ckpt_ms +=
             conversation_detail::split_ms(t_state, std::chrono::steady_clock::now());
         if (!state_ok) return false;

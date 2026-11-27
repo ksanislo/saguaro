@@ -136,6 +136,17 @@ int main() {
     check(!adopt_turn_capture(true, true, true, false, true, true), "a request ran since the capture: the session is no longer those bytes");
     check(!adopt_turn_capture(true, true, true, true, false, true), "another conversation, or more tokens: the ids say no");
     check(!adopt_turn_capture(true, true, true, true, true, false), "images on either side: the capture is not compared against them");
+    // PLAN-p124a2 (manager review 2026-11-26): the RUNNING STATE is reused on these five terms alone - the retained
+    // K/V is the sixth adoption term only. Where adoption refuses for retention (or later, for a part that will not
+    // alias), the park still takes the capture's host copy of the running state instead of the device copy.
+    check(reuse_turn_state(true, true, true, true, true), "the capture's host running state stands in, retained K/V or not");
+    check(!reuse_turn_state(false, true, true, true, true), "no capture held: the park copies the running state itself");
+    check(!reuse_turn_state(true, false, true, true, true), "a layer split: each stage's running state is its own");
+    check(!reuse_turn_state(true, true, false, true, true), "a request ran since the capture: its bytes are stale");
+    check(!reuse_turn_state(true, true, true, false, true), "other tokens: the host copy is not this conversation's");
+    check(!reuse_turn_state(true, true, true, true, false), "images: the capture is not compared against them");
+    check(!adopt_turn_capture(true, true, false, true, true, true) && reuse_turn_state(true, true, true, true, true),
+          "retained K/V: no whole adoption, but the running state reuse still holds (the slow park's shape)");
     {
         std::istringstream psi("some avg10=12.34 avg60=3.00 avg300=1.00 total=123\nfull avg10=1.00 avg60=0.5 avg300=0.1 total=9\n");
         const auto v = psi_some10(psi);

@@ -10689,12 +10689,17 @@ vs.d_skip_usage = gs.d_skip_usage;
             std::vector<int32_t> ids;
             Clock::time_point retry{};
             // PLAN-p124a2: the WHOLE capture of the last turn save here, for the park that follows the turn to adopt
-            // (park::adopt_turn_capture) instead of copying the same K/V a second time. It is the park's own turn:
+            // (park::adopt_turn_capture) instead of copying the same K/V a second time - or at least to reuse its
+            // running state (park::reuse_turn_state) when only the K/V cannot be aliased. It is the park's own turn:
             // `begin` (a request continuing in place) invalidates it, and so do the sites that overwrite the session
             // without a request starting (a slot's copy-in, a context restore, the checkpoint mount in
             // live_from_checks); `reset` deliberately does not - a conversation switch goes through it, and the
-            // switch's park of the outgoing conversation is exactly what adopts the capture.
-            std::weak_ptr<const strata::core::SessionLogTurn> adopt_cap;
+            // switch's park of the outgoing conversation is exactly what adopts the capture. HELD STRONG since the
+            // manager's card run of 2026-11-26: the parks that follow a FINISHED turn save ("saved a ... in the
+            // background" already printed, the weak reference gone) were the ones still crawling (checkpoints
+            // 1560 ms for the 237 MB running state beside the file's writeback), so the capture must outlive the
+            // writer - it is released by the next park, a continuing request, or a rewrite site, never later.
+            std::shared_ptr<const strata::core::SessionLogTurn> adopt_cap;
             std::vector<int32_t> adopt_ids;
             bool adopt_cvec = false;
             bool adopt_imgs = false;
@@ -10793,11 +10798,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 h.ids.assign(f.ids.begin(), f.ids.end());
                 h.tokens = (int64_t) f.ids.size();
                 h.dirty = INT64_MAX;
-                // PLAN-p124a2: only a whole capture holds every K/V byte the next park would capture, and only while
-                // the folder's writer still holds the buffers (a weak reference) are they worth adopting for free.
+                // PLAN-p124a2: only a whole capture holds every K/V byte and the whole running state the next park
+                // would copy, and it is held (strongly, review of 2026-11-26: the slow parks are the ones right after
+                // the writer finished) until that park consumes it or a request/rewrite clears it.
                 h.adopt_clear();
                 if (!job.turn->delta()) {
-                    h.adopt_cap = std::shared_ptr<const strata::core::SessionLogTurn>(job.turn);
+                    h.adopt_cap = job.turn;
                     h.adopt_ids = h.ids;
                     h.adopt_cvec = f.cvec;
                     h.adopt_imgs = !f.imgs.empty();
@@ -10883,13 +10889,19 @@ vs.d_skip_usage = gs.d_skip_usage;
             reuse.stages.clear();
             // PLAN-p124a2: the whole capture the last turn save made at this place, if this park may adopt it: then
             // the K/V is the capture's host bytes (aliased, not re-copied) and their part of the estimate is RAM
-            // this park does not allocate. The hold is this park's turn's, consumed here either way.
+            // this park does not allocate. And where the whole adoption cannot run but the capture still stands
+            // (manager review 2026-11-26: the retained K/V took the no_retained term, or a part refuses to alias),
+            // the park at least takes the capture's host copy of the RUNNING STATE instead of pulling ~237 MB off
+            // the device beside that save's file writeback. The hold is this park's turn's, consumed here either way.
             TurnHold& hold = f.slot < 0 ? turn_main : turn_slot[(size_t) f.slot];
-            std::shared_ptr<const strata::core::SessionLogTurn> turn_cap =
-                hold.adopt_live ? hold.adopt_cap.lock() : nullptr;
+            const std::shared_ptr<const strata::core::SessionLogTurn> turn_cap =
+                hold.adopt_live ? hold.adopt_cap : nullptr;
+            const bool same_tokens = hold.adopt_cvec == f.cvec && hold.adopt_ids == f.ids;
+            const bool no_images = f.imgs.empty() && !hold.adopt_imgs;
             const bool adopt = strata::core::park::adopt_turn_capture(
-                turn_cap != nullptr, n_st == 0, reuse.kv.empty(), hold.adopt_live,
-                hold.adopt_cvec == f.cvec && hold.adopt_ids == f.ids, f.imgs.empty() && !hold.adopt_imgs);
+                turn_cap != nullptr, n_st == 0, reuse.kv.empty(), hold.adopt_live, same_tokens, no_images);
+            const bool state_reuse = !adopt && strata::core::park::reuse_turn_state(
+                turn_cap != nullptr, n_st == 0, hold.adopt_live, same_tokens, no_images);
             hold.adopt_clear();
             // the later stages' estimates, each with its own retained K/V when it still fits
             size_t stage_estimate = 0, stage_retained = 0;
@@ -10950,8 +10962,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 // (an adopted capture holds its K/V in buffers that already exist: only the rest is fresh RAM)
                 const size_t adopt_kv = adopt ? strata::core::conversation_snapshot_kv_bytes(
                                        park_ss(f, 0), g, draft0, (int64_t) f.ids.size()) : 0;
-                const size_t retained = reuse.bytes() + stage_retained + adopt_kv;
-                const size_t additional = estimate > retained ? estimate - retained : 0;
+                size_t retained = reuse.bytes() + stage_retained + adopt_kv;
+                size_t additional = estimate > retained ? estimate - retained : 0;
                 // The physical-RAM gate: the incoming snapshot has to fit beside the floor.  make_room()
                 // above only balanced the cache's own budget, so a full cache leaves this one short even
                 // though every parked conversation could give its RAM back - and refusing here throws
@@ -10989,7 +11001,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (adopt) {   // PLAN-p124a2: adopt the turn save's whole host capture; a fresh capture only if it refuses
                     std::string ae;
                     if (strata::core::conversation_snapshot_from_capture(image, view, park_ss(f, 0), g, draft0,
-                            std::move(turn_cap), ae, &reused_bytes))
+                            turn_cap, ae, &reused_bytes))
                         from_capture = true;
                     else {
                         image = {};
@@ -10998,8 +11010,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                 }
                 // (adopt implies reuse.kv is empty - park::adopt_turn_capture's `no_retained` - so the move is empty here)
+                // the capture's host running state for the fresh capture, where its adoption refused or the retained
+                // K/V kept the whole-image adoption off (manager review 2026-11-26): no device copy of it this park
+                const strata::core::ConversationCheckpoint* live_src =
+                    !from_capture && state_reuse && turn_cap->meta.stage_images.empty() ? &turn_cap->meta.live : nullptr;
                 if (!from_capture && !strata::core::conversation_snapshot_save(image, view, park_ss(f, 0), g, draft0,
-                        err, std::move(reuse), &reused_bytes)) return false;
+                        err, std::move(reuse), &reused_bytes, live_src)) return false;
                 for (size_t k = 0; k < n_st; ++k) {   // the later stages (the last one with the draft layer's K/V)
                     auto& st = stages[k];
                     const strata::core::OnDevice on(st->dev);
