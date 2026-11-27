@@ -8393,7 +8393,8 @@ int main(int argc, char** argv) {
     // first chunk or a read mostly busy staging its K/V from RAM no longer looks frozen until it ends and the
     // server's rate of it is a live figure, not a per-chunk jump):
     //   `RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-    //        pass=<i>/<n> ms=<read ms> [stage_ms=<ms>]` - stage: the reused prefix is being copied host->VRAM,
+    //        pass=<i>/<n> ms=<read ms> [stage_ms=<ms>] [pos0=<unit's first token> chunk=<unit's tokens>]` -
+    //   stage: the reused prefix is being copied host->VRAM,
     //   read: new tokens are being read; done / new count from where THIS read started (never a reused / restored
     //   / parked prefix); pass is the current host pass (layer pass of the chunk, or piece of the plan between
     //   pieces) of their total; ms is this request's own read time (the PP lines' read_ms) and stage_ms the part
