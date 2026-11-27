@@ -19182,6 +19182,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                     turn_main.reset();
                     turn_main.adopt_clear();   // (PLAN-p124a2: the restore below rewrites the session)
                     live_ok = false;
+                    // P125j: the file replaces the live session; a conversation with a paused read is never
+                    // written to the session dir, so the file's conversation has none - the armed pause and
+                    // its rows go with the session they belonged to.
+                    drop_read_pause();
                     // host -> device in synchronous copies of the whole state: one bounded allowance
                     blocking("transfer", bytes);
                     bool restored = (n_st > 0 ? strata::core::conversation_snapshot_restore(
@@ -19934,6 +19938,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             //  of those rewrites, so no later park can adopt bytes a rewrite is replacing.)
             turn_main.adopt_clear();
             if (slot_source >= 0) {
+                // P125j: the same shape as the capture above (review L1): a batch slot's copy-in rewrites the
+                // session (and a failed copy leaves it half-written, to be read from 0) - the outgoing
+                // conversation's paused read does not cross it: its park (if one ran) took the pause with it.
+                drop_read_pause();
                 lent_slot = -1;   // (a longer start than the main session's)
                 const auto t0 = Clock::now();
                 if (!copy_from_slot(slot_source, slot_ck, err)) {
@@ -19999,6 +20007,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                 return 1;
             }
             if (borrow) {
+                // P125j: the borrow restore rewrites the session with the donor's prefix - if this request
+                // took the place of a conversation whose park was skipped (park_worth, park_skip, a
+                // pin_sibling borrow), its armed pause has nothing left to go on: the session it paused in is
+                // gone. (When the park did run, park_body already dropped the pause; this is the no-op case.)
+                drop_read_pause();
                 const auto t0 = Clock::now();
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked
                 bool stages_ok = donor != nullptr && donor->stage_images.size() == stages.size();
@@ -20047,6 +20060,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                              conversations.size(), conversations.bytes(), conversations.borrowed());
             }
             if (incoming) {
+                // P125j: the incoming restore rewrites the session with another conversation's state - the
+                // outgoing one's armed pause (still set when its park was skipped: park_worth, park_skip, a
+                // pin_sibling borrow) has nothing to go on any more. The parked pause the incoming one brings
+                // is armed again below, once the restore has run.
+                drop_read_pause();
                 // (PLAN-p124a: the restore line's split counts this restore only - reset at its own start, so a
                 //  borrow's copies or a slot copy before it cannot land in it (F7: no split over its printed total))
                 strata::core::conversation_snapshot_reset_split();
