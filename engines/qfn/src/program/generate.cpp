@@ -6909,7 +6909,7 @@ int main(int argc, char** argv) {
                                      "the cache by hand, SAGUARO_VRAM_RESERVE_FLOOR=0 keeps the reserve as asked, and a "
                                      "card too full for any working cache at it may still see the #496 line lower it\n",
                              floored, asked, o.vram_reserve_given ? "it was asked for" : "it is the default");
-                 o.vram_reserve_mib = floored;
+                o.vram_reserve_mib = floored;
             }
         }
 #endif
