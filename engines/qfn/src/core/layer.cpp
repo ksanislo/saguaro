@@ -2167,6 +2167,7 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
         report_vmm_grow_failure(dev, "grown", need - from_budget, G, room);   // (it said nothing at all before)
         for (size_t i = (size_t) from_budget; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);
         for (size_t i = 0; i < (size_t) from_budget; ++i) qsa_slot_budget_give(dev, got[i]);
+        g_dev_failed.store(true);   // (round 6's wording rule: a rope refusal must answer VRAM, not RAM)
         return false;
     }
     const strata::core::OnDevice on(dev);
@@ -2176,9 +2177,11 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
     if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) {
         report_vmm_grow_failure(dev, "mapped", need, G, room);   // P124e round 7: the rope map names its refusal too
         for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);   // (never handed to the map)
+        g_dev_failed.store(true);
         return false;
     }
     for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);       // (the map needed fewer than measured)
+    g_dev_failed.store(false);
     if (r->cells > had)
         std::fprintf(stderr, "saguaro: CUDA%d's RoPE table covers %lld positions now (was %lld)\n", dev,
                      (long long) r->cells, (long long) had);
@@ -2244,6 +2247,7 @@ bool qsa_rope_yarn_fit(const QsaState& st, int64_t cells) {
         report_vmm_grow_failure(dev, "grown", need - from_budget, G, room);
         for (size_t i = (size_t) from_budget; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);
         for (size_t i = 0; i < (size_t) from_budget; ++i) qsa_slot_budget_give(dev, got[i]);
+        g_dev_failed.store(true);   // (the card's ERR says VRAM for this refusal too)
         return false;
     }
     const strata::core::OnDevice on(dev);
@@ -2253,9 +2257,11 @@ bool qsa_rope_yarn_fit(const QsaState& st, int64_t cells) {
     if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) {
         report_vmm_grow_failure(dev, "mapped", need, G, room);
         for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);   // (never handed to the map)
+        g_dev_failed.store(true);
         return false;
     }
     for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);       // (the map needed fewer than measured)
+    g_dev_failed.store(false);
     std::fprintf(stderr, "saguaro: CUDA%d's YaRN RoPE table covers %lld positions now (was %lld)\n", dev,
                  (long long) r->cells, (long long) had);
     return true;
