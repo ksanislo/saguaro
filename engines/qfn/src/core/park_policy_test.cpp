@@ -175,6 +175,45 @@ int main() {
     check(!reuse_turn_state(true, true, true, true, false), "images: the capture is not compared against them");
     check(!adopt_turn_capture(true, true, false, true, true, true) && reuse_turn_state(true, true, true, true, true),
           "retained K/V: no whole adoption, but the running state reuse still holds (the slow park's shape)");
+    // PLAN-p125k: what the NARROWED park/restore wait waits for. Streams are int tags here - the wait-set is
+    // the tested decision; conversation_copy.hpp `narrow_sync` waits for exactly these plus this thread's
+    // private copy stream, so a park or a restore waits for its own bytes and no other conversation's
+    // queued work. The order the copy paths keep around this wait: every park copy lands (source cells are
+    // not reused before the copy read them) and every restore copy lands (restored cells are not read
+    // before their bytes) - both before the function returns, whatever the wait set selects.
+    {
+        using Scope = std::vector<std::pair<int, int>>;   // (device, stream tag)
+        const Scope own{{0, 10}, {1, 20}, {0, 11}};       // two of this conversation's streams on card 0, one on card 1
+        const auto d0 = wait_streams(own, 0);
+        check(d0.size() == 2 && d0[0] == 10 && d0[1] == 11,
+              "on card 0 the narrowed wait is this conversation's two streams on THAT card, in scope order");
+        const auto d1 = wait_streams(own, 1);
+        check(d1.size() == 1 && d1[0] == 20,
+              "on the other card only its own stream - waiting a card-0 stream from card 1 would wait the wrong device");
+        const auto d9 = wait_streams(own, 9);
+        check(d9.empty(),
+              "a card whose turn the wait runs on with no stream of this conversation queued: the wait narrows to its own copy stream alone");
+        const Scope none{};
+        check(wait_streams(none, 0).empty() && wait_streams(none, 9).empty(),
+              "an empty scope selects no stream at all: the caller keeps the whole-device sync (narrowing is the caller's term, not this filter's)");
+        const Scope solo{{0, 7}};   // the gated shape: the main conversation, one card, its session stream alone
+        check(wait_streams(solo, 0).size() == 1 && wait_streams(solo, 0)[0] == 7,
+              "the single-card main conversation: its own streams are the whole producer set");
+        // the wait's coverage, on fake streams: a scope-set wait covers a queued copy iff its stream is in
+        // the device's set (plus this thread's copy stream, which covers the copies themselves); without a
+        // scope the sync stays the whole-device one and covers everything - the over-wide wait of before.
+        auto wait_covers = [](bool scope_set, const Scope& scope, int dev, int s) {
+            if (!scope_set) return true;   // no scope: cudaDeviceSynchronize waits for every stream, as before
+            const auto w = wait_streams(scope, dev);
+            return std::find(w.begin(), w.end(), s) != w.end();
+        };
+        check(wait_covers(false, own, 0, 99), "no scope: the unrelated stream 99 is (over-)waited, the pre-P125k sync");
+        check(!wait_covers(true, own, 0, 99), "with the scope: a busy conversation's queued work (99) is NOT waited - the fix");
+        check(wait_covers(true, own, 0, 10) && wait_covers(true, own, 0, 11),
+              "this conversation's queued work on its card-0 streams IS waited: no source cell is reused before its copy read it, no restored cell read before its bytes landed");
+        check(!wait_covers(true, own, 0, 20) && wait_covers(true, own, 1, 20),
+              "a stream of the other device is waited on that device's turn, never from here (the wrong-device stream wait)");
+    }
     {
         std::istringstream psi("some avg10=12.34 avg60=3.00 avg300=1.00 total=123\nfull avg10=1.00 avg60=0.5 avg300=0.1 total=9\n");
         const auto v = psi_some10(psi);
