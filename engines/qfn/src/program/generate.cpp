@@ -16939,7 +16939,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             const size_t n_st = stages.size() + 1;
             strata::prefill::Prefill& rep = multi_gpu ? stages.back()->sp : sp;   // the stage that reports a chunk
             std::vector<std::function<bool(int64_t, std::string&)>> old_stage_chunk(n_st);
-            std::vector<std::function<void(int64_t, int64_t, bool, int64_t, int64_t)>> old_layer_pass(n_st);   // (U5 heartbeat)
+            std::vector<std::function<void(int64_t, int64_t, bool, int64_t, int64_t, int64_t)>> old_layer_pass(n_st);   // (U5 heartbeat)
             auto old_chunk = std::move(rep.on_chunk);
             auto old_stop = std::move(sp.should_stop);
             auto old_yield = std::move(sp.stop_at_chunk);
