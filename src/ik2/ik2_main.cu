@@ -28,6 +28,7 @@
 #include "ik2_lane.hpp"
 #include "ik2_off.cuh"
 #include "ik2_plan.hpp"   // (the load-time sizing decision as helpers: the committed start step vs the ceiling)
+#include "ik2_vmm.hpp"    // (P125o a2 / a3: the elastic K / V as an address range with chunks of VRAM behind it)
 #include "mm3_link.cuh"   // (two GPUs: the copies between them, peer only where tested)
 #include "maya/artifact/gguf_reader.hpp"
 #include "sf_codecs.h"
@@ -532,14 +533,54 @@ int g_kv_stream = -1;        // -1 auto, 0 off, 1 on
 int g_kv_resident = -1;      // full visits whose K / V stay in VRAM (-1: as many as fit)
 // (P125e a1, the elastic start step: SAGUARO_IK2_KV_START) the positions of the global layers' K / V the plan and the
 // layout commit to at the load - what a conversation uses at its start, not the --max-context ceiling (which costs
-// ~0 until used: the ceiling's rows past the commit are never written, and the engine announces the committed
-// context as the conversation's ceiling until step 2 grows them; 0: the whole ceiling, as before).  Where the
-// ceiling's cache would crowd every expert out of VRAM but the committed one leaves them room, the experts stay
-// (src/ik2/ik2_plan.hpp, ref/REPORT-p125b-ik2-vram.md); g_kv_run is the ceiling the engine then runs and says.
+// ~0 until used; 0: the whole ceiling, as before).  Where the ceiling's cache would crowd every expert out of VRAM
+// but the committed one leaves them room, the experts stay (src/ik2/ik2_plan.hpp, ref/REPORT-p125b-ik2-vram.md).
+// P125o (a2 / a3) makes the commit growable: on a VMM-backed start the global K / V is the ceiling's address range
+// with physical chunks behind the committed positions and the engine still runs and announces the whole ceiling - a
+// request commits the chunks of the positions it writes before its first pass (kv_grow below).  Without the
+// virtual memory API the fallback is the a1 start: g_kv_run drops to the commit, conversations run to it, and the
+// committed K / V is one plain allocation as before.
 int g_kv_start = ik2plan::kKvStartDefault;
-bool g_kv_elastic = false;   // the elastic start was taken (the global layers' K / V laid out for g_kv_run only)
-int g_kv_run = 0;            // the conversation's ceiling the engine announces and enforces (= ctx unless elastic)
+bool g_kv_elastic = false;   // the elastic start was taken (the global layers' K / V laid out for g_kv_commit only)
+int g_kv_run = 0;            // the conversation's ceiling the engine announces and enforces (= ctx unless the fallback lowers it)
+int g_kv_commit = 0;         // the positions of the global layers' K / V laid out at the load (= ctx unless elastic)
 std::vector<char> g_kv_host; // [visit] 1: its K / V in host RAM (set by the plan)
+// (P125o a2: the elastic global K / V as VMM ranges - one per K / V buffer of a full visit, the ceiling's address
+//  range reserved at the load, chunks of VRAM committed in position order as conversations reach them (a3).  All
+//  buffers share the geometry (the row is the same across the global visits), so one chunk counter covers them.)
+bool g_kv_vmm = false;       // the elastic K / V is VMM-backed (grows on demand; the fallback: false, a1's layout)
+struct KvVma {
+    ik2::vmm::Range k, v;
+};
+std::vector<KvVma> g_kvvma;  // the full visits' K / V ranges, in the order they were allocated
+int g_kv_rpc = 0;            // positions a committed chunk covers (4096 rounded up to the granule, ik2_plan.hpp)
+size_t g_kv_chunk_b = 0;     // bytes one chunk holds in one buffer
+int g_kv_n_chunks = 0;       // chunks in the ceiling's range
+int g_kv_chunks = 0;         // chunks committed so far (every buffer, committed in lockstep)
+
+// (a3: put VRAM behind the chunks covering positions [0, n) of the elastic global K / V, in the position order,
+//  before anything writes one - host-side, at a request's start or where a kept conversation's rows land, never
+//  per token and never in a kernel; a no-op on every other layout.  VRAM short: what this call mapped goes back,
+//  the old commit stands untouched, and the caller fails just its request (giving the experts' VRAM back for the
+//  room is b4, the next step; the CUDA graphs stay valid either way - the base pointer never moves))
+bool kv_grow(int n, std::string& err) {
+    if (!g_kv_vmm || n <= 0) return true;
+    const int need = ik2plan::kv_chunks_for(n, g_kv_rpc);
+    if (need <= g_kv_chunks) return true;
+    const size_t bytes = (size_t) need * g_kv_chunk_b;
+    const size_t old = (size_t) g_kv_chunks * g_kv_chunk_b;
+    bool ok = true;
+    for (auto& r : g_kvvma) {
+        if (!r.k.commit(bytes, err) || !r.v.commit(bytes, err)) { ok = false; break; }
+    }
+    if (!ok) {
+        for (auto& r : g_kvvma) r.k.shrink(old), r.v.shrink(old);
+        cudaGetLastError();
+        return false;
+    }
+    g_kv_chunks = need;
+    return true;
+}
 uint8_t *g_kv_stage_k = nullptr, *g_kv_stage_v = nullptr;   // a host visit's rows for a prompt chunk (VRAM)
 // The staging pair is the "swing" visit's VRAM: a full visit kept in VRAM for tokens that, while a prompt runs, has
 // its rows in RAM like the streamed ones (copied there first) and lends its VRAM to the staging - one more visit in
@@ -7476,7 +7517,8 @@ int main(int argc, char** argv) {
     g_depth = getenv("SAGUARO_IK2_DEPTH") ? std::max(0, std::atoi(getenv("SAGUARO_IK2_DEPTH"))) : 0;   // (tests: a long context's speed without its prompt)
     g_kv_start = getenv("SAGUARO_IK2_KV_START") ? std::max(0, std::atoi(getenv("SAGUARO_IK2_KV_START")))
                                                 : ik2plan::kKvStartDefault;   // (P125e a1: the committed K/V of the global layers)
-    g_kv_run = ctx;   // (the ceiling the engine runs and announces; the elastic start step may lower it)
+    g_kv_run = ctx;   // (the ceiling the engine runs and announces; the elastic fallback may lower it)
+    g_kv_commit = ctx;   // (the global K / V laid out at the load; the elastic start step lowers this one)
     if (drafting.empty()) drafting = draft_path.empty() ? "off" : "on";   // (--draft alone: as before, drafting on)
     if (drafting == "off") draft_path.clear();
     g_lookup = drafting != "off" && !(getenv("SAGUARO_IK2_LOOKUP") && !std::atoi(getenv("SAGUARO_IK2_LOOKUP")));
@@ -8050,15 +8092,37 @@ int main(int argc, char** argv) {
             !(getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")))) {
             const double freed = kv_b > kv_b_start ? (double) (kv_b - kv_b_start) / 1073741824.0 : 0.0;
             g_kv_elastic = true;
-            g_kv_run = kv_com;
+            g_kv_commit = kv_com;
+            // (P125o a2: where this GPU backs the layout with virtual memory, the global K / V reserves the
+            //  ceiling's address range with chunks of VRAM behind the commit and a conversation commits its
+            //  chunks as it grows (a3) - so the ceiling stays the conversation's run and announced context.
+            //  Where it cannot (an old ROCm without hipMemCreate / hipMemMap), the fallback is the a1 start:
+            //  the commit laid out as one plain allocation, g_kv_run lowered to it, conversations run to it.)
+            int cur_dev = 0;
+            cudaGetDevice(&cur_dev);
+            g_kv_vmm = ik2::vmm::granule(cur_dev) > 0;
+            if (!g_kv_vmm) g_kv_run = kv_com;
             kv_b = kv_b_start;
             fits = true;
-            std::printf("NOTE context: the global layers' K / V is laid out for the first %d positions of the %d the "
-                        "ceiling allows (SAGUARO_IK2_KV_START) - the experts keep the freed %.1f GiB instead of "
-                        "leaving VRAM; conversations run to %d until the cache can grow into the ceiling "
-                        "(SAGUARO_IK2_KV_START=%d or 0 keeps the ceiling's layout)\n",
-                        kv_com, ctx, freed, kv_com, ctx);
+            if (g_kv_vmm)
+                std::printf("NOTE context: the global layers' K / V is laid out for the first %d positions of the %d "
+                            "the ceiling allows (SAGUARO_IK2_KV_START) as growable chunks of %d - a conversation "
+                            "commits the chunks it writes and runs to the ceiling; the experts keep the freed "
+                            "%.1f GiB instead of leaving VRAM (SAGUARO_IK2_KV_START=%d or 0 keeps the ceiling's "
+                            "layout)\n",
+                            kv_com, ctx, ik2plan::kKvChunkPos, freed, ctx);
+            else
+                std::printf("NOTE context: the global layers' K / V is laid out for the first %d positions of the %d "
+                            "the ceiling allows (SAGUARO_IK2_KV_START) - the experts keep the freed %.1f GiB instead "
+                            "of leaving VRAM; conversations run to %d until the cache can grow into the ceiling "
+                            "(SAGUARO_IK2_KV_START=%d or 0 keeps the ceiling's layout)\n",
+                            kv_com, ctx, freed, kv_com, ctx);
             std::fflush(stdout);
+            if (!g_kv_vmm)
+                std::fprintf(stderr, "saguaro ik2: no %s on this GPU - the global layers' K / V stays one "
+                                     "allocation of %d positions and conversations run to it (the elastic start's "
+                                     "fallback)\n",
+                             ik2::vmm::api_name(), kv_com);
         }
         // Two GPUs: where GPU 0 holds every expert, the resident path there alone (one GPU's speed, v1.1.73's path;
         // SAGUARO_IK2_TWO=1: the split anyway), else the split - GPU 0 on the offload path, GPU 1 with the next experts
@@ -8187,12 +8251,12 @@ int main(int argc, char** argv) {
             // (the drafter: its context rows in FP16, else in FP8 - SAGUARO_IK2_DRAFT_KV takes one; the load below measures)
             const char* kv_env = getenv("SAGUARO_IK2_DRAFT_KV");
             const bool only16 = kv_env && std::string(kv_env) == "f16", only8 = kv_env && std::string(kv_env) == "fp8";
-            size_t need = draft_room(model_drafter ? draft_path : std::string(), g_kv_run, chunk, c, head_rows, only8);
+            size_t need = draft_room(model_drafter ? draft_path : std::string(), g_kv_commit, chunk, c, head_rows, only8);
             std::string why;
             if (model_drafter && S.sv) why = "a Strata pack's output head is not one it reads (FP16 or planar Q8_0)";
             if (why.empty() && model_drafter && !only8 && !only16 && !room_ok(need, why, !model_drafter)) {
                 why.clear();
-                need = draft_room(draft_path, g_kv_run, chunk, c, head_rows, true);
+                need = draft_room(draft_path, g_kv_commit, chunk, c, head_rows, true);
             }
             if (why.empty() && room_ok(need, why, !model_drafter)) {
                 std::printf("drafting: %s, %.2f GiB of VRAM beside the model%s\n",
@@ -8462,7 +8526,7 @@ int main(int argc, char** argv) {
         else Vi.l = v - (c.n_pass - 1) * n_core;
         const Layer& Ly = M.L[Vi.l];
         use_dev(Ly.dev);
-        Vi.kv_cap = Ly.sliding ? std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock)) : g_kv_run;   // (elastic start: g_kv_run < ctx = the commit)
+        Vi.kv_cap = Ly.sliding ? std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock)) : g_kv_commit;   // (elastic start: g_kv_commit < ctx = the physical layout; VMM-backed it is the committed prefix of the ceiling's range)
         const bool kv_host = v < (int) g_kv_host.size() && g_kv_host[v];
         if (g_kv_q4) {
             if (c.D != 128) die("SAGUARO_IK2_KV=q4 requires head_dim == 128");
@@ -8526,6 +8590,34 @@ int main(int argc, char** argv) {
                     CU(cudaEventCreateWithFlags(&g_ring_done[s], cudaEventDisableTiming));
                 }
             }
+        } else if (g_kv_vmm && !Ly.sliding) {   // (a2: the global visit's K / V as the ceiling's address range,
+                                                //  chunks of VRAM behind the committed positions - fresh pages map
+                                                //  zeroed, which is exactly the DEPTH test's semantics; the kernels
+                                                //  index [0, pos) by absolute position with no wrap on full visits,
+                                                //  so they see the commit at first and the grown rows as a2 / a3
+                                                //  land pages under the same stable base)
+            const size_t row_b = KD * (g_kv_fp8 ? 1 : 2);
+            if (g_kv_rpc == 0) {
+                const size_t gran = ik2::vmm::granule(Ly.dev);
+                g_kv_rpc = ik2plan::kv_rows_per_chunk(ik2plan::kKvChunkPos, row_b, gran);
+                g_kv_chunk_b = (size_t) g_kv_rpc * row_b;
+                g_kv_n_chunks = ik2plan::kv_chunks_for(ctx, g_kv_rpc);
+                g_kv_chunks = ik2plan::kv_chunks_for(g_kv_commit, g_kv_rpc);
+            }
+            const size_t cap = (size_t) g_kv_n_chunks * g_kv_chunk_b;
+            const size_t committed = (size_t) ik2plan::kv_chunks_for(g_kv_commit, g_kv_rpc) * g_kv_chunk_b;
+            KvVma r;
+            std::string verr;
+            if (!r.k.open(Ly.dev, cap, verr)) die("elastic K / V: " + verr);
+            if (!r.v.open(Ly.dev, cap, verr)) { r.k.close(); die("elastic K / V: " + verr); }
+            if (!r.k.commit(committed, verr) || !r.v.commit(committed, verr)) {
+                r.k.close(), r.v.close();
+                die("elastic K / V: the committed " + std::to_string(committed >> 20) +
+                    " MiB of the global layers' cache did not land: " + verr + " - a smaller --ctx or SAGUARO_IK2_KV_START");
+            }
+            if (g_kv_fp8) Vi.kc8 = r.k.ptr(), Vi.vc8 = r.v.ptr();
+            else Vi.kc = (uint16_t*) r.k.ptr(), Vi.vc = (uint16_t*) r.v.ptr();
+            g_kvvma.push_back(std::move(r));
         } else if (g_kv_fp8) {
             Vi.kc8 = dalloc<uint8_t>((size_t) Vi.kv_cap * KD);
             Vi.vc8 = dalloc<uint8_t>((size_t) Vi.kv_cap * KD);
@@ -9171,12 +9263,12 @@ int main(int argc, char** argv) {
             try {
                 if (g_drem.dev >= 0) {
                     DevScope on(g_drem.dev);
-                    dr = ik2::draft::load(draft_path, c.C, g_kv_run, g_drem.blas, g_drem.s, kv8 != 0);
+                    dr = ik2::draft::load(draft_path, c.C, g_kv_commit, g_drem.blas, g_drem.s, kv8 != 0);
                     ik2::draft::fold_q8(dr, g_drem.q8, g_drem.q8d, c.n_rows);
                     ik2::draft::set_head_q8(dr, g_drem.q8, g_drem.q8d);
                     CU(cudaStreamSynchronize(g_drem.s));
                 } else {
-                dr = ik2::draft::load(draft_path, c.C, g_kv_run, g_blas, g_s, kv8 != 0);
+                dr = ik2::draft::load(draft_path, c.C, g_kv_commit, g_blas, g_s, kv8 != 0);
                 if (draft_head) {
                     ik2::draft::fold(dr, draft_head, c.n_rows);
                 } else {
@@ -10318,7 +10410,7 @@ int main(int argc, char** argv) {
             char b[400];
             std::snprintf(b, sizeof b, "vram_used=%d ram_used=%d vram_gb=%.2f ram_gb=%.2f vram_hit=%.4f ram_fetch=%.2f "
                           "cpu=%.2f disk=0 promo=0 kv_used=%lld kv_cap=%d kv_gb=%.2f", nv, c.n_layer * c.E - nv, vb / 1e9,
-                          std::max(0.0, (double) g_exp_bytes - vb) / 1e9, hit, fetch, cpu, kv_used, g_kv_run, kv_total / 1e9);
+                          std::max(0.0, (double) g_exp_bytes - vb) / 1e9, hit, fetch, cpu, kv_used, g_kv_commit, kv_total / 1e9);
             return std::string(b);
         };
         // a request's expert picks found in VRAM and all of them, as counters (DONE's last two fields: the differences)
