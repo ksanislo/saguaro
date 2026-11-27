@@ -14355,10 +14355,15 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (strata::core::device_sync() != cudaSuccess) { e = "elastic slots: device sync failed"; return false; }
             }
             if (!ok) {
+                // P124e (round 6, manager card): the grow is both halves - a device-state (VRAM) refusal is not
+                // "no RAM", and not the --batch budget's message either on a follow rig without one.
                 e = strata::core::qsa_host_pin_failed()
                         ? "no RAM is left to pin " + std::to_string(upto) + " cells of context in slot " + std::to_string(b)
-                        : "elastic slots: the slot budget (SAGUARO_ELASTIC_SLOTS_MIB) has no room for " + std::to_string(upto) +
-                              " cells in slot " + std::to_string(b);
+                        : strata::core::qsa_dev_pin_failed()
+                                ? "no VRAM is left for " + std::to_string(upto) + " cells of context in slot " +
+                                      std::to_string(b) + " (the card's expert cache gave all it can)"
+                                : "elastic slots: the slot budget (SAGUARO_ELASTIC_SLOTS_MIB) has no room for " +
+                                      std::to_string(upto) + " cells in slot " + std::to_string(b);
                 return false;
             }
             // the slots decoding beside it are backed a step ahead now, while everything is quiet; then idle slots and
@@ -14400,12 +14405,15 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (r == 2) return 2;
             const bool ram = strata::core::qsa_host_pin_failed();
+            // P124e (round 6, manager card): a device-state (VRAM) refusal ends the slot as `vram`, not as RAM or length
+            const bool vram = !ram && strata::core::qsa_dev_pin_failed();
             std::fprintf(stderr, "saguaro batch: elastic slot %d ends at %lld tokens: %s\n", b, (long long) sl.p,
                          ram ? "no RAM is left to pin its context, and no idle conversation is left to give it (SAGUARO_KV_HOST_ELASTIC)"
-                             : "the slot budget has no room to grow (SAGUARO_ELASTIC_SLOTS_MIB)");
+                             : vram ? "no VRAM is left for its context, and the card's expert cache has given all it can (SAGUARO_KV_VRAM_ELASTIC)"
+                                    : "the slot budget has no room to grow (SAGUARO_ELASTIC_SLOTS_MIB)");
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-            std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, ram ? "ram" : "length", ms,
-                        bdone_stats(b).c_str());
+            std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, ram ? "ram" : vram ? "vram" : "length",
+                        ms, bdone_stats(b).c_str());
             std::fflush(stdout);
             sl.active = false;
             sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
@@ -19515,7 +19523,14 @@ vs.d_skip_usage = gs.d_skip_usage;
             // goes: a reply that may run to the end of a long context does not hold it all from the start)
             int64_t solo_pin = std::min<int64_t>(o.max_context, n + (pipe ? max_new : std::min<int64_t>(max_new, kSoloPinAhead)) + 64);
             if (!solo_host_fit_r(solo_pin)) {
-                std::printf("ERR no RAM is left to pin this request's context (%lld tokens)\n", (long long) solo_pin);
+                // P124e (round 6, manager card): session_host_fit grows BOTH halves - a device-state (VRAM) refusal
+                // must not answer with the RAM message (the card read "no RAM is left" with GiBs of RAM free).
+                if (strata::core::qsa_dev_pin_failed())
+                    std::printf("ERR no VRAM is left for this request's context (%lld tokens): the card's expert cache "
+                                "gave all it can\n",
+                                (long long) solo_pin);
+                else
+                    std::printf("ERR no RAM is left to pin this request's context (%lld tokens)\n", (long long) solo_pin);
                 continue;
             }
             if (solo_vram_fit && !solo_vram_fit(std::min<int64_t>(o.max_context, n + max_new + 64))) {
@@ -22466,9 +22481,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (p + T + 64 > solo_pin) {   // SAGUARO_KV_HOST_ELASTIC: the next stretch of the reply pinned
                     const int64_t want = std::min<int64_t>(o.max_context, std::min<int64_t>(n + max_new, p + T + kSoloPinAhead) + 64);
                     if (!solo_host_fit_r(want)) {
-                        std::fprintf(stderr, "saguaro serve: no RAM is left to pin the reply past %lld tokens: it ends here\n",
-                                     (long long) p);
-                        finish = "ram";
+                        // P124e (round 6, manager card): the grow is both halves - when the card's device state is what
+                        // refused, the reply ends as `vram` (the server's no-VRAM end), not as a RAM shortage.
+                        const bool vram = strata::core::qsa_dev_pin_failed();
+                        std::fprintf(stderr, "saguaro serve: no %s is left to pin the reply past %lld tokens: it ends here\n",
+                                     vram ? "VRAM" : "RAM", (long long) p);
+                        finish = vram ? "vram" : "ram";
                         break;
                     }
                     solo_pin = want;

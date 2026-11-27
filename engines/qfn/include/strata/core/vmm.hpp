@@ -25,6 +25,10 @@ uint64_t vmm_granularity(int dev = -1);
 /// A new physical chunk on device `dev` (-1: the current one; 0: out of memory), and its release.
 VmmChunk vmm_chunk_new(int dev = -1);
 void vmm_chunk_free(VmmChunk h);
+/// P124e (round 6, manager card): what the last failing driver call of this thread said - the call and the
+/// driver's own words ("cuMemCreate: out of memory"), "" when nothing failed since.  A driver-API refusal
+/// never sets cudaGetLastError(), which is why a refused map used to read as cudaGetErrorString's "no error".
+const char* vmm_last_error();
 
 class VmmRange {
 public:

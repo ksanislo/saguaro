@@ -6,6 +6,7 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/slot_sizing.hpp"
+#include "strata/core/vmm_grow.hpp"
 #include "strata/core/pin_budget.hpp"
 #include "strata/platform/numa.hpp"
 #include "strata/core/native_dense.hpp"
@@ -1654,12 +1655,26 @@ int64_t follow_need_locked(SlotPool& p, int64_t cells) {
     }
     return need;
 }
+// The grow's failure line (P124e round 6, manager card): what the driver's call actually returned (vmm_last_error -
+// a driver-API refusal leaves cudaGetLastError() clean, which is how "could not be mapped: no error" was born),
+// which allocation, how much was asked, how much VRAM the card has free NOW, and whether the expert cache was
+// asked to give way and what it gave.  The device must be current for the free-memory read (the callers hold
+// their `OnDevice`).
+void report_vmm_grow_failure(int dev, const char* what, int64_t chunks, uint64_t G,
+                             const strata::core::VmmRoomStat& room) {
+    uint64_t fb = 0, tb = 0;
+    if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); fb = tb = 0; }
+    const std::string line = strata::core::vmm_grow_failure_text(dev, what, strata::core::vmm_last_error(), chunks, G,
+                                                                 fb, tb, room.relief_ask, room.relief_got);
+    std::fprintf(stderr, "saguaro: %s\n", line.c_str());
+}
 // Maps the chunks `cells` cells need in every follow array, from the driver's own fresh chunks, and fills them
 // (-1 / the ring formula).  With the pool's lock held - and NEVER the relief caller: the relief hook runs on a
 // thread that takes this very lock through the slot budget, so the room is probed OUTSIDE the lock first
 // (`follow_room`).  false: the driver refused (what landed stays landed - a page table never reads past its
-// live blocks, so half a grow is harmless; nothing is stepped down).
-bool follow_map_locked(SlotPool& p, int64_t cells) {
+// live blocks, so half a grow is harmless; nothing is stepped down).  `room` says what the probe asked the
+// card's relief and what it gave - the failure line names it (P124e round 6: never "no error").
+bool follow_map_locked(SlotPool& p, int64_t cells, const strata::core::VmmRoomStat& room) {
     const uint64_t G = p.range.granularity();
     const int dev = p.range.device();
     const strata::core::OnDevice on(dev);
@@ -1673,8 +1688,7 @@ bool follow_map_locked(SlotPool& p, int64_t cells) {
             if (!p.range.mapped(c)) fresh.push_back(c);
         if (fresh.empty()) continue;
         if (!p.range.map_range(c0, c1, [] { return (strata::core::VmmChunk) 0; })) {
-            std::fprintf(stderr, "saguaro: the context's device state could not be mapped on CUDA%d: %s\n", dev,
-                         cudaGetErrorString(cudaGetLastError()));
+            report_vmm_grow_failure(dev, "mapped", (int64_t) fresh.size(), G, room);
             for (const int64_t c : fresh)   // what the probe promised but the map still could not take
                 if (const strata::core::VmmChunk h = p.range.unmap(c)) strata::core::vmm_chunk_free(h);
             return false;
@@ -1689,12 +1703,15 @@ bool follow_map_locked(SlotPool& p, int64_t cells) {
 // Can `dev` hand out `n` chunks of G bytes right now?  Asks the card's relief ONCE for the shortfall (the expert
 // cache giving way, the plan's take-from-experts in VRAM) and retries.  NO layer lock may be held: the relief's
 // give path takes the slot budget's lock.  Chunks are probed and given straight back; the map re-takes them.
-bool follow_room(int dev, int64_t n, uint64_t G, bool may_relief) {
+// P124e round 6: `st` records what the relief was asked and what it gave, for the failure line.
+bool follow_room(int dev, int64_t n, uint64_t G, bool may_relief, strata::core::VmmRoomStat* st = nullptr) {
     const strata::core::OnDevice on(dev);
     for (int64_t i = 0; i < n; ++i) {
         strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
         if (h == 0 && may_relief) {
-            vram_relief(dev, (uint64_t) (n - i) * G);
+            const uint64_t ask = (uint64_t) (n - i) * G;
+            const uint64_t gave = vram_relief(dev, ask);
+            if (st != nullptr) { st->relief_ask += ask; st->relief_got += gave; }   // (the amounts the line names)
             h = strata::core::vmm_chunk_new(dev);
         }
         if (h == 0) return false;
@@ -1722,13 +1739,16 @@ bool qsa_follow_grow_at(const QsaState& st, int64_t cells) {
         g_dev_failed.store(false);
         return true;
     }
-    if (!follow_room(dev, need, G, true)) {
+    strata::core::VmmRoomStat room;   // what the relief was asked and what it gave, for the failure line
+    if (!follow_room(dev, need, G, true, &room)) {
+        const strata::core::OnDevice on(dev);
+        report_vmm_grow_failure(dev, "grown", need, G, room);   // (P124e round 6: it said NOTHING here before)
         g_dev_failed.store(true);
         return false;
     }
     std::lock_guard<std::mutex> lk(g_slot_mu);
     SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
-    const bool ok = p.follow && follow_map_locked(p, cells);
+    const bool ok = p.follow && follow_map_locked(p, cells, room);
     g_dev_failed.store(!ok);
     return ok;
 }
@@ -1871,11 +1891,14 @@ struct ScoresPool {
 };
 std::vector<std::unique_ptr<ScoresPool>> g_scores_pools;
 std::mutex g_scores_mu;
-bool scores_grow_locked(ScoresPool& sp, int64_t cells) {
+bool scores_grow_locked(ScoresPool& sp, int64_t cells, const strata::core::VmmRoomStat& room = strata::core::VmmRoomStat()) {
     const uint64_t G = sp.range.granularity();
     const strata::core::OnDevice on(sp.range.device());
     const int64_t c1 = (int64_t) (((uint64_t) std::max<int64_t>(cells, 1) * sp.unit + G - 1) / G);
+    int64_t fresh = 0;
+    for (int64_t c = 0; c < c1; ++c) fresh += !sp.range.mapped(c);
     if (!sp.range.map_range(0, c1, [] { return (strata::core::VmmChunk) 0; })) {
+        report_vmm_grow_failure(sp.range.device(), "mapped", fresh, G, room);   // P124e round 6: named, not silence
         g_dev_failed.store(true);
         return false;
     }
@@ -1926,12 +1949,15 @@ bool qsa_scores_grow(int32_t i, int64_t cells) {
         dev = sp.range.device();
     }
     if (need == 0) return true;
-    if (!follow_room(dev, need, G, true)) {
+    strata::core::VmmRoomStat room;
+    if (!follow_room(dev, need, G, true, &room)) {
+        const strata::core::OnDevice on(dev);
+        report_vmm_grow_failure(dev, "grown", need, G, room);   // P124e round 6: the scratch's room failing says so too
         g_dev_failed.store(true);
         return false;
     }
     std::lock_guard<std::mutex> lk(g_scores_mu);
-    return scores_grow_locked(*g_scores_pools[(size_t) i], cells);
+    return scores_grow_locked(*g_scores_pools[(size_t) i], cells, room);
 }
 uint64_t qsa_scores_trim(int32_t i, int64_t cells) {
     if (i < 0 || !g_follow_live.load()) return 0;

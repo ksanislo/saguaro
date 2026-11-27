@@ -21,6 +21,7 @@ struct Api {
     decltype(&cuMemMap) map = nullptr;
     decltype(&cuMemUnmap) unmap = nullptr;
     decltype(&cuMemSetAccess) access = nullptr;
+    decltype(&cuGetErrorString) err_str = nullptr;   // P124e round 6: optional - the failure line reads better with it
 };
 
 template <class F> bool resolve(const char* name, F& f) {
@@ -48,8 +49,25 @@ const Api& api() {
                resolve("cuMemAddressReserve", a.reserve) && resolve("cuMemAddressFree", a.free_va) &&
                resolve("cuMemCreate", a.create) && resolve("cuMemRelease", a.release) && resolve("cuMemMap", a.map) &&
                resolve("cuMemUnmap", a.unmap) && resolve("cuMemSetAccess", a.access);
+        (void) resolve("cuGetErrorString", a.err_str);   // optional: the failure line names the driver's words with it
     });
     return a;
+}
+
+// P124e (round 6, manager card): a driver-API refusal leaves the runtime's error state CLEAN, so the follow grow's
+// "could not be mapped: no error" was cudaGetLastError() saying nothing about the cuMemCreate/cuMemMap that failed.
+// Every failing call here records itself (this thread's last one) for vmm_last_error(); the grow's failure line
+// prints it with the bytes asked, the card's free memory and what the expert cache gave.
+thread_local char g_last_err[192] = "";
+void note_err(const char* what, CUresult r, uint64_t bytes) {
+    const char* s = nullptr;
+    if (api().err_str != nullptr) (void) api().err_str(r, &s);
+    if (s == nullptr) {
+        std::snprintf(g_last_err, sizeof g_last_err, "%s failed: CUresult %d (%llu bytes)", what, (int) r,
+                      (unsigned long long) bytes);
+        return;
+    }
+    std::snprintf(g_last_err, sizeof g_last_err, "%s failed: %s (%llu bytes)", what, s, (unsigned long long) bytes);
 }
 
 // per device (a layer split's stages each map their own): VMM support and the chunk size, looked up once
@@ -102,6 +120,8 @@ int current_dev() {
 
 }  // namespace
 
+const char* vmm_last_error() { return g_last_err; }
+
 bool vmm_available(int dev) { return dev_info(dev) != nullptr; }
 const char* vmm_reason(int dev) {
     (void) dev_info(dev);   // (the lookup writes the why even when it fails; it is the one line's reason)
@@ -124,7 +144,10 @@ VmmChunk vmm_chunk_new(int dev) {
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     prop.location.id = dev;
     CUmemGenericAllocationHandle h = 0;
-    if (api().create(&h, (size_t) d->gran, &prop, 0) != CUDA_SUCCESS) return 0;
+    if (const CUresult r = api().create(&h, (size_t) d->gran, &prop, 0); r != CUDA_SUCCESS) {
+        note_err("cuMemCreate (a VMM chunk)", r, d->gran);
+        return 0;
+    }
     return (VmmChunk) h;
 }
 
@@ -139,7 +162,10 @@ bool VmmRange::reserve(uint64_t bytes, int dev) {
     if (d == nullptr || bytes == 0) return false;
     const uint64_t n = (bytes + d->gran - 1) / d->gran;
     CUdeviceptr p = 0;
-    if (api().reserve(&p, (size_t) (n * d->gran), 0, 0, 0) != CUDA_SUCCESS) return false;
+    if (const CUresult r = api().reserve(&p, (size_t) (n * d->gran), 0, 0, 0); r != CUDA_SUCCESS) {
+        note_err("cuMemAddressReserve (the elastic range's addresses)", r, n * d->gran);
+        return false;
+    }
     base_ = (unsigned long long) p;
     gran_ = d->gran;
     dev_ = dev;
@@ -162,9 +188,13 @@ int64_t VmmRange::mapped_count() const {
 }
 
 bool VmmRange::map_one(int64_t i, VmmChunk h) {
-    if (api().map((CUdeviceptr) (base_ + (uint64_t) i * gran_), (size_t) gran_, 0, (CUmemGenericAllocationHandle) h, 0) !=
-        CUDA_SUCCESS)
+    if (const CUresult r =
+            api().map((CUdeviceptr) (base_ + (uint64_t) i * gran_), (size_t) gran_, 0, (CUmemGenericAllocationHandle) h,
+                      0);
+        r != CUDA_SUCCESS) {
+        note_err("cuMemMap (a chunk into the elastic range)", r, gran_);
         return false;
+    }
     h_[(size_t) i] = h;
     return true;
 }
@@ -175,8 +205,10 @@ bool VmmRange::set_access(int64_t lo, int64_t hi) {
     d.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     d.location.id = dev_;
     d.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-    return api().access((CUdeviceptr) (base_ + (uint64_t) lo * gran_), (size_t) ((uint64_t) (hi - lo) * gran_), &d, 1) ==
-           CUDA_SUCCESS;
+    const CUresult r =
+        api().access((CUdeviceptr) (base_ + (uint64_t) lo * gran_), (size_t) ((uint64_t) (hi - lo) * gran_), &d, 1);
+    if (r != CUDA_SUCCESS) note_err("cuMemSetAccess (the freshly mapped run)", r, (uint64_t) (hi - lo) * gran_);
+    return r == CUDA_SUCCESS;
 }
 
 bool VmmRange::commit_run(int64_t lo, int64_t hi) {
@@ -217,7 +249,11 @@ struct Api {
     int dev = -1;
     char why[192] = "not queried";   // P124e round 5: what the check decided, for the load's one line
 };
+// P124e (round 6, manager card): what the last failing call of this thread said, for vmm_last_error() - the same
+// discipline as the CUDA branch, where a driver-API refusal leaves cudaGetLastError() clean.
+thread_local char g_last_err[192] = "";
 void fail(const char* what, hipError_t e) {
+    std::snprintf(g_last_err, sizeof g_last_err, "%s failed: %s", what, hipGetErrorString(e));   // P124e round 6: vmm_last_error()
     static int n = 0;
     if (n++ < 8) std::fprintf(stderr, "saguaro: HIP virtual memory: %s failed: %s\n", what, hipGetErrorString(e));
     (void) hipGetLastError();
@@ -270,6 +306,8 @@ const Api& api() {
     return a;
 }
 }  // namespace
+
+const char* vmm_last_error() { return g_last_err; }
 
 bool vmm_available(int) { return api().ok; }
 const char* vmm_reason(int) { return api().why; }
@@ -364,6 +402,7 @@ VmmChunk VmmRange::unmap(int64_t i) {
 namespace strata::core {
 bool vmm_available(int) { return false; }
 const char* vmm_reason(int) { return "this build has no virtual memory (Metal, gfx906 or ROCm older than 6)"; }
+const char* vmm_last_error() { return "this build has no virtual memory (Metal, gfx906 or ROCm older than 6)"; }
 uint64_t vmm_granularity(int) { return 0; }
 VmmChunk vmm_chunk_new(int) { return 0; }
 void vmm_chunk_free(VmmChunk) {}

@@ -158,9 +158,10 @@ class EngineNonFinite(ValueError):
     ends one that had started (as "length").  A ValueError, so a stream that has started reports it as an error event."""
 
 class EngineOutOfVram(EngineNonFinite):
-    """A DONE / BDONE that said `vram`: the request's prompt read or batch window found no free VRAM on a card (after the
-    card's expert cache gave what it could).  The engine goes on and the slot dropped its state; handled as #879's
-    non-finite end (sent once more when nothing was produced yet, a 503 otherwise)."""
+    """A DONE / BDONE that said `vram`, or an ERR / BRE that says "no VRAM is left": the request's prompt read, batch
+    window or context grow found no free VRAM on a card (after the card's expert cache gave what it could).  The engine
+    goes on and the slot dropped its state; handled as #879's non-finite end (sent once more when nothing was produced
+    yet, a 503 otherwise)."""
 
 class EngineOutOfRam(EngineOutOfVram):
     """A DONE / BDONE that said `ram`, or an ERR / BRE that says "no RAM is left": the conversation's context could not be
@@ -170,9 +171,16 @@ class EngineOutOfRam(EngineOutOfVram):
 
 RAM_SHORT = ("no RAM is left to pin the context of this conversation (the engine goes on; it parked every idle "
              "conversation first): fewer long conversations at once, or a shorter one")
+VRAM_SHORT = ("no VRAM is left for the context of this conversation (the engine goes on; the card's expert cache gave "
+              "all it can first): fewer long conversations at once, or a shorter one")
 def engine_refusal(message: str) -> ValueError:
-    """The engine's ERR / BRE text as the exception the request ends with: no RAM is the server's (503), not the request's."""
-    return EngineOutOfRam(f"{RAM_SHORT} - {message}") if message.startswith("no RAM is left") else ValueError(message)
+    """The engine's ERR / BRE text as the exception the request ends with: no RAM / no VRAM is the server's (503), not
+    the request's.  P124e round 6: a VRAM refusal says "no VRAM is left" and ends as no-VRAM, never as no-RAM."""
+    if message.startswith("no RAM is left"):
+        return EngineOutOfRam(f"{RAM_SHORT} - {message}")
+    if message.startswith("no VRAM is left"):
+        return EngineOutOfVram(f"{VRAM_SHORT} - {message}")
+    return ValueError(message)
 
 def raise_bad_finish(finish) -> None:
     """The request's end the engine reported as a failure of its own: #879's non-finite logits, no VRAM, or no RAM."""
