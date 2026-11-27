@@ -42,16 +42,19 @@ struct VmmRoomStat {
 template <class Make, class GiveWay>
 inline bool vmm_grow_room(int64_t need, uint64_t gran, Make make, GiveWay give_way, bool may_relief,
                           std::vector<GrowChunk>& got, VmmRoomStat& st) {
+    const int64_t had = (int64_t) got.size();   // (the pooled path starts with the budget's chunks in hand: they are
+                                                //  not this call's "made" - round 7 sized the ask by got.size() and
+                                                //  asked for nothing when a pool had covered part of the need)
     for (int64_t i = 0; i < need; ++i) {
         GrowChunk h = make();
         if (h == 0 && may_relief && st.relief_ask == 0) {   // (once: ask for EVERYTHING still missing, not a chunk)
-            st.relief_ask = (uint64_t) (need - (int64_t) got.size()) * gran;
+            st.relief_ask = (uint64_t) (need - i) * gran;   // (i = chunks this call made: the shortfall, whole)
             st.relief_got = give_way(st.relief_ask);
             h = make();
         }
         if (h == 0) return false;
         got.push_back(h);
-        st.made = (int64_t) got.size();
+        st.made = (int64_t) got.size() - had;   // (chunks THIS call made - the pool's front ones are not its doing)
     }
     return true;
 }
