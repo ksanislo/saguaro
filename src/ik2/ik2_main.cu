@@ -7153,6 +7153,13 @@ void decode_greedy(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, in
     double t_exp = 0;
     const SampleCfg sc;
     std::vector<int> next;
+    // (a3: the positions this run writes get their chunks committed first - these are the --drafting auto trials
+    //  run before READY, whose prompts (SAGUARO_IK2_DRAFT_IDS) may reach past the committed start step on an
+    //  elastic card; VRAM short, the trial simply stops where the commit reaches (out: the tokens it made).
+    //  The drafter's own context rows end at the commit (a3): a trial past it runs undrafted)
+    std::string gerr;
+    if (!kv_grow(P + gen, gerr)) return;
+    if (drafter && P + gen > ik2::draft::context_rows(g_kv_commit)) drafter = nullptr;
     out.push_back(anchor);
     while ((int) out.size() < gen && P < ctx) {
         lk.append(anchor);
@@ -10057,10 +10064,20 @@ int main(int argc, char** argv) {
                 say("folder " + slot_dir + ": " + std::to_string(n) + " saved conversation(s)");
             }
         }
-        // the rows [0, n) of the visits without a window, to or from host memory
-        auto full_rows = [&](Conv& cv, int n, bool save) {
+        // the rows [0, n) of the visits without a window, to or from host memory.  Coming back (save: false) it may
+        // write past the committed start step of an elastic K / V - a conversation kept before, or read from the
+        // folder after a restart - so its chunks are committed first (a3); false: VRAM short, nothing was copied
+        auto full_rows = [&](Conv& cv, int n, bool save) -> bool {
             if (save) cv.fk.assign(M.V.size(), {}), cv.fv.assign(M.V.size(), {});
-            else lend_back(M, n + 1);   // (KV lending: the experts lent below n given back before the rows land)
+            else {
+                lend_back(M, n + 1);   // (KV lending: the experts lent below n given back before the rows land)
+                std::string gerr;
+                if (!kv_grow(n, gerr)) {
+                    say("a kept conversation of " + std::to_string(n) + " positions does not fit in the committed "
+                        "context: " + gerr);
+                    return false;
+                }
+            }
             for (size_t l = 0; l < M.V.size(); ++l) {
                 Layer& Ly = bind_visit(M, (int) l);
                 if (ringed(Ly)) continue;
@@ -10075,6 +10092,7 @@ int main(int argc, char** argv) {
                 CU(cudaMemcpyAsync(save ? (void*) cv.fv[l].data() : (void*) dv, save ? (void*) dv : (void*) cv.fv[l].data(), b, dir, g_s));
             }
             for (auto& D : g_dev) CU(cudaStreamSynchronize(D.s));
+            return true;
         };
         auto reset = [&]() {
             for (auto& sn : snaps) sn.pos = -1;
@@ -10171,7 +10189,8 @@ int main(int argc, char** argv) {
             for (int i = 0; i < (int) cv.snaps.size(); ++i)
                 if (cv.snaps[i].pos == n) at = i;
             if (at < 0) return false;
-            full_rows(cv, n, false);
+            if (!full_rows(cv, n, false)) return false;   // (a3: its rows land past the committed start step only
+                                                          //  if that stretch of the K / V could be committed)
             snaps.assign(n_snaps, Snap{});
             snap_next = 0;
             if (whole) {   // (its snapshots: the latest ones that fit)
@@ -10832,6 +10851,30 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
                 continue;
             }
+            // (a3: this request writes positions [0, ids.size() + max_new) - commit the chunks covering them now,
+            //  host-side, before its first pass (never per token, never in a kernel; a no-op unless the elastic
+            //  K / V is VMM-backed).  VRAM short: the request fails cleanly - a NOTE for the log, the ERR line the
+            //  server passes on, the engine and its state untouched (no kernel had run); taking the room back from
+            //  the coldest experts is b4, the next step)
+            {
+                std::string gerr;
+                if (!kv_grow((int) ids.size() + max_new, gerr)) {
+                    if (serve_maya) {
+                        std::printf("NOTE kv: the context could not grow to this request's %d positions: %s - the "
+                                    "experts keep their VRAM until the demotion step, so the request fails (a "
+                                    "shorter prompt or max_tokens, or a smaller --max-context)\n",
+                                    (int) ids.size() + max_new, gerr.c_str());
+                        std::printf("ERR %s\nDONE 0 %zu 0 0 cancel 0 0 0 0 0\n",
+                                    ("the GPU ran out of memory growing the context cache for this request (" + gerr +
+                                     "; a shorter prompt or max_tokens, or a smaller --max-context)")
+                                        .c_str(),
+                                    ids.size());
+                    } else
+                        std::printf("@END error out_of_memory 0 %zu 0 0\n", ids.size());
+                    std::fflush(stdout);
+                    continue;
+                }
+            }
             g_img.clear();
             std::vector<uint64_t> sig(ids.size(), 0);
             if (!emb_path.empty()) {
@@ -10891,7 +10934,20 @@ int main(int argc, char** argv) {
                     int j = -1;   // (setting the other aside may have moved it)
                     for (int q = 0; q < (int) parked.size(); ++q)
                         if (parked[q].hist == key) j = q;
-                    if (j >= 0) unpark(j, fork ? r_best : -1);
+                    if (j >= 0 && !unpark(j, fork ? r_best : -1)) {
+                        // (a3: its rows needed a chunk the K / V could not commit - the request fails cleanly, the
+                        //  engine and the kept conversation untouched (the cache holds nothing, the next request
+                        //  reads from the start))
+                        std::printf("ERR %s\nDONE 0 %zu 0 0 cancel 0 0 0 0 0\n",
+                                    "the GPU ran out of memory taking back the kept conversation's context (a "
+                                    "smaller --max-context or fewer conversations kept; the engine stays up for "
+                                    "the next request)",
+                                    ids.size());
+                        std::fflush(stdout);
+                        busy = false;
+                        g_wd_busy = false;
+                        continue;
+                    }
                 } else if (r_best < (int) hist.size() && later_turn(act_pts, r_best)) {
                     Snap cp;   // back past a later turn: the conversation as it is stays kept, this one goes on from the snapshot
                     for (const auto& sn : snaps)
@@ -10909,7 +10965,11 @@ int main(int argc, char** argv) {
             }
             // (drafting for this request: spec=1 asks for none; the prompt lookup's history its tokens; the Monitor's
             //  figures - STAT draft_acc / draft_off, DONE's kept and offered - this request's drafts)
-            const bool req_spec = spec_on && spec_key != 1;
+            // (a3: the drafter's context rows are laid out for the committed start step, not for the whole ceiling
+            //  its requests can now reach (the drafter's own growth is not part of this step): a request that may
+            //  write past the commit runs without drafting - the answers are the same, its tokens the plain ones)
+            const bool spec_rows = !drafter || ids.size() + (size_t) max_new <= (size_t) ik2::draft::context_rows(g_kv_commit);
+            const bool req_spec = spec_on && spec_key != 1 && spec_rows;
             const int req_wmax = spec_key >= 2 ? std::min(spec_key, kBlockMax) : kBlockMax;
             const uint64_t kept0 = sctl.kept(), offered0 = sctl.offered();
             uint64_t req_rounds = 0;
@@ -11295,6 +11355,18 @@ int main(int argc, char** argv) {
         std::_Exit(0);   // (QUIT / end of input: out at once, as maya-hy4 - the OS frees the pinned runs and the driver's state)
     }
     if (g_depth + (int) prompt.size() + gen > g_kv_run) die("prompt + gen past the context");
+    {   // (a3: the CLI run writes positions [0, depth + prompt + gen) - their chunks are committed now, before
+        //  the prompt's first pass (at load, so a failure ends the run with the load's exit code).  The drafter's
+        //  context rows end at the committed start step: a run reaching past it goes on without the drafter)
+        std::string gerr;
+        if (!kv_grow(g_depth + (int) prompt.size() + gen, gerr))
+            die("the elastic K / V could not grow for this run: " + gerr + " - a smaller --tokens/--gen or --ctx");
+    }
+    if (drafter && g_depth + (int) prompt.size() + gen > ik2::draft::context_rows(g_kv_commit)) {
+        std::printf("drafting off: the drafter's context rows hold %d positions, this run reaches %d (plain tokens)\n",
+                    ik2::draft::context_rows(g_kv_commit), g_depth + (int) prompt.size() + gen);
+        drafter = nullptr;
+    }
     if (g_depth > 0 && (serve || drafter || g_lookup || g_dev[0].W.T_sup > 0)) die("SAGUARO_IK2_DEPTH: the CLI's plain path only (no drafting)");
     // the prompt
     std::vector<float> logits;
@@ -11398,6 +11470,12 @@ int main(int argc, char** argv) {
     //  records its graph, tens of ms once a process)
     if (getenv("SAGUARO_IK2_BLOCK_WARM") && std::atoi(getenv("SAGUARO_IK2_BLOCK_WARM")) && (drafter || g_lookup) && g_fast && g_block &&
         (int) prompt.size() + kBlockMax <= ctx) {
+        // (a3: the warm-up windows write rows up to prompt + a window - their chunks first, or the warm-up runs
+        //  plain (the generation itself is already covered above: gen >= 1 reaches past prompt + kBlockMax... not
+        //  always, so commit here too))
+        std::string werr;
+        if (!kv_grow((int) prompt.size() + kBlockMax, werr))
+            die("the elastic K / V could not grow for the window warm-up: " + werr);
         const double tw = now();
         int tk[kBlockMax];
         for (int j = 0; j < kBlockMax; ++j) tk[j] = first_best;
