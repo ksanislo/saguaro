@@ -6,15 +6,22 @@ does not fix engines (QFN fails it until the elastic K/V work of P124e lands).
 
 For each context it starts the server from a COPY of the config (its own port, its own session dir and engine
 log, no api_key, --max-context set to that value), waits for /health to answer ok, and records what the run
-holds: the process tree's pinned/locked RAM (VmLck + VmPin of the server and its engine child, from
-/proc/<pid>/status), its RSS, the GPU memory used (nvidia-smi or rocm-smi, whichever this PC has, summed over
-the config's cards), and the engine's own log lines that state a K/V or expert budget (lines containing
-"pinned RAM", "resident" or "KV").  Then it stops the run - kill by the port's owner - and starts the next.
+holds.  The pinned RAM is measured TWO ways (P124t): the process tree's VmLck + VmPin summed over EVERY
+process of the server's tree (children of children, from /proc/<pid>/status), and host-wide - the delta of
+/proc/meminfo Mlocked + Unevictable + Shmem between before the start and after /health ok.  ROCm/CUDA
+page-locked host memory lands in neither process's VmLck (the 1.2.4 ref run: every VmLck read 0.0 while the
+engines logged "68.00 GiB page-locked" and "the latent cache in 2.95 GB of pinned RAM"), but the check owns
+the moment - nothing else loads between the two reads - so the host-wide delta is the run's.  Both are shown;
+the rule judges on the larger.  Plus the run's RSS, the GPU memory used (nvidia-smi or rocm-smi, whichever
+this PC has, summed over the config's cards), and the engine's own log lines that state a K/V or expert
+budget (lines containing "pinned RAM", "resident" or "KV").  Then it stops the run - kill by the port's
+owner - and starts the next.
 
 A table of every figure per context, the budget lines, and the verdict: PASS when every figure differs by less
 than max(2%, 256 MiB) between the contexts, FAIL naming the biggest difference.  Exit 0 PASS, 1 FAIL, 2 nothing
 could be measured: a port already in use, or no /proc here.  A PC with no GPU reader prints "-" for the GPU row
-and leaves it out of the rule.
+and leaves it out of the rule; a box without /proc/meminfo loses the host-wide pinned row and judges on the
+tree alone.
 
     python3 tools/mem_vs_ctx.py saguaro-inkling-2-mini.json
     python3 tools/mem_vs_ctx.py saguaro-qfn.json --contexts 262144,1048576 --port 8093
@@ -47,7 +54,7 @@ STOP_S = 180.0           # a graceful stop wraps the request in progress (SAGUAR
 SETTLE_S = 10.0          # read /proc this long after /health ok: a load that just finished still settles (warm-up)
 TOL_PCT, TOL_MIB = 0.02, 256.0          # the rule: every figure within max(2%, 256 MiB) between the contexts
 BUDGET_MARKS = ("pinned ram", "resident", "KV")   # the engine's own lines that state a K/V or expert budget
-FIGURES = (("pinned_mib", "pinned RAM"), ("rss_mib", "RSS"), ("gpu_mib", "GPU used"))
+MEMINFO_KEYS = ("Mlocked", "Unevictable", "Shmem")  # host-wide: where pinned/unevictable/shared RAM shows up
 
 ROCM_USED = re.compile(r"GPU\[(\d+)\]\s*:\s*VRAM Total Used Memory \(B\):\s*(\d+)")
 
@@ -120,12 +127,50 @@ def process_tree(pid: int, proc="/proc") -> list[int]:
 
 
 def tree_mibs(pids: list[int], proc="/proc") -> dict:
-    """What the tree holds: the pinned/locked RAM (VmLck + VmPin) and RSS, all MiB."""
+    """What the tree holds: the pinned/locked RAM (VmLck + VmPin) and RSS, all MiB. process_tree already
+    reaches the children of children, so nothing of the server's tree is left out (P124t)."""
     total = {"VmLck": 0.0, "VmPin": 0.0, "VmRSS": 0.0}
     for pid in pids:
         for k, v in read_proc_status(pid, proc).items():
             total[k] += v
     return total
+
+
+# ---- the pinned RAM, host-wide -----------------------------------------------------------------------
+
+def parse_meminfo(text: str) -> dict:
+    """The host-wide Mlocked, Unevictable and Shmem of a /proc/meminfo, in MiB (the file speaks kB; an
+    absent key counts 0.0). ShmemHugePages and ShmemPmdMapped are other keys and stay out."""
+    out = {k: 0.0 for k in MEMINFO_KEYS}
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        name = name.strip()
+        if name in out:
+            parts = rest.split()
+            if parts:
+                v = float(parts[0])
+                if len(parts) > 1 and parts[1].lower() == "kb":
+                    v /= 1024.0
+                out[name] = v
+    return out
+
+
+def read_meminfo(path: str = "/proc/meminfo") -> dict | None:
+    try:
+        with open(path, encoding="ascii", errors="replace") as f:
+            return parse_meminfo(f.read())
+    except (OSError, ValueError):
+        return None
+
+
+def host_pinned_delta(before: dict | None, after: dict | None) -> float | None:
+    """What the run pinned host-wide: the rise of Mlocked + Unevictable + Shmem between the two reads. The
+    check owns the moment (nothing else loads while a context runs), so the rise is the run's - and it
+    catches what no process's VmLck sees (ROCm/CUDA page-locked memory). A key that FELL counts 0 (another
+    process gave shared pages back); the figure is None when either read failed."""
+    if before is None or after is None:
+        return None
+    return sum(max(0.0, after[k] - before[k]) for k in MEMINFO_KEYS)
 
 
 def listening_inodes(port: int, proc="/proc") -> set:
@@ -365,21 +410,25 @@ def stop_server(port: int, proc: subprocess.Popen | None = None, wait_s: float =
 # ---- the record, the table, the verdict ---------------------------------------------------------------
 
 def measure_context(cfg: dict, context: int, port: int, run_dir, python=sys.executable,
-                    health_timeout: float = HEALTH_S, settle: float = SETTLE_S) -> dict:
-    """One run of the check: start at this context, wait for /health ok, read what it holds, stop it. A stop
-    that leaves the port held raises, so the next context never dies at the bind and gets its FAIL mis-
-    attributed to "the server ended before /health was ok" when the truth is a stale port."""
+                    health_timeout: float = HEALTH_S, settle: float = SETTLE_S,
+                    meminfo: str = "/proc/meminfo") -> dict:
+    """One run of the check: read the host's memory, start at this context, wait for /health ok, read what
+    it holds, stop it. A stop that leaves the port held raises, so the next context never dies at the bind
+    and gets its FAIL mis-attributed to "the server ended before /health was ok" when the truth is a stale
+    port."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     run_cfg = run_config(cfg, run_dir, context)
     cfg_path = run_dir / "config.json"
     cfg_path.write_text(json.dumps(run_cfg, indent=1), encoding="utf-8")
+    mi0 = read_meminfo(meminfo)
     proc = start_server(server_cmd(python, port, cfg_path), run_dir)
     try:
         wait_health(port, health_timeout, proc=proc)
         time.sleep(settle)
         m = tree_mibs(process_tree(proc.pid))
         gpu = gpu_used_mib(gpu_cards(cfg))
+        mi1 = read_meminfo(meminfo)
         try:
             log_text = Path(run_cfg["log"]).read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -389,26 +438,39 @@ def measure_context(cfg: dict, context: int, port: int, run_dir, python=sys.exec
     if not freed:
         raise RuntimeError(f"port {port} is still held after the stop - free it before the next context "
                            "starts (our server is stopped, so whoever holds the port is not ours)")
-    return {"context": context, "pinned_mib": m["VmLck"] + m["VmPin"], "rss_mib": m["VmRSS"],
+    return {"context": context, "pinned_tree_mib": m["VmLck"] + m["VmPin"],
+            "pinned_host_mib": host_pinned_delta(mi0, mi1), "rss_mib": m["VmRSS"],
             "gpu_mib": gpu, "budget": budget_lines(log_text)}
 
 
 def format_table(rows: list[dict]) -> str:
-    """One row per context: the tree's pinned/locked RAM, its RSS, the GPU memory used (MiB; "-" when the PC
-    has no GPU reader)."""
+    """One row per context: the pinned RAM both ways - host-wide (the meminfo delta) and the tree's
+    VmLck+VmPin - the RSS, and the GPU memory used (MiB; "-" when the PC has no GPU reader or no
+    /proc/meminfo)."""
     def f(v):
         return "-" if v is None else f"{v:.1f}"
-    lines = [f"{'context':>10}  {'pinned MiB':>11}  {'RSS MiB':>11}  {'GPU used MiB':>13}"]
+    lines = [f"{'context':>10}  {'pinned host':>11}  {'pinned tree':>11}  {'RSS MiB':>11}  {'GPU used MiB':>13}"]
     for r in rows:
-        lines.append(f"{r['context']:>10}  {f(r['pinned_mib']):>11}  {f(r['rss_mib']):>11}  {f(r['gpu_mib']):>13}")
+        lines.append(f"{r['context']:>10}  {f(r.get('pinned_host_mib')):>11}  {f(r.get('pinned_tree_mib')):>11}"
+                     f"  {f(r['rss_mib']):>11}  {f(r['gpu_mib']):>13}")
     return "\n".join(lines)
 
 
+def pinned_of(row: dict) -> float | None:
+    """The pinned figure to judge: the LARGER of the two measures (the tree can miss ROCm/CUDA pinning, the
+    host-wide delta can be the only reader on a box whose VmLck stays 0.0)."""
+    vals = [v for v in (row.get("pinned_host_mib"), row.get("pinned_tree_mib")) if v is not None]
+    return max(vals) if vals else None
+
+
+RAM_FIGURES = (("pinned RAM", pinned_of), ("RSS", lambda r: r.get("rss_mib")), ("GPU used", lambda r: r.get("gpu_mib")))
+
+
 def compare_rows(rows: list[dict], tol_pct: float = TOL_PCT, tol_mib: float = TOL_MIB):
-    """Every figure over at least two contexts: (name, biggest - smallest, 2% of the biggest)."""
+    """Every RAM figure over at least two contexts: (name, biggest - smallest, 2% of the biggest)."""
     out = []
-    for field, name in FIGURES:
-        vals = [r[field] for r in rows if r.get(field) is not None]
+    for name, get in RAM_FIGURES:
+        vals = [v for r in rows if (v := get(r)) is not None]
         if len(vals) >= 2:
             out.append((name, max(vals) - min(vals), max(vals) * tol_pct))
     return out

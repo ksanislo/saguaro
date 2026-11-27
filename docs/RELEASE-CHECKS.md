@@ -187,14 +187,17 @@ python3 tools/mem_vs_ctx.py saguaro-qfn-1m.json --contexts 262144,1048576   # th
 ```
 
 For each context the tool starts the server from a copy of the config (its own port, session dir and engine
-log, no api key, `--max-context` set to that value), waits for `/health` ok, and records the process tree's
-pinned/locked RAM and RSS (`VmLck`+`VmPin`, `VmRSS` of the server and its engine child), the GPU memory used
-(nvidia-smi or rocm-smi, whichever the box has, over the config's cards) and the engine's own K/V and expert
-budget lines; then it stops the run and starts the next. PASS when every figure differs by less than
+log, no api key, `--max-context` set to that value), waits for `/health` ok, and records the pinned RAM **two
+ways** (1.2.4t): `VmLck`+`VmPin` summed over every process of the server's tree, and host-wide - the rise of
+`/proc/meminfo` Mlocked + Unevictable + Shmem between before the start and after `/health` ok, since ROCm/CUDA
+page-locked memory often lands in no process's `VmLck` (the 1.2.4 run printed 0.0 pinned everywhere while the
+engines logged "68.00 GiB page-locked"); both are shown, the rule judges on the larger. Plus the RSS, the GPU
+memory used (nvidia-smi or rocm-smi, whichever the box has, over the config's cards) and the engine's own K/V
+and expert budget lines; then it stops the run and starts the next. PASS when every figure differs by less than
 max(2%, 256 MiB) between the contexts, FAIL naming the biggest difference; the run copies (config, logs) stay
 under `scratch/mem-vs-ctx/<config>/` for the person to read. Run it on a **quiet machine** like every bench
-above: the GPU row is the *total* memory used on the card, so a neighbour job that starts between the two loads
-can move it and flip the verdict. One side effect: every load records "the config
+above: the host-wide pinned row and the GPU row are box-wide readings, so a neighbour job that starts between
+the two loads can move them and flip the verdict. One side effect: every load records "the config
 that worked last", so after a run a later failed start on that machine offers `scratch/mem-vs-ctx/<config>/...`
 as the config to start again - starting your own config overwrites the note.
 

@@ -125,6 +125,57 @@ class ProcParsingTests(unittest.TestCase):
             self.assertIsNone(MV.port_owner(8093, str(tmp)))
 
 
+class MeminfoTests(unittest.TestCase):
+    # two fixed reads of /proc/meminfo around a GLM load (the 1.2.4 ref run): the engine page-locked its
+    # latent cache the driver never showed in any VmLck, and the kernel's Unevictable rose by exactly it
+    BEFORE = """MemTotal:       132435100 kB
+MemFree:        42638884 kB
+MemAvailable:   81609172 kB
+Buffers:          312256 kB
+Mlocked:               0 kB
+Unevictable:      131072 kB
+Shmem:           4260444 kB
+HugePages_Total:       0
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+"""
+    AFTER = """MemTotal:       132435100 kB
+MemFree:        39527724 kB
+MemAvailable:   78498012 kB
+Buffers:          312256 kB
+Mlocked:               0 kB
+Unevictable:     3011931 kB
+Shmem:           4260444 kB
+HugePages_Total:       0
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+"""
+
+    def test_parse_meminfo_mib_and_the_shmem_variants_stay_out(self):
+        m = MV.parse_meminfo(self.BEFORE)
+        self.assertEqual(m, {"Mlocked": 0.0, "Unevictable": 128.0, "Shmem": 4160.5898437500})
+        m2 = MV.parse_meminfo("MemTotal: 100 kB\n")                  # absent keys count 0.0
+        self.assertEqual(m2, {"Mlocked": 0.0, "Unevictable": 0.0, "Shmem": 0.0})
+
+    def test_the_glm_latent_cache_shows_host_where_vmlck_read_zero(self):
+        # the ref run's "the latent cache in 2.95 GB of pinned RAM": the host-wide delta sees 2.95 GB rise
+        # while the tree's VmLck + VmPin stays 0.0 - this is the figure the fixed check now shows
+        d = MV.host_pinned_delta(MV.parse_meminfo(self.BEFORE), MV.parse_meminfo(self.AFTER))
+        self.assertAlmostEqual(d, 2.95e9 / 2**20, places=2)          # 2813.3 MiB, not 0.0
+
+    def test_delta_sums_the_three_rises_and_clamps_falls(self):
+        before = {"Mlocked": 0.0, "Unevictable": 0.0, "Shmem": 1000.0}
+        after = {"Mlocked": 68.0 * 1024.0, "Unevictable": 1024.0, "Shmem": 900.0}   # Shmem fell: a neighbour
+        # gave shared pages back - the check owns the moment, so a fall is not this run un-pinning anything
+        self.assertAlmostEqual(MV.host_pinned_delta(before, after), 68.0 * 1024.0 + 1024.0)
+        self.assertIsNone(MV.host_pinned_delta(None, after))
+        self.assertIsNone(MV.host_pinned_delta(before, None))
+
+    def test_read_meminfo_here_yes_missing_file_none(self):
+        self.assertIsNotNone(MV.read_meminfo())
+        self.assertIsNone(MV.read_meminfo("no-such-meminfo-here"))
+
+
 class GpuReaderTests(unittest.TestCase):
     NV = "0, 1024\n1, 4096\n2, 7\nnot a row, x\n"
     ROCM = ("GPU[0]\t\t: VRAM Total Memory (B): 17163091968\n"
@@ -205,18 +256,46 @@ class BudgetAndConfigTests(unittest.TestCase):
 class TableAndVerdictTests(unittest.TestCase):
     @staticmethod
     def rows(pinned, rss, gpu=(None, None)):
-        return [{"context": c, "pinned_mib": p, "rss_mib": r, "gpu_mib": g, "budget": []}
+        return [{"context": c, "pinned_tree_mib": p, "pinned_host_mib": None, "rss_mib": r, "gpu_mib": g,
+                 "budget": []}
                 for c, p, r, g in zip((32768, 262144), pinned, rss, gpu)]
 
-    def test_table_aligns_and_prints_dash_without_a_reader(self):
-        table = MV.format_table(self.rows([1000.0, 1010.0], [40000.0, 40500.0]))
+    def test_table_shows_both_pinned_measures_and_dashes_without_a_reader(self):
+        rows = self.rows([1000.0, 1010.0], [40000.0, 40500.0])
+        for r, h in zip(rows, (3020.8, 3020.8)):
+            r["pinned_host_mib"] = h
+        table = MV.format_table(rows)
         lines = table.splitlines()
         self.assertEqual(len(lines), 3)
-        self.assertIn("pinned MiB", lines[0])
+        self.assertIn("pinned host", lines[0])
+        self.assertIn("pinned tree", lines[0])
         self.assertIn("GPU used MiB", lines[0])
+        self.assertIn("3020.8", lines[1])
         self.assertIn("-", lines[1])
         self.assertTrue(lines[1].rstrip().endswith("-"))
         self.assertIn("40000.0", lines[1])
+        # no /proc/meminfo and no GPU reader: both unpinned rows dash, the tree row still prints
+        bare = MV.format_table(self.rows([1000.0, 1010.0], [40000.0, 40500.0])).splitlines()
+        self.assertTrue(bare[1].split()[-2] == "40000.0" and bare[1].rstrip().endswith("-"))
+
+    def test_pinned_is_judged_on_the_larger_of_the_two_measures(self):
+        # the 1.2.4 ref run: every VmLck read 0.0 while the engine page-locked 68 GiB - the host-wide delta
+        # sees it, so the pinned row must FAIL on the host figure even though the tree row is flat
+        host_only = [{"context": c, "pinned_tree_mib": 0.0, "pinned_host_mib": h, "rss_mib": 40000.0,
+                      "gpu_mib": None, "budget": []} for c, h in ((32768, 0.0), (262144, 69632.0))]
+        ok, why = MV.verdict(host_only)
+        self.assertFalse(ok)
+        self.assertIn("pinned RAM differs by 69632.0 MiB", why)
+        # the tree saw it and the host-wide read is flat (or absent): the same rule on the tree figure
+        tree_only = [{"context": c, "pinned_tree_mib": t, "pinned_host_mib": None, "rss_mib": 40000.0,
+                      "gpu_mib": None, "budget": []} for c, t in ((32768, 0.0), (262144, 69632.0))]
+        ok, why = MV.verdict(tree_only)
+        self.assertFalse(ok)
+        self.assertIn("pinned RAM differs by 69632.0 MiB", why)
+        # and it judges on the LARGER: the tree's 1000 stands inside the host's 1010
+        both = [{"context": c, "pinned_tree_mib": t, "pinned_host_mib": h, "rss_mib": 40000.0,
+                 "gpu_mib": None, "budget": []} for c, t, h in ((32768, 1000.0, 0.0), (262144, 0.0, 1010.0))]
+        self.assertTrue(MV.verdict(both)[0])
 
     def test_within_the_floor_passes(self):
         # 40000 vs 40500: 500 MiB apart, over the 2% (810 MiB of 40500 -> 500 < 810) and the 256 MiB floor
