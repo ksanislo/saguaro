@@ -14,11 +14,19 @@ engines logged "68.00 GiB page-locked" and "the latent cache in 2.95 GB of pinne
 the moment - nothing else loads between the two reads - so the host-wide delta is the run's.  Both are shown;
 the rule judges on the larger.  Plus the run's RSS, the GPU memory used (nvidia-smi or rocm-smi, whichever
 this PC has, summed over the config's cards), and the engine's own log lines that state a K/V or expert
-budget (lines containing "pinned RAM", "resident" or "KV").  Then it stops the run - kill by the port's
-owner - and starts the next.
+budget (lines containing "pinned RAM", "resident" or "KV") read into PLACEMENT FIGURES (P124t): the experts
+in the VRAM cache ("1729 in the GPU cache", "every expert in VRAM (3072 copied", "N of M experts in VRAM",
+"(N of M in VRAM)"), the experts in RAM / pinned ("resident RAM mode: X GiB of experts in RAM", "experts in
+pinned memory: X GiB", "X GB pinned pool"), the GB left for the expert pool ("VRAM before the expert pool:
+A of T GB in use" -> T - A, summed over the cards), and the GB of pinned RAM the engine declares ("the latent
+cache in 2.95 GB of pinned RAM").  Then it stops the run - kill by the port's owner - and starts the next.
 
-A table of every figure per context, the budget lines, and the verdict: PASS when every figure differs by less
-than max(2%, 256 MiB) between the contexts, FAIL naming the biggest difference.  Exit 0 PASS, 1 FAIL, 2 nothing
+A table of every figure per context, the placement figures and the budget lines, and the verdict: PASS when
+every memory figure differs by less than max(2%, 256 MiB) between the contexts AND no placement figure
+(experts in VRAM, experts in RAM, the expert pool, the declared pinned RAM) differs by more than 2% - the
+pinned row judges on the larger of its two measures, and the placement rule is what catches Inkling's
+"every expert in VRAM (3072)" at 32768 becoming "offload: 0 of 3072 experts in VRAM" at 262144 behind equal
+GPU totals.  FAIL names the difference furthest past its limit.  Exit 0 PASS, 1 FAIL, 2 nothing
 could be measured: a port already in use, or no /proc here.  A PC with no GPU reader prints "-" for the GPU row
 and leaves it out of the rule; a box without /proc/meminfo loses the host-wide pinned row and judges on the
 tree alone.
@@ -55,6 +63,34 @@ SETTLE_S = 10.0          # read /proc this long after /health ok: a load that ju
 TOL_PCT, TOL_MIB = 0.02, 256.0          # the rule: every figure within max(2%, 256 MiB) between the contexts
 BUDGET_MARKS = ("pinned ram", "resident", "KV")   # the engine's own lines that state a K/V or expert budget
 MEMINFO_KEYS = ("Mlocked", "Unevictable", "Shmem")  # host-wide: where pinned/unevictable/shared RAM shows up
+
+# the engines' expert-placement lines, grepped from their start-up prints (P124t):
+#   QFN      "resident RAM mode: 68.00 GiB of experts in RAM (page-locked), 1729 in the GPU cache" (generate.cpp)
+#   QFN      "every expert is in the GPU cache (N of M)" (generate.cpp)
+#   GLM      "glm fast: CUDA0 VRAM before the expert pool: A of T GB in use - ... state/KV (N ctx) X" (glm_fast_path.cu)
+#   GLM      "glm pack: CUDA0 KV streaming: ..., the latent cache in X GB of pinned RAM" (glm_model.cu)
+#   Inkling  "resident: every expert in VRAM (N copied in ...)" / "offload: N of M experts in VRAM" (ik2_main.cu)
+#   MM3      "saguaro mm3: loaded in ..., N of M experts in VRAM, X GB pinned pool" (mm3_main.cpp)
+#   Hy4      "INFO CPU lane: N of M routed experts in VRAM (..%)" (hy4_model.cu)
+#   DS4      "... experts X GB (N of M in VRAM), caches ..." / "N routed experts on the CPU lane (X GB ...)" (ds4_model.cu)
+EXPERT_VRAM_RES = (                          # counts: summed over the matches (DS4 prints one line a card)
+    re.compile(r"(\d[\d,]*) of \d[\d,]* (?:routed )?experts in VRAM"),
+    re.compile(r"every expert in VRAM \((\d[\d,]*) copied"),
+    re.compile(r"\((\d[\d,]*) of \d[\d,]* in VRAM\)"),
+    re.compile(r"(\d[\d,]*) in the GPU cache\b"),
+    re.compile(r"every expert is in the GPU cache \((\d[\d,]*) of"),
+)
+EXPERT_RAM_RES = (                           # the RAM/pinned expert tier, GiB/GB as the engine says it: the largest
+    re.compile(r"resident RAM mode: ([\d.]+) GiB of experts in RAM"),
+    re.compile(r"resident RAM: ([\d.]+) GiB of experts in RAM"),
+    re.compile(r"experts in pinned (?:\([^)]*\) )?memory: ([\d.]+) GiB"),
+    re.compile(r"([\d.]+) GB pinned pool"),
+    re.compile(r"routed experts on the CPU lane \(([\d.]+) GB(?: of RAM)?"),
+)
+EXPERT_POOL_RES = re.compile(r"VRAM before the expert pool: ([\d.]+) of ([\d.]+) GB in use")
+PINNED_DECLARED_RES = re.compile(r"([\d.]+) Gi?B of pinned RAM")
+PLACEMENT_FIGURES = (("experts_vram", "experts in VRAM"), ("experts_ram_gib", "experts in RAM"),
+                     ("expert_pool_gb", "expert pool (GB)"), ("pinned_declared_gib", "pinned RAM declared (GB)"))
 
 ROCM_USED = re.compile(r"GPU\[(\d+)\]\s*:\s*VRAM Total Used Memory \(B\):\s*(\d+)")
 
@@ -274,6 +310,31 @@ def budget_lines(text: str) -> list[str]:
     return out
 
 
+def parse_placement(text: str) -> dict:
+    """The engine's own expert-placement lines read into figures: the experts in the VRAM cache (count, the
+    matches summed - DS4 prints one line a card), the experts in RAM / pinned (the largest GiB/GB stated),
+    the GB left for the expert pool (per "VRAM before the expert pool: A of T GB in use", summed over the
+    cards - GLM states no count, its expert pool IS its experts in VRAM), and the largest GB/GiB of pinned
+    RAM the engine declares. A figure the log said nothing about is None: compared only where two contexts
+    both state it."""
+    def nums(pats):
+        return [float(m.group(1).replace(",", "")) for p in pats for m in p.finditer(text)]
+    out = {"experts_vram": None, "experts_ram_gib": None, "expert_pool_gb": None, "pinned_declared_gib": None}
+    vram = nums(EXPERT_VRAM_RES)
+    if vram:
+        out["experts_vram"] = sum(vram)
+    ram = nums(EXPERT_RAM_RES)
+    if ram:
+        out["experts_ram_gib"] = max(ram)
+    pool = [float(t) - float(used) for used, t in EXPERT_POOL_RES.findall(text)]
+    if pool:
+        out["expert_pool_gb"] = sum(pool)
+    declared = nums([PINNED_DECLARED_RES])
+    if declared:
+        out["pinned_declared_gib"] = max(declared)
+    return out
+
+
 # ---- the config copy and the run ---------------------------------------------------------------------
 
 def set_context(args: list, context: int) -> list:
@@ -440,7 +501,7 @@ def measure_context(cfg: dict, context: int, port: int, run_dir, python=sys.exec
                            "starts (our server is stopped, so whoever holds the port is not ours)")
     return {"context": context, "pinned_tree_mib": m["VmLck"] + m["VmPin"],
             "pinned_host_mib": host_pinned_delta(mi0, mi1), "rss_mib": m["VmRSS"],
-            "gpu_mib": gpu, "budget": budget_lines(log_text)}
+            "gpu_mib": gpu, "budget": budget_lines(log_text), "placement": parse_placement(log_text)}
 
 
 def format_table(rows: list[dict]) -> str:
@@ -476,20 +537,52 @@ def compare_rows(rows: list[dict], tol_pct: float = TOL_PCT, tol_mib: float = TO
     return out
 
 
+def compare_placement(rows: list[dict], tol_pct: float = TOL_PCT):
+    """Every placement figure over at least two contexts that state it:
+    (name, biggest - smallest, 2% of the biggest)."""
+    out = []
+    for key, name in PLACEMENT_FIGURES:
+        vals = [v for r in rows if (v := (r.get("placement") or {}).get(key)) is not None]
+        if len(vals) >= 2:
+            out.append((name, max(vals) - min(vals), max(vals) * tol_pct))
+    return out
+
+
 def verdict(rows: list[dict], tol_pct: float = TOL_PCT, tol_mib: float = TOL_MIB):
-    """The rule: PASS when every figure differs by less than max(2%, 256 MiB) between the contexts (2% of the
-    bigger one).  Returns (ok, line); the FAIL line names the biggest difference that broke the limit, the
-    PASS line the biggest difference there was."""
+    """The rules: every memory figure (pinned, RSS, GPU) differs by less than max(2%, 256 MiB) between the
+    contexts (2% of the bigger one), and no placement figure differs by MORE than 2% - a placement figure
+    that moved with the context is the engine placing the model differently because of it, which equal RSS
+    and GPU totals hide (Inkling: "every expert in VRAM (3072)" at 32768, "offload: 0 of 3072" at 262144).
+    Returns (ok, line); the FAIL line names the difference furthest past its own limit, the PASS line the
+    biggest memory difference there was."""
     checked = compare_rows(rows, tol_pct, tol_mib)
-    if not checked:
+    pchecked = compare_placement(rows, tol_pct)
+    if not checked and not pchecked:
         return False, "FAIL: nothing was measured at two contexts to compare"
-    failed = [(n, d, max(pct, tol_mib)) for n, d, pct in checked if d >= max(pct, tol_mib)]
-    if failed:
-        n, d, tol = max(failed, key=lambda c: c[1])
+    failed = [(n, d, max(pct, tol_mib), d / max(pct, tol_mib), False)
+              for n, d, pct in checked if d >= max(pct, tol_mib)]
+    pfailed = [(n, d, pct, d / pct if pct > 0 else float("inf"), True)
+               for n, d, pct in pchecked if d > pct]
+    if failed or pfailed:
+        n, d, tol, _breach, is_placement = max(failed + pfailed, key=lambda c: c[3])
+        if is_placement:
+            return False, f"FAIL: {n} differs by {d:g} between the contexts (limit {tol_pct:.0%}: {tol:g})"
         return False, f"FAIL: {n} differs by {d:.1f} MiB between the contexts (limit {tol:.1f} MiB)"
-    n, d, pct = max(checked, key=lambda c: c[1])
-    return True, (f"PASS: every figure differs by less than max({tol_pct:.0%}, {tol_mib:.0f} MiB) between the "
-                  f"contexts (biggest: {n} {d:.1f} MiB of the {max(pct, tol_mib):.1f} MiB limit)")
+    if checked:
+        n, d, pct = max(checked, key=lambda c: c[1])
+        return True, (f"PASS: every figure differs by less than max({tol_pct:.0%}, {tol_mib:.0f} MiB) between the "
+                      f"contexts (biggest: {n} {d:.1f} MiB of the {max(pct, tol_mib):.1f} MiB limit)")
+    n, d, _pct = max(pchecked, key=lambda c: c[1])
+    return True, (f"PASS: every placement figure differs by at most {tol_pct:.0%} between the contexts "
+                  f"(biggest: {n} {d:g})")
+
+
+def placement_summary(row: dict) -> str:
+    """One context's parsed placement figures as a line: "experts in VRAM 3072 | ..." ("-" for a figure
+    the engine's log said nothing about)."""
+    p = row.get("placement") or {}
+    return "  " + " | ".join(f"{name} " + ("-" if (v := p.get(key)) is None else f"{v:g}")
+                             for key, name in PLACEMENT_FIGURES)
 
 
 def main(argv=None) -> int:
@@ -525,6 +618,7 @@ def main(argv=None) -> int:
     print()
     print(format_table(rows))
     for r in rows:
+        print(f"\nExpert placement read from the engine's log at context {r['context']}:\n{placement_summary(r)}")
         print(f"\nK/V and expert budget lines from the engine's log at context {r['context']}:")
         for line in r["budget"]:
             print("  " + line)

@@ -193,9 +193,15 @@ ways** (1.2.4t): `VmLck`+`VmPin` summed over every process of the server's tree,
 page-locked memory often lands in no process's `VmLck` (the 1.2.4 run printed 0.0 pinned everywhere while the
 engines logged "68.00 GiB page-locked"); both are shown, the rule judges on the larger. Plus the RSS, the GPU
 memory used (nvidia-smi or rocm-smi, whichever the box has, over the config's cards) and the engine's own K/V
-and expert budget lines; then it stops the run and starts the next. PASS when every figure differs by less than
-max(2%, 256 MiB) between the contexts, FAIL naming the biggest difference; the run copies (config, logs) stay
-under `scratch/mem-vs-ctx/<config>/` for the person to read. Run it on a **quiet machine** like every bench
+and expert budget lines, *read into placement figures* (1.2.4t): the experts in the VRAM cache ("1729 in the
+GPU cache", "every expert in VRAM (3072 copied", "N of M experts in VRAM", "(N of M in VRAM)"), the experts in
+RAM / pinned, the GB left for the expert pool (GLM's "VRAM before the expert pool"), and the pinned RAM the
+engine declares ("the latent cache in 2.95 GB of pinned RAM"); then it stops the run and starts the next. PASS
+when every memory figure differs by less than max(2%, 256 MiB) between the contexts and no placement figure by
+more than 2% - the placement rule is what catches Inkling's "every expert in VRAM (3072)" at 32768 becoming
+"offload: 0 of 3072 experts in VRAM" at 262144 behind equal GPU totals; FAIL names the difference furthest
+past its limit; the run copies (config, logs) stay under `scratch/mem-vs-ctx/<config>/` for the person to
+read. Run it on a **quiet machine** like every bench
 above: the host-wide pinned row and the GPU row are box-wide readings, so a neighbour job that starts between
 the two loads can move them and flip the verdict. One side effect: every load records "the config
 that worked last", so after a run a later failed start on that machine offers `scratch/mem-vs-ctx/<config>/...`
