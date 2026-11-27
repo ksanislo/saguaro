@@ -1954,18 +1954,23 @@ bool Prefill::layer_pause_wanted() {
 int64_t Prefill::paused_chunk() const { return pause_.tokens > 0 ? pause_.pos0 : -1; }
 int64_t Prefill::paused_layer() const { return pause_.tokens > 0 ? pause_.layer : -1; }
 int64_t Prefill::paused_tokens() const { return pause_.tokens; }
+int64_t Prefill::paused_chunk_index() const { return pause_.tokens > 0 ? pause_.chunk : -1; }
 
-void Prefill::take_pause_rows(std::vector<float>& rows) { rows = std::move(pause_.rows); }
+void Prefill::take_pause_rows(std::vector<float>& rows) {
+    rows = std::move(pause_.rows);
+    pause_ = SavedPause{};   // with the rows gone the record means nothing: keep the two in step
+}
 
 size_t Prefill::pause_rows_bytes() const { return pause_.rows.size() * sizeof(float); }
 
-void Prefill::give_pause(int64_t pos0, int64_t layer, int64_t tokens, std::vector<float>&& rows) {
+bool Prefill::give_pause(int64_t pos0, int64_t layer, int64_t tokens, std::vector<float>&& rows) {
     pause_ = SavedPause{};
-    if (tokens <= 0 || rows.empty()) return;
+    if (tokens <= 0 || rows.empty()) return false;
     pause_.pos0 = pos0;
     pause_.layer = layer;
     pause_.tokens = tokens;
     pause_.rows = std::move(rows);
+    return true;
 }
 
 void Prefill::clear_pause() { pause_ = SavedPause{}; }
@@ -5516,6 +5521,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     pause_.pos0 = pos0 + c0;
                     pause_.layer = lp.layer;
                     pause_.tokens = lp.tokens;
+                    pause_.chunk = c0 / std::max<int64_t>(C, 1);   // the run's own chunk size: C, not m.T
                     pause_.rows.resize((size_t) lp.tokens * D);
                     const bool landed = cudaMemcpy(pause_.rows.data(), m.R, pause_.rows.size() * sizeof(float),
                                                    cudaMemcpyDeviceToHost) == cudaSuccess;

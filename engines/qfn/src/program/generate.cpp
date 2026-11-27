@@ -20123,13 +20123,15 @@ vs.d_skip_usage = gs.d_skip_usage;
                 // of its layers (the pause itself is dead for it - its tokens differ from the chunk's).
                 if (incoming->paused()) {
                     const int64_t pause_end = incoming->pause_pos + incoming->pause_tokens;
-                    if (incoming_tokens == pause_end) {
+                    if (incoming_tokens == pause_end &&
+                        sp.give_pause(incoming->pause_pos, incoming->pause_layer, incoming->pause_tokens,
+                                      std::move(incoming->pause_rows))) {
+                        // (arm the record only once the rows are really in the prompt path: a give_pause that
+                        //  refuses has nothing to go on, and an armed record without rows is the mismatch shape)
                         read_pause.pos = incoming->pause_pos;
                         read_pause.layer = incoming->pause_layer;
                         read_pause.tokens = incoming->pause_tokens;
                         read_pause.ids = incoming->pause_ids;
-                        sp.give_pause(read_pause.pos, read_pause.layer, read_pause.tokens,
-                                      std::move(incoming->pause_rows));
                     } else if (incoming_tokens > incoming->pause_pos) {
                         std::fprintf(stderr, "saguaro serve: conversation cache: this prompt branches inside the "
                                              "parked conversation's paused chunk (paused at token %lld, it shares "
@@ -20641,7 +20643,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         lp_pos = sp.paused_chunk();        //   (absolute token of the paused chunk's start)
                         lp_layer = sp.paused_layer();
                         lp_tokens = sp.paused_tokens();
-                        lp_chunk = (lp_pos - q) / std::max<int64_t>(sp.chunk(), 1);
+                        lp_chunk = sp.paused_chunk_index();   // the run's own chunk figure: its C can be planned, not m.T
                     }
                     return ok;
                 };
@@ -22958,6 +22960,11 @@ vs.d_skip_usage = gs.d_skip_usage;
             // P125j: a cancelled read that did not keep its paused chunk (no pause, or the keep refused)
             // leaves the saved rows with nothing to go on - the session was rolled back, zeroed, or the
             // conversation parked without them. They drop; the next read re-runs the chunk if it must.
+            // The keep branch armed read_pause with THIS request's record (pos and layer); a pause this
+            // request hit that the keep branch refused must not leave the OLD record armed beside the NEW
+            // rows either - that pair is what a later park would attach to the image.
+            if (cancelled && lp_pos >= 0 && (read_pause.pos != lp_pos || read_pause.layer != lp_layer))
+                drop_read_pause();
             if (cancelled && read_pause.pos < 0) sp.clear_pause();
             static const bool state_hash = std::getenv("SAGUARO_STATE_HASH") != nullptr;
             if (state_hash && !cancelled && o.prompt_cache > 0) {   // every finished request, ckpt=0 too (parity gates)

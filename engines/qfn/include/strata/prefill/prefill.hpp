@@ -356,14 +356,21 @@ public:
     int64_t paused_chunk() const;
     int64_t paused_layer() const;
     int64_t paused_tokens() const;
+    /// The paused chunk's index IN THE RUN that paused (its c0 / that run's chunk size - the figure the
+    /// server's "layer l of chunk c" line shows; -1 with no pause). 0 when the pause was not taken in a run.
+    int64_t paused_chunk_index() const;
     /// The paused chunk's saved rows, moved out to park them with the conversation (P125j: a parked read
     /// keeps its in-flight chunk), given back on restore (`pos0`: the paused chunk's absolute first
     /// token), or dropped. Dropping is always safe: the chunk is then read again whole (the same result,
-    /// the layer skip lost).
+    /// the layer skip lost). Moving the rows out clears the record too: with no rows there is nothing to
+    /// go on, and `paused_*()` must stop reporting a pause (a later park would pair an old record with
+    /// a newer run's rows).
     void take_pause_rows(std::vector<float>& rows);
     /// The saved rows' size in bytes (0 with no pause): the park's budget adds it to its estimate.
     size_t pause_rows_bytes() const;
-    void give_pause(int64_t pos0, int64_t layer, int64_t tokens, std::vector<float>&& rows);
+    /// Arm a pause handed back by a restore: false (and nothing armed) unless the rows came with it, so
+    /// the caller only mirrors the record into its own bookkeeping when this returned true.
+    bool give_pause(int64_t pos0, int64_t layer, int64_t tokens, std::vector<float>&& rows);
     void clear_pause();
     /// The first stage only, checked before every chunk but the first: true ends the run there as if the prompt
     /// ended there.  `run` returns true once every stage has read the tokens before that chunk, and `stopped_at()`
@@ -448,7 +455,7 @@ private:
     /// P125j: the chunk a run stopped between two layers of (or the one a park handed back): its absolute
     /// first token, the first layer not read for it, its token count, and its residual rows on the host.
     struct SavedPause {
-        int64_t pos0 = -1, layer = -1, tokens = 0;
+        int64_t pos0 = -1, layer = -1, tokens = 0, chunk = -1;   // chunk: the index within the run that paused
         std::vector<float> rows;
     };
     SavedPause pause_;
