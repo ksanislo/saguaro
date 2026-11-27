@@ -147,8 +147,10 @@ whatever else runs, and for the page cache the file tier reads through (it asked
 hold it and fell to 48k-362k major faults when squeezed to nothing; 12 GiB is what keeps the re-reads away,
 8 GiB is the floor a 32 GiB host can still afford). For the mortar box: cap = 96 - 20.4 - 12 = **63.6 GiB
 against the 68 asked** - the asked budget is cut to it, said with all four figures. A budget already under
-the cap changes nothing; `SAGUARO_RESIDENT_BUDGET_CAP=0` keeps the asked figure as it is (every rule here
-has its knob, review N2); on a host so tight no tier fits (cap 0) the engine keeps the asked budget and
+the cap changes nothing; `SAGUARO_RESIDENT_BUDGET_CAP=0` keeps the asked figure as it is (rule (a)'s knob,
+review N2 - (b) has `SAGUARO_VRAM_RESERVE_FLOOR=0`, (c) `SAGUARO_PARK_SWAP_MIB=0`, and rule (d) has no
+operator knob, its switch is the recovered note itself - re-review M1; no more claiming every rule has a
+knob than really does); on a host so tight no tier fits (cap 0) the engine keeps the asked budget and
 **says so loudly** rather than silently flipping the box out of the resident mode its setup named. Rule (c)
 and the admission checks keep guarding a host that is full anyway - this rule is the one that stops the
 host getting there through the engine's own budget.
@@ -167,8 +169,10 @@ measured honest there, #1376's A/B arm), Windows keeps its own path, and an **in
 alone** (review N3): its reported total is GTT RAM, not a card, and the UMA block above the reserve block
 sizes for that shape already. Unlike #496's lowering, this floor does not step back for
 `--vram-reserve-mib 700`-style given figures below it - the given 700 is what ended the engine - and it
-applies inside `--expert-cache auto` only: `--expert-cache N` still sizes the cache by hand. The cache
-size changes no output bit.
+applies inside `--expert-cache auto` only: `--expert-cache N` still sizes the cache by hand, and
+`SAGUARO_VRAM_RESERVE_FLOOR=0` is the floor's own knob for an operator who stays on auto sizing but
+measured a smaller reserve to fit (re-review M1 - inside auto the floor had no escape before it). The
+cache size changes no output bit.
 
 ### 2c. Swap use voids the parks' own-RAM credit (release before the storm deepens) - c54ba610d, 3b4cae905
 

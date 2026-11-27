@@ -6423,7 +6423,9 @@ int main(int argc, char** argv) {
     // the file tier reads through - have to fit in what is left.  On a 96 GB host the asked 68 GiB reached 89 GiB
     // of RSS, 2-5 GiB of swap and 100k+ major faults before the aborts (mortar, 2026-11-24); a budget that keeps
     // the margin is untouched, one that does not is cut to it, said.  SAGUARO_RESIDENT_BUDGET_CAP=0 keeps the
-    // asked budget as it is (every rule here has its knob, review N2): an operator who measured the box wins.
+    // asked budget as it is (rule (a)'s knob, review N2 - (b) has SAGUARO_VRAM_RESERVE_FLOOR=0 and (c)
+    // SAGUARO_PARK_SWAP_MIB=0; rule (d) has no operator knob, its switch is the recovered note itself): an
+    // operator who measured the box wins.
     static const bool resident_cap_off = [] { const char* v = std::getenv("SAGUARO_RESIDENT_BUDGET_CAP");
                                               return v != nullptr && std::atoi(v) == 0; }();
     if (o.resident_budget > 0 && !resident_cap_off) {
@@ -6871,35 +6873,43 @@ int main(int argc, char** argv) {
         // APU is left alone - its "total VRAM" is a window into system RAM (GTT), the #1709 threshold was measured
         // on discrete cards, and the UMA block above sizes for that different shape (review N3).  A bigger reserve
         // is kept as it is, a given one included - a reserve this side of the floor is what ended the engine, so
-        // this floor, unlike #496's, does not step back for `--vram-reserve-mib` below it.  The cache size changes
-        // no output bit.
+        // this floor, unlike #496's, does not step back for `--vram-reserve-mib` below it.  Its own knob
+        // (re-review M1): SAGUARO_VRAM_RESERVE_FLOOR=0 skips the floor and keeps the reserve as it was given
+        // (or the default), for an operator who stays on auto sizing but measured a smaller reserve to fit.
+        // The cache size changes no output bit.
         {
+            const char* floor_env = std::getenv("SAGUARO_VRAM_RESERVE_FLOOR");
+            const bool floor_on = floor_env == nullptr || std::string(floor_env) != "0";
             const int asked = o.vram_reserve_mib;
-            size_t fb_now = 0, tb_now = 0;
-            const uint64_t total_vram = cudaMemGetInfo(&fb_now, &tb_now) == cudaSuccess ? tb_now : 0;
-            cudaDeviceProp rsv_p{};
-            int rsv_dev = 0;
-            const bool rsv_integrated = cudaGetDevice(&rsv_dev) == cudaSuccess &&
-                                        cudaGetDeviceProperties(&rsv_p, rsv_dev) == cudaSuccess && rsv_p.integrated != 0;
-            (void) cudaGetLastError();
+            int floored = asked;
+            if (floor_on) {
+                size_t fb_now = 0, tb_now = 0;
+                const uint64_t total_vram = cudaMemGetInfo(&fb_now, &tb_now) == cudaSuccess ? tb_now : 0;
+                cudaDeviceProp rsv_p{};
+                int rsv_dev = 0;
+                const bool rsv_integrated = cudaGetDevice(&rsv_dev) == cudaSuccess &&
+                                            cudaGetDeviceProperties(&rsv_p, rsv_dev) == cudaSuccess && rsv_p.integrated != 0;
+                (void) cudaGetLastError();
 #if defined(STRATA_USE_HIP)
-            const bool hip_backend = true;
+                const bool hip_backend = true;
 #else
-            const bool hip_backend = false;
+                const bool hip_backend = false;
 #endif
-            const int floored = strata::core::vram::hip_auto_reserve_mib(hip_backend,
+                floored = strata::core::vram::hip_auto_reserve_mib(hip_backend,
 #ifdef _WIN32
-                                                                         true,
+                                                                   true,
 #else
-                                                                         false,
+                                                                   false,
 #endif
-                                                                         rsv_integrated, total_vram, asked);
+                                                                   rsv_integrated, total_vram, asked);
+            }
             if (floored > asked) {
                 std::fprintf(stderr, "saguaro generate: expert cache auto: the reserve stays at least %d MiB on this ROCm "
                                      "card, not the %d MiB %s: the window captures and the drafter's heads take about half "
                                      "of it after the cache, and below the 512 MiB paging line the driver pages GPU memory "
                                      "to a full host RAM and windows never finish (#2065, P124x); --expert-cache N sizes "
-                                     "the cache by hand\n", floored, asked, o.vram_reserve_given ? "it was asked for" : "it is the default");
+                                     "the cache by hand, SAGUARO_VRAM_RESERVE_FLOOR=0 keeps the reserve as asked\n",
+                             floored, asked, o.vram_reserve_given ? "it was asked for" : "it is the default");
                 o.vram_reserve_mib = floored;
             }
         }
