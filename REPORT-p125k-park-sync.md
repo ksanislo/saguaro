@@ -84,7 +84,9 @@ consumer is a stream the event form already existed (`order_after_queued`, conve
   (`park::wait_streams`, the pure decision, now unit-tested) - no `cudaDeviceSynchronize`, no capture-lock
   acquisition (only device syncs invalidate in-flight captures, capture_lock.hpp:2-3). `LightSync` (the slot
   save's scope) was hoisted into `ConvStreams`/`ConvSyncScope` (generate.cpp) - same semantics, now also
-  covering the copy stream; `persist_slot`'s `light` path is byte-identical.
+  covering the copy stream; `persist_slot`'s `light` path waits the same narrow set plus one addition -
+  this thread's private copy stream (`wait_streams` always includes it) - so it is not byte-identical,
+  it gained a sync of its own thread's queued copies and still never device-syncs.
 * **The post-copy wait (`conversation_checkpoint_restore` :242) is the copy stream alone.** Every copy above it
   rides the private stream and lands per copy, so `copy_done()` (conversation_state.cpp, timed into `sync_ms`)
   replaces the device sync - this is the 281-token restore that cost 1,066 ms with a 1 ms split. For the same
@@ -106,8 +108,11 @@ consumer is a stream the event form already existed (`order_after_queued`, conve
 * **The gate**: `park_own_ok() = stages.empty() && !pipe && !conc_serving && !in_prompt_read` - the whole model
   on one card with no read running beside. A layer split moves the conversation's work onto per-stage streams
   (and `pipe`'s pipelined decode onto `pl_stream`/snap side streams) that this list cannot bound, and concurrent
-  doorbell serving has a second thread queueing on this thread's streams: those shapes arm nothing and keep the
-  whole-device sync, byte-identical to today. `serve/qfn_engine.py` and `engines/qfn/serve/` are untouched -
+   doorbell serving has a second thread queueing on this thread's streams: those shapes arm nothing and keep the
+   whole-device sync for the scoped waits - not byte-identical overall: the ungated restore tail (`copy_done`
+   :257) and the copy-stream residency refresh ride every shape (the §5 contract), so a gated-out restore also
+   ends on its own copies instead of the old device sync - it waits less, never less-drained, the device sync
+   ahead of each copy still drains everything. `serve/qfn_engine.py` and `engines/qfn/serve/` are untouched -
   no new stdout field, the park/restore lines' `split: ... sync N ms ...` plus `wait N ms` keep their format
   (`sync` is now the narrowed wait; `wait` is still the time outside the clocks).
 
@@ -151,9 +156,10 @@ consumer is a stream the event form already existed (`order_after_queued`, conve
   slot group's queued window is (partly) waited at the switch. The card run shows whether that matters; if it
   does, the narrowing is a separate drafter-pool idle gate (persist_slot's `mtp.idle` precedent) that would let
   `ver`/`ver_b` leave the set.
-* **The multi-GPU / pipelined shapes stay whole-device** (`park_own_ok`). Bounding them means attributing the
-  stage devices' window/pl_stream/snap streams per conversation - the same mechanism, more streams; the gate
-  keeps them byte-identical until that is done on the card.
+  * **The multi-GPU / pipelined shapes stay whole-device** (`park_own_ok`). Bounding them means attributing the
+    stage devices' window/pl_stream/snap streams per conversation - the same mechanism, more streams; the gate
+    keeps their armed waits whole-device until that is done on the card (the ungated restore-tail change above
+    still rides them: those shapes wait less after their copies, never under-wait).
 * **`copy_done` replaces the device sync at :242 for every caller**, scope or not: it rests on every restore
   copy riding the private copy stream (true today: `copy()` is always `copy_nonblocking`, and the residency
   refresh now too). A future restore-path copy that launches elsewhere must not bypass it - the same contract
