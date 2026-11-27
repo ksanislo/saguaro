@@ -1,136 +1,114 @@
-# REVIEW-RESULT - P125j layer pause (re-review round 4 of d789228f0..HEAD; HEAD = bcfc5c03f, the round-3 MERGE; superseded by the manager's card FAIL)
+# REVIEW-RESULT - P125k park-sync (diff b7ed679cb..dc436f2f0, this worktree)
 
-FIX-FIRST
+MERGE-WITH-NITS
 
-The round-3 MERGE holds for the code it read - all seven of round 2's findings are still fixed in the
-tree and both plan-named unit modules pass here - but the feature never reaches the shape the SHIPPED
-QFN config runs its prompt reads in (`--batch`, the concurrent reader), and the `SAGUARO_PRIORITY_IDLE_S`
-5 -> 0 flip ships into exactly that config. The manager's card run on 4xT4 (live Q4 `--batch` config,
-scratch/card-r1-test.txt, scratch/card-r1-engine.txt) failed exactly where this review locates it:
-cut 1's normal request waited 12.2 s (the plan promises 1 s), no pause/priority/STOP line anywhere,
-the low read ran 37632 tokens straight through "on a thread of its own".
+Scope reviewed: PLAN-p125k-park-sync.md / REPORT-p125k-park-sync.md against
+`git diff b7ed679cbc75cf1959bb1d793e8442534ac4a5f3..HEAD`. The range also carries merged
+P125j (merge 70f67efde + merge-round FIX-REPORT dc436f2f0); the merge itself is checked
+below, P125j's own findings are its branch's.
 
-## Findings
+## What was verified (with the evidence)
 
-1. BLOCKER - the layer pause (and every read preemption) is inert under `--batch`; the card run fails.
-   - serve/server.py:5744-5747: the read preemption (the cut that would send STOP) fires only for
-     `keeps_stopped_read AND not engine.batch`. QfnEngine sets `keeps_stopped_read = True`
-     (serve/server.py:9501) and its docstring (serve/server.py:9497-9507) says outright: "the preemption
-     never cuts a batch read". `can_pause = False` (serve/server.py:9500) also kills the fair-read pause
-     (serve/server.py:5727-5729). Under `--batch` the server therefore never sends a STOP for a prompt
-     read at any granularity - neither chunk-end nor layer. That is why the card log has no STOP line
-     at all.
-   - Engine side: under `--batch` every long prompt read runs on the piped concurrent reader thread
-     (generate.cpp:20766 gates `piped && (pr_conc || slot_admit)`; the reader thread runs `sp.run` at
-     generate.cpp:20911-20928; the card engine log's line is its own print at generate.cpp:21010-21009
-     region, scratch/card-r1-engine.txt:35). The P125j capture (`lp_pos/lp_layer/lp_tokens/lp_chunk`)
-     exists ONLY in the inline solo `run` lambda (generate.cpp:20667-20670); the reader-thread run sets
-     none of them, so the pause keep (generate.cpp:22907-22936) can never arm on that leg, and a run
-     that ended `err "layer paused"` on the reader thread falls into `if (!read_ok)`
-     (generate.cpp:21010-21013) and aborts the read as a failure - the saved rows are then dropped by
-     generate.cpp:23000 (`sp.clear_pause()`). Note `lp_on` IS true for the reader-thread run
-     (prefill.cpp:2978: no job, `bat` false, hand_in_/next_/embd_rows null, stop_between_layers wired at
-     generate.cpp:12694), so the layer pause itself would fire if the flag were ever set - what is
-     missing is the server cutting batch reads, the capture/keep on that leg, and the give-way/slot
-     carrying of the layer+rows (the batch machinery stops at chunk heads only:
-     `sp.stop_at_chunk` at generate.cpp:20906-20909, BYIELD at 20974-20975, give_way parking at
-     20700-20718).
-   - Consequence for the plan: step 4's promise (normal request's first token within 1 s, on the card,
-     with the live config) is not met; `tools/card_tests/layer_pause.sh` correctly FAILs on any
-     `--batch` CFG at "no 'prompt read paused' line" (scratch/card-r1-test.txt, cut 1 at position
-     16128, TTFT 12.22 s).
-2. MAJOR - the grace default 5 -> 0 ships without the protection it was bought with (MANAGER: "idle
-   grace -> 0 only with this"). serve/server.py:416-417 defaults `SAGUARO_PRIORITY_IDLE_S` to 0.0,
-   docs/SETTINGS.md:238 and 250-253 justify 0 by "a low prompt read steps aside at its next LAYER", and
-   serve/test_priority.py's IdleGraceDefault asserts 0.0 - but finding 1 means that sentence is false
-   for the batch config the package ships in: in 1.2.5 the 5 s grace was the only shield for a normal
-   follow-up arriving while no low read has started yet (the old SETTINGS wording: "long enough for an
-   agent's tool-call gap, since a low prompt read steps aside only at the end of a chunk"); with 0 the
-   low read starts the moment the box is quiet and the follow-up queues behind the whole concurrent
-   read (the card run's 12.2 s class of wait). NIT 7's fix (79cebc30e) documents only the
-   `SAGUARO_LAYER_PAUSE=0` combination, not the `--batch` one. Either fix finding 1 (then 0 is earned)
-   or keep the default at 5 when the engine runs batch slots and say so in the docs and the test.
-3. NIT - REPORT-p125j-layer-pause.md:283-285 is accurate ("serve/server.py only ever cuts a solo QFN
-   read, keeps_stopped_read and not batch") but then calls that "the shape the priority cut actually
-   uses". For a live `--batch` QFN box it is not - that is the shape the cut CANNOT use. The report's
-   honest-scope note should name `--batch` as the config where the whole feature is inert, and step 4's
-   card claim should say its checks can only pass where a pause can be taken at all.
-4. NIT - when finding 1 is fixed through the batch machinery, the card script's expectations must move
-   with it: the script greps the solo mechanics (server line "inside chunk c at layer l", engine line
-   "the read paused at chunk" from prefill.cpp:5537, the solo RESUME/RDONE "prompt N tokens = R reused +
-   K read" figures summed against READ_TOL). A batch cut that gives way through BYIELD/give_way parks a
-   partial read in a SLOT (generate.cpp:20700-20718) and reports slot/BGEN figures instead - either the
-   script covers both, or it pins a solo config for these exact lines.
+- Narrow wait-set correctness. `park::wait_streams` (park_policy.hpp:216) filters the
+  (device, stream) scope to the waiting device plus this thread's private copy stream
+  (conversation_copy.hpp:312-324). The gated set (generate.cpp:15935-15944: `main_stream`,
+  `ver`, `ver_b`, `mtp.stream()`) covers every producer of the parked/restored cells in the
+  gated shape: session calls ride `main_stream` (generate.cpp:4495-4497, non-blocking);
+  the verifier side streams fork/join through their own stream (verify.cpp:1199-1204,
+  1478-1485, 1542-1549 - join is `cudaStreamWaitEvent(cs, join_, 0)`, so syncing `cs` waits
+  the branches); the drafter's `side_` likewise forks at mtp.cpp:1146 and joins at
+  mtp.cpp:1189; batch-slot windows and doorbell-served windows ride `ver`/`ver_b` (they are
+  in the set: generate.cpp:18344-18350 shows the Bells thread serving the MAIN verifier),
+  so the scope over-waits (busy slot windows), never under-waits. The gate
+  `park_own_ok()` (generate.cpp:15929: `stages.empty() && !pipe && !conc_serving &&
+  !in_prompt_read`) excludes every shape with writers outside the set (stage threads
+  generate.cpp:10097, doorbell thread 15507/18346, pipelined read 18325/21153/21310/21397).
+- Cell-reuse ordering (MANAGER: event before reuse). Every replaced wait lands before the
+  reuse: park pre-syncs (:335/:395 equivalents, conversation_state.cpp sync()) drain the
+  scoped streams before D2H copies which are per-copy host-ordered (conversation_copy.hpp:
+  126-139); restore H2D copies land per copy, and the restore tail `copy_done`
+  (conversation_state.cpp:257) returns only after this thread's copy stream is done; the
+  residency refresh is launched on that same copy stream right after the pool copies
+  (stream-ordered, conversation_snapshot.cpp:421/446) and is therefore covered by the same
+  wait before any later compute is enqueued. `order_after_queued`'s event-before-legacy
+  (conversation_copy.hpp:276-301) and the direct-copy path are untouched
+  (conversation_snapshot.cpp:405). Where refresh stays unwaited inside a function - the
+  borrow tail (conversation_state.cpp:615-624) - the base was identically unwaited (legacy
+  launch, no wait) and the next whole-device :240 sync (outside every scope there) orders
+  it in both; the new placement is strictly better covered (every narrowed sync waits the
+  private stream, the base's legacy launch was waited only by device syncs).
+- Ungated paths keep their drains: stage/slot restores still device_sync at
+  generate.cpp:19426, 20335, 14486/14505/14512, 14533/14548/14557/14563.
+- Locks: the narrowed path takes neither `capture_mutex` (capture_lock.hpp:48-52 - correct,
+  only device syncs invalidate captures, and stream syncs cannot race a capture under the
+  gate: no other thread touches the scoped streams in the gated shape) nor nests any lock
+  (`private_stream`'s pool mutex, conversation_copy.hpp:83-104, is released before any
+  wait). `ConvSyncScope` is never nested (persist_slot call sites 16864-23831 are outside
+  every armed scope).
+- Threads/stdout: no new threads; no new stdout fields; the `split: ... sync N ms` and
+  `wait N ms` formats are untouched; P125j's `paused_*` keys ride the existing DONE line
+  (generate.cpp:23402-23416) and parse in both servers (engines/qfn/serve/server.py:1665,
+  serve/qfn_engine.py:1221).
+- Generated file: `python tools/saguaro/extract_qfn_engine.py` reproduces
+  serve/qfn_engine.py byte-identical at HEAD (cmp clean, tree unchanged); only
+  engines/qfn/serve/server.py carries the source hunk.
+- Tests: park_policy_test run alone, one at a time - standalone
+  (`g++ -std=c++20 -I engines/qfn/include`, scratch/) and as the build-p125k-merge target:
+  **65 checks passed** both ways, matching the report. The 9 new checks
+  (park_policy_test.cpp:178-215) really exercise the new decision: device filter, empty
+  scope = whole-device sync, cross-device stream never waited, unrelated stream not waited.
+  `ninja -n -C scratch/build-p125k-merge strata` = no work at tip (build claim holds).
+- No secrets, no repo-outside paths in the diff; no Co-Authored-By/Assisted-by/
+  Claude-Session trailers in b7ed679..HEAD.
+- HIP (MANAGER): every CUDA call the branch adds is mapped by the HIP shim
+  (strata_hip.h:84 cudaGetDevice, :134 cudaStreamSynchronize, :136 cudaStreamWaitEvent,
+  :144 cudaEventRecord); no new raw `hipEvent*` call site; the event path
+  (`order_after_queued`) is unchanged, and the refresh's no-copy-stream fallback
+  (conversation_snapshot.cpp:354-357, `cudaStreamSynchronize(nullptr)`) keeps the same
+  legacy-stream convention already used tree-wide (e.g. expert_cache.cpp:737). The copy
+  stream move also avoids the HIP legacy-vs-capturing-stream refusal noted at
+  conversation_copy.hpp:76-80.
+- Merge (dc436f2f0/70f67efde): both conflict hunks keep P125k's scope AND P125j's
+  drop_read_pause (generate.cpp:20245-20249, 20304-20311); auto-merged sites re-checked -
+  file restore 19406-19427 (p125k scope wraps it, stage syncs stay whole-device), park
+  20124-20163 + park_body pause rows 11090/11196-11216, cut 23225-23244, keep chain
+  23153-23255, DONE suffix 23402-23416, grace + pause wording in serve/server.py -
+  nothing from either side lost.
 
-## Round 2/3's items - re-verified in this tree, nothing regressed
+## Findings by severity
 
-All seven of round 2's fixes sit where round 3 said (spot-checked at HEAD): the dropped-pause trust
-clamp above `mtp.kv_restore` (generate.cpp:20323-20351); the pause keep's `pp_reached = lp_pos +
-lp_tokens` (generate.cpp:22924); both head-alias pair-drops (generate.cpp:19513, 21746) plus the keep's
-`sp.pause_rows_bytes() > 0` refusal (22907); the `-1` doc in prefill.hpp; the `state_bytes` row clamp
-with the two extra checks (43 green); `ple_reads` gating the gather/pending/land plus the stale
-`ple_next` wait (prefill.cpp:3308-3314, 5549-5554); the SETTINGS.md grace-back-to-5 clause.
+1. MEDIUM (report wording, no code change): REPORT-p125k-park-sync.md:109-112 says the
+   gated-out shapes "keep the whole-device sync, byte-identical to today", but
+   conversation_state.cpp:257 replaces the restore post-copy device sync with `copy_done`
+   for EVERY shape, and conversation_snapshot.cpp:421/446 move the residency refresh to
+   the copy stream for every shape. Verified correctness-equivalent for the split /
+   multi-GPU / slot shapes (each restore ends on its device's copy stream, which its own
+   copy_done or the retained explicit device_sync above waits, and the refresh rides that
+   stream), and REPORT §5 open question 3 records the contract - but "byte-identical" is
+   not the true description of those shapes: they now wait strictly less at :257. The
+   copy-stream contract ("a future restore-path copy must not launch elsewhere",
+   REPORT:157-160) now binds all shapes and is guarded only by convention.
+2. NIT: REPORT:87 claims the FAST_LANE `light` path is "byte-identical".
+   `ConvStreams::run` -> `narrow_sync` (conversation_copy.hpp:312-317) adds one
+   private-copy-stream sync the old `LightSync::run` did not take; at `sync()` sites it is
+   redundant (conversation_state.cpp:36-38 already synced the stream) and under the light
+   scope it is this thread's own stream only - save bytes and log format unchanged, but
+   one extra driver round-trip; "byte-identical" overstates it.
+3. NIT (pre-existing, unchanged, worth a comment someday): conversation_state.cpp:620-622
+   - the borrow's restore returns with the residency refresh queued and unwaited (no host
+   wait after it inside the function); safety comes from the next whole-device sync (the
+   checkpoint mount's :240). True at base too, but this branch is precisely about these
+   waits, so the asymmetry (every other restore tail waits its copy stream, this one
+   doesn't) invites a future bug.
+4. CONTEXT (manager-owned): this tree's merged P125j tip is d8e25fd95, i.e. its round-4
+   FIX-FIRST record - the round-4 BLOCKER (the batch lane never cuts a read; the pipelined
+   reader has no pause capture) and the MAJOR (grace default 0 at serve/server.py:420 in
+   exactly the inert batch config) are NOT fixed in these refs; FIX-REPORT says so. The
+   merge introduced nothing new there, but shipping this diff ships those defaults, so the
+   P125j fix round should land before this whole diff does.
 
-## Re-checked per the brief (this pass)
+## Not run
 
-- Feature OFF (`SAGUARO_LAYER_PAUSE=0`): `lp_on` false at prefill.cpp:2978-2979; `lp_resume` never true;
-  `l_from == LB` (prefill.cpp:3228, 3611); the embedding/gr_broadcast guards (3241/3300/3301), the pause
-  block (5516-5554), the run-past clear (6198-6201) and every generate.cpp block sit behind `lp_on`,
-  `lp_resume` or an armed `pause_` that only a taken pause can arm; DONE's new `%s` carries the empty
-  `lp_note`; the server line is byte-identical without the DONE keys (serve/server.py:5877-5887); the
-  extra `sp.clear_pause()` at 23000 is a no-op on an empty record. The grace default is the only
-  intended OFF-visible change - finding 2.
-- Locks / threads / stdout: no new mutex/lock_guard/unique_lock on any `+` line of the diff; the pause
-  reads the stdin thread's atomic `stop_req` (generate.cpp:12694) from the run thread - the same
-  pattern as `should_stop`; one `fprintf(stderr)+fflush` per pause (prefill.cpp:5537-5542) and one keep
-  line (generate.cpp:22932-22936); the DONE keys ride the single existing DONE printf (23139-23147) - no
-  line interleaving; nothing acquires a lock the pause path could already hold.
-- Generated file: serve/qfn_engine.py's only hunk (serve/qfn_engine.py:1193-1195) mirrors the source
-  hunk (engines/qfn/serve/server.py:1636-1638) key for key; no other drift in either file (regenerating
-  would edit the tree, so this pass verified hunk-for-hunk; round 3 verified byte-identical output).
-- Tests really exercise the change: layer_pause_test walks the exact `pause_point` / `resumes` /
-  `state_bytes` the engine calls (prefill.cpp:5517, 3230, 5541); test_priority pins the new default.
-  But nothing automated covers the server gate, the reader-thread leg, or a resume end-to-end - those
-  rest solely on the card script, and it failed (findings 1/4).
-- No secrets, no paths outside the repo in the diff (the script reads CFG only, writes under its
-  --out folder, drops `api_key`); no forbidden commit trailers in `git log d789228f0..HEAD`.
-
-## What ran here (plan-named modules, one at a time)
-
-- `cmake --build scratch/build-p125j-cuda75 --target layer_pause_test` + `ctest -R layer_pause_test`:
-  Passed ("ok: 43 checks, 0 bad" from the binary's own rule).
-- `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_priority`: Ran 68, OK.
-- `bash -n tools/card_tests/layer_pause.sh`: clean.
-- `tools/card_tests/layer_pause.sh` NOT run here (no card); the manager's card run on the live Q4
-  `--batch` config FAILED as quoted in finding 1 - that is the plan's step-4 gate.
-
-## Manager's four
-
-- Resume at the exact layer: implemented and helper-tested on the SOLO GEN path
-  (prefill.cpp:3229-3239/3611 + capture 20667 + keep 22907) - but never reached on a `--batch` read
-  (finding 1).
-- Nothing read twice: the leg figures telescope after bb0c65a76 (22924) wherever a pause can arm; the
-  card run exercised no leg at all (no cut), so the sums stay unproven end to end.
-- Parks with the conversation: record+rows ride the park (generate.cpp:11089-11104), come back at the
-  restore (20125-20135), count in the budget (10978), and refuse disk writes while live (10738, 10845,
-  11108-refuse) - holds, for solo reads.
-- Idle grace -> 0 only with this: NOT met - 0 ships into the batch config where the pause is inert
-  (finding 2).
-
-## Fix (the manager's steps, with the sites this review verified)
-
-1. FIX-REPORT: trace a low read under `--batch` from the server's step-aside (serve/server.py:601
-   `step_aside`, gated out at 5744-5747, QfnEngine docstring 9497-9507) into the engine's reader
-   (generate.cpp:20766, 20892-21033): the stop is checked at chunk heads only (`sp.stop_at_chunk`
-   20906-20909 wired to BYIELD 20974-20975), and `stop_between_layers` (12694) is armed but its result
-   has no capture/keep on that leg (20667 is inline-only; 21010-21013 aborts; 23000 drops the rows).
-2. Make the concurrent reader honour the layer-boundary stop and the server's step-aside: open the cut
-   for batch (or route it through the BYIELD lane), capture the pause figures on the reader-thread leg
-   and let the keep / give_way carry them (a slot's partial read would need the layer+rows too -
-   20700-20718 parks ids only), keep the legs' reused+read = prompt closed either way, and log
-   'prompt read paused' with chunk/layer as the solo path does.
-3. A unit/fake test for the concurrent-reader path; rebuild QFN sm_75 in a NEW dir under scratch/; run
-   tools/card_tests/layer_pause.sh on the live Q4 config until it PASSes (its expectations may need the
-   batch wording - finding 4).
-4. The grace default stays 0 only once step 2 works end to end on the card; if the batch cut does not
-   ship, the default goes back to 5 (serve/server.py:416, test_priority, SETTINGS.md in one step).
+Full engine rebuild (FIX-REPORT's scratch/build-p125k-merge claims verified indirectly:
+`ninja -n` no-work at tip, test target present and green); GPU/card runs (plan: manager
+after; nothing on a card here). Only the plan's named module, park_policy_test, was run.
