@@ -1,23 +1,21 @@
-# MANAGER: FIX-FIRST round 6 (card tests, mortar RX 9070 XT, 2026-11-26 20:11-20:33 MST, commit d94e12c4b)
-LOAD + SPEED NOW PASS (Ken's acceptance): --max-context 262144 vs 1048576 -> host K/V 1.30 / 1.30 GiB, expert RAM tier
-68 / 68 GiB, GPU expert cache 2523 / 2561 slots, 30K read 35.9 / 36.4 s (better than round 3 at 262144). Keep all of it.
+# MANAGER: FIX-FIRST round 7 (card tests, mortar RX 9070 XT, 2026-11-26 22:54-22:59 MST, commit e2684fc39)
+LOAD + SPEED PASS again: 262144 vs 1048576 -> host K/V 1.30 / 1.30 GiB, expert RAM 68 / 68 GiB, GPU expert cache
+2571 / 2509 slots, 30K read 35.0 / 37.0 s. Round 6's fix works: the device state now grows (50 "the host copy backs N
+cells now" lines to 546148 cells, 8.00 GiB pinned in all; "elastic slots: CUDA0's expert cache gives 62 MiB ...").
 
-GROWTH FAILS. One conversation of 546,145 tokens on the 1048576 config (a plain chat request; the host copy grew
-correctly: 44 "the host copy backs N cells now" lines up to "546148 cells now (4.91 GiB pinned for K/V in all, 60 ms)"):
-  saguaro: the context's device state could not be mapped on CUDA0: no error
-  [saguaro] engine said: ERR no RAM is left to pin this request's context (546145 tokens)
-  [saguaro] the engine reported an error: no RAM is left to pin the context of this conversation ...
-  done: 0 tokens (error)
-So growing the DEVICE (VRAM) state past the start step fails: the mapping fails and the error is reported as "no error"
-and then as a RAM shortage (it is not: 13 GB were available; 1.2.3 served this request with everything reserved).
+GROWTH STILL FAILS, at the NEXT allocation - the YaRN switch. The same 546,145-token conversation on the 1048576 config:
+  [saguaro] engine said: ERR no VRAM for the YaRN RoPE rows
+  [saguaro] the engine reported an error: no VRAM for the YaRN RoPE rows
+At load the engine said: "VRAM: the YaRN level's RoPE table (addresses for --max-context): 0.75 GiB asked, 0.00 GiB in
+use (3 allocations)". When the conversation passes 262144 and switches to YaRN (SAGUARO_YARN_ELASTIC), backing those
+rows needs VRAM, and that allocation does NOT go through the expert cache's give-way (round 6 put the give-way before
+the device-state map only).
 Fix, commit each:
-1. The mapping failure path: report the real cause (the driver's error code / which allocation / how much was asked /
-   how much VRAM was free / whether the expert cache was asked to give way and what it gave), never "no error", never a
-   RAM message for a VRAM failure.
-2. Make the growth work: when mapping more device state needs VRAM, the expert cache gives way (coldest first) BEFORE
-   the mapping is tried, as much as the growth needs; the request then proceeds. A conversation that truly cannot fit
-   (VRAM exhausted after the cache gave all it can) must fail with a clear message - but 546K on a 16 GB card with a
-   7.3 GiB expert cache must fit (QFN's VRAM K/V is a 32K-cell window: the rest streams from host).
-3. A unit test for the give-way-before-map order (pure helper or a fake allocator), and the error text test.
-Card test after: the same 546K request must answer (a needle at ~10K must be found).
+1. Route EVERY growth-time VRAM allocation through the same give-way-before-map path: the YaRN RoPE rows, and any other
+   allocation made on growth (list them in FIX-REPORT with file:line - grep the VRAM accounting lines you added in
+   round 5 for "addresses for --max-context"; every one of them grows on use and must take room from the expert cache).
+2. Size the YaRN RoPE rows by the positions in use (back them in chunks as the conversation grows past 262144), not
+   all 0.75 GiB at the switch - or compute the rows for the window in use if that is how the kernel reads them; say which.
+3. Unit test: the give-way order for each growth allocation (vmm_grow_test style).
+Card test after: the 546K request must answer (needle "7319" at ~10K found), and the load + speed figures above unchanged.
 Build for CUDA sm_75 in a NEW build dir under scratch/; no GPU runs.

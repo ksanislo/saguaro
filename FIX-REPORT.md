@@ -1,118 +1,113 @@
-# FIX-REPORT - REVIEW-RESULT findings, one commit each (round 6: `d94e12c4b..374bac012`)
+# FIX-REPORT - REVIEW-RESULT findings, one commit each (round 7: `e2684fc39..12dc848fb`)
 
-The manager's card test (mortar, RX 9070 XT, 2026-11-26 20:11-20:33, run against `d94e12c4b`, `REVIEW-RESULT.md`
-committed with this report) is the whole finding this round: LOAD and SPEED pass and stay untouched; GROWTH fails -
-one 546,145-token conversation on the 1048576 config grew its host copy correctly through 44 steps to "546148 cells
-now (4.91 GiB pinned for K/V in all)" and then died with `the context's device state could not be mapped on CUDA0:
-no error` followed by `ERR no RAM is left to pin this request's context (546145 tokens)` - a VRAM failure reported as
-"no error" and answered with a RAM message while 13 GiB sat free. The card's three numbered parts map to the three
-sections below (`a83743418`, `59c4c6688`, `f8f6ff2c0`; the nit `374bac012`); the new build dir is
-`scratch/build-p124e-r6` (CUDA sm_75, ggml from `scratch/ggml-pinned`), the acceptance stays
-`scratch/card-test-elastic-kv.sh` (criterion F added this round), and nothing here is GPU-testable on this box.
+The manager's round-7 card (`REVIEW-RESULT.md`, committed with this report): LOAD and SPEED pass unchanged (1.30 /
+1.30 GiB host K/V, 68 / 68 GiB expert RAM, 2571 / 2509 cache slots, 30K read 35.0 / 37.0 s) and round 6's fix works
+(the device state grows, 546148 cells, the cache gives way); GROWTH now fails at the NEXT allocation - the YaRN
+switch of that same 546,145-token conversation, `ERR no VRAM for the YaRN RoPE rows`. The card's three numbered
+parts map to the three sections below (`e758a5b07` + its follow-up `df1adca13`, `33e462af7`, `0434ba69d`; the nit
+`12dc848fb`). New build dir `scratch/build-p124e-r7` (CUDA sm_75, ggml from `scratch/ggml-pinned`), 268/268,
+`saguaro-qfn` links, no GPU touched.
 
-**What the code actually did.** Two defects, both in the round-4 VRAM half (`follow_room` / `follow_map_locked`):
+**What the code actually did.** Round 6 put the give-before-map path (`vmm_grow_room`) in front of the follow-pool
+and scratch maps only. The two context arrays that grow on use and did NOT go through it were exactly the two the
+card hit: `qsa_rope_yarn_fit` took room ONLY from the card's slot budget - budget short, it returned false without
+ever asking the expert cache; no budget at all (the follow-rule rigs), and `VmmRange::map_range` quietly made fresh
+driver chunks mid-map, again with no relief. And its size came from `solo_yarn_rows`' `n + max_new + 64`, which for
+a request whose `max_new` runs to the end of the context IS `--max-context` - so the switch tried to back the whole
+0.75 GiB table in one step, through a path that could not ask for room.
 
-1. *The probe lied.* `follow_room` probed the room one chunk at a time - `cuMemCreate`, then `cuMemRelease`, then
-   the next - so it proved only that ONE chunk fits at a time. With the card nearly full (weights + graphs + the
-   7.3 GiB expert cache) it returned true for GiBs the card did not have, **never asked the relief** (a single
-   chunk always fit, and the relief was only ever consulted on a per-chunk refusal), and `follow_map_locked` then
-   failed mid-`map_range` - which is the card's "could not be mapped". The cache gave way only in the rope grow's
-   loop (`qsa_rope_grow` keeps its chunks); the follow pools and the scratch probed-and-freed.
-2. *The error was unread.* The driver API (`cuMemCreate`/`cuMemMap`/...) never sets `cudaGetLastError()`, so
-   `cudaGetErrorString(cudaGetLastError())` printed "no error" over a genuine out-of-memory. And the caller -
-   `solo_host_fit_r` failing, which covers BOTH halves since round 4 - answered with the RAM text, because the
-   half that failed was never consulted: `qsa_dev_pin_failed()` was defined in round 4 and read nowhere.
+## Finding 1 - EVERY growth-time VRAM allocation runs the give-way-before-map path (`e758a5b07`, `df1adca13`)
 
-## Finding 1 - the mapping failure reports its real cause (`a83743418`)
+The card's list, from the round-5 accounting lines ("addresses for --max-context", `grep DeviceNote`), with what
+each allocation does now:
 
-* `vmm.cpp` / `vmm.hpp`: every failing driver call records itself first - `cuMemAddressReserve`, `cuMemCreate`,
-  `cuMemMap`, `cuMemSetAccess` (HIP branch: `hipMemAddressReserve`/`hipMemCreate`/`hipMemMap`/`hipMemSetAccess`,
-  which already logged and now record too) - into a thread-local `vmm_last_error()`: the call, the driver's own
-  string (`cuGetErrorString`, resolved optionally at startup; `CUresult %d` without it) and the bytes. That is
-  what the failure line prints instead of `cudaGetLastError()`, so "no error" is gone by construction; a build
-  with no VMM says so.
-* `include/strata/core/vmm_grow.hpp` (new, pure): `vmm_grow_failure_text()` composes the line the card asked for -
-  which step failed (`mapped` / `grown`), the driver call and its code, how much was asked (MiB and chunks), how
-  much VRAM is free right now (the caller's `cudaMemGetInfo`), and whether the expert cache was asked to give way
-  and what it gave ("was asked to give way of 776 MiB and gave 512 MiB" / "was never asked (the driver's free
-  memory was not short)"). Pure, so the test reads it; it never contains "no error" and never the word RAM.
-* `layer.cpp`: `report_vmm_grow_failure()` (the free-memory read + the line) is printed by the follow map's refusal
-  (replacing the "no error" line), by the scratch's map refusal (silent before) and by both room-short paths
-  (`follow_room` refusing said NOTHING at all before); `follow_room` now also records what the relief was asked
-  and what it returned, for the line.
-* Never a RAM message for a VRAM failure - `qsa_dev_pin_failed()` decides the wording at every site the grow can
-  fail: the solo admit answers `ERR no VRAM is left for this request's context (N tokens): the card's expert cache
-  gave all it can` (that ERR text already existed for the budget half; the RAM/VRAM choice is new); a batch slot's
-  admit error and its `BDONE` say `no VRAM is left ...` / finish `vram`; the decode's pin ends `finish=vram`; and
-  `engines/qfn/serve/server.py`'s `engine_refusal` maps the `no VRAM is left` prefix to `EngineOutOfVram` (retry
-  once, else 503 - the same handling as a DONE/BDONE `vram`), never to `EngineOutOfRam`/`RAM_SHORT`.
-  `serve/qfn_engine.py` re-extracted with `tools/saguaro/extract_qfn_engine.py` (never hand-edited).
+| allocation (accounting line) | grow site | room path |
+|---|---|---|
+| streamed states' context device state - follow pools (`layer.cpp:2570` addresses, `layer.cpp:2763` start step) | `qsa_follow_grow_at` `layer.cpp:1727` | `follow_room` `layer.cpp:1716` -> `vmm_grow_room` (round 6) |
+| block-score scratch (`layer.cpp:1938`) | `qsa_scores_grow` `layer.cpp:1957` | `follow_room` -> `vmm_grow_room` (round 6) |
+| grown RoPE table past the trained 262144 (`layer.cpp:2611`) | `qsa_rope_grow` `layer.cpp:2139` | `vmm_grow_room_pooled` (round 7; the old loop asked the relief per refused chunk) |
+| **YaRN level's RoPE rows** (`layer.cpp:2718`) | `qsa_rope_yarn_fit` `layer.cpp:2218` | `vmm_grow_room_pooled` (round 7; **was budget-only, no relief at all - this is the card's failure**) |
 
-## Finding 2 - the growth works: the cache gives way BEFORE the map (`59c4c6688`)
+`vmm_grow_room_pooled` (new in `vmm_grow.hpp`, the same order as `vmm_grow_room`): the card's slot budget first
+(its chunks cost the experts nothing), then the driver for the shortfall, the FIRST refusal asking the relief ONCE
+for the whole remainder, and the map starting only with every chunk in hand. `qsa_rope_yarn_fit` also keeps its
+chunks measure / room / map apart (round 4's rule - the relief's low-water check counts the RoPE chunks through the
+very lock it holds), and a refused rope/YaRN map or room now prints the round-6 line (which driver call, the bytes
+asked, free VRAM, what the cache was asked and gave) instead of silence, and records the refusal in
+`qsa_dev_pin_failed()` so the solo admit and the decode's end answer `no VRAM`, not `no RAM` (`df1adca13` - the
+round-6 wording bug at a new site).
 
-`vmm_grow_room()` (vmm_grow.hpp, the card's order, pure) - and `follow_room` is now just it plus the device
-context: **take every chunk the grow needs from the driver and HOLD them**; the first refusal asks the card's
-relief ONCE for the whole remaining shortfall (`(need - made) * G`, the expert cache's coldest residents first,
-down to its floor - the plan's take-from-experts in VRAM); only with every chunk in hand is the map tried, and
-`follow_map_locked` / `scores_grow_locked` map from `got` instead of taking fresh ones. So for the card's 546K
-conversation: the free VRAM runs out after a few chunks, `vram_relief` → `free_to_driver(quiet)` → `give()`
-evicts the coldest experts and frees their chunks down toward `give_floor`, and the map never starts before that
-room is real - which it must be, since QFN's VRAM K/V is a 32K-cell window (the arrays that scale with the
-context are the page table, the pooled indexer rows and the scratch: GiBs, not the K/V's tens of GiB - 7.3 GiB of
-cache can free far more than 546K cells of index state costs). A conversation that TRULY cannot fit - the cache
-gave to its floor and the driver still refuses - fails at the room step with the line above, and the request ends
-`no VRAM is left` (503), never mid-map with a half-mapped state. The load's start step (`qsa_follow_start`, the
-pool builder) and the fallback's whole-context backing (`qsa_follow_back_whole`, `qsa_scores_back_whole`) keep
-mapping the driver's fresh chunks - no relief is installed at the load, and the fallback's numbers stay byte for
-byte (criterion D untouched). The lock rule stands: the room is taken OUTSIDE `g_slot_mu`/`g_scores_mu` (the
-relief takes the budget's lock), the map re-takes it; chunks the map never consumed go back to the driver.
-`qsa_follow_grow_at` still runs measure - room (+relief) - map as three lock-scoped steps (round 4's rule).
+Allocations examined and left as they are, with why: `qsa_slots_grow` (`layer.cpp:1548`, the slots' rings and pooled
+rows) takes no driver allocation at all - it only remaps chunks the slot budget holds, and the budget is filled by
+the same cache `give()` (`generate.cpp:13888`) that the `vram_relief` hook (`generate.cpp:18722`) drives, so its
+room arrives through the same giving path. `qsa_slots_grow_fresh` and the `*_back_whole` fallbacks are the load's
+start step and the feature-off fallback - no relief is installed at the load, and the fallback's numbers stay byte
+for byte (criterion D). `mtp.cpp:1445`'s records buffer already asks the relief before retrying. The load-time
+carves, head and drafters do not grow on use.
 
-## Finding 3 - the tests (`f8f6ff2c0`)
+## Finding 2 - the YaRN rows follow the POSITIONS IN USE (`33e462af7`) - and which sizing, said out
 
-* `src/core/vmm_grow_test.cpp` (new ctest module, header-only/CPU like `kv_host_growth_test`): a fake allocator
-  records the event order, and the card's order is asserted - with a short card, `give:` happens before `map:`
-  (give-way-before-map), the relief is asked EXACTLY once and for exactly the shortfall (`(need - made) * G`),
-  every chunk is held when the map starts, a room that never arrives maps NOTHING (no half-grown state),
-  `may_relief=false` (the load's start step) never asks, and a card with the room never asks - the experts keep
-  their room until a conversation needs it. The error-text half asserts the line carries the driver call and its
-  code, "776 MiB asked (388 chunks of 2 MiB)", "2.00 of 15.00 GiB free on the card" and the cache clause, and that
-  it never reads "no error" and never says RAM - with a recorded driver code and without one. 28 checks.
-* `serve/test_vram_refusal.py` (runs against the DEPLOYED `serve/qfn_engine.py`): "no VRAM is left..." →
-  `EngineOutOfVram` and not `EngineOutOfRam`, its text never says "no RAM"; "no RAM is left..." unchanged; an
-  ordinary ERR stays the request's. The same VRAM case was added to the QFN-side `test_vram_finish.py` - that
-  module cannot be imported in this checkout for a pre-existing reason unrelated to this round
-  (`engines/qfn/serve/server.py`'s `from serve import turbo_live` names the root package's module, so neither
-  sys.path order can satisfy it), which is why the runnable version lives at the root, next to the other
-  qfn_engine tests.
-* `scratch/card-test-elastic-kv.sh` (gitignored, the manager's copy): criterion F - the grow run IS the 546K
-  conversation (`GROW_TO` now defaults to 546145), and it must reach a DONE at 546145 with the ~10K needle
-  answered; the report blocks now grep the give-way line, the new failure lines and any "no error" (its presence
-  is the finding).
+**Which: "back them in chunks as the conversation grows", as a prefix over the positions the conversation has
+reached (+ a fixed 32768-token ahead-step) - not "the window in use".** Reason, from how the kernel reads them:
+`rope_tab_cs` (`include/strata/kernels/mrope.hpp:95-99`) reads row `p - kRopeYarnOff` for whatever position the
+current kernel is ROTATING, and a prompt re-read, a checkpoint reuse or the drafter's verify window can re-rotate
+any cell below the conversation's length - so the backed set must stay a gapless prefix [0, positions reached), and
+a per-window backing would leave holes that the next re-read reads as unmapped VMM. What it does NOT owe is
+positions the conversation has not reached:
+
+* `solo_yarn_rows` (`generate.cpp:21218`) sizes `min(request end, at + kSoloPinAhead) + 64`, `at` = the positions
+  in use at the call (the prompt `n` before a read, `21263`; the current cell `p` at a mid-reply crossing, `21238` -
+  the crossing window lands inside the ahead-step). The old `n + max_new + 64` was `--max-context` itself when
+  `max_new` runs to the end of the context: that is the card's "all 0.75 GiB at the switch".
+* the request-start fit (`generate.cpp:19541`) passes `rope_cells = solo_pin` (prompt + ahead-step, the number the
+  host   copies already use, `generate.cpp:19525`) to `session_vram_fit` (`session.cpp:297`) / `session_vram_need`
+  (`session.cpp:310`), which cap the rope grows with it - the K/V state still takes the whole request (the plan:
+  grow ahead of need once, at the read's start), the RoPE rows trail the positions.
+* past that, the rows arrive chunk by chunk from the fits that track the conversation - the decode's 32K-ahead pin
+  step (`generate.cpp:22492` -> `solo_host_fit_r` -> `session_host_fit`, whose rope step is `session.cpp:270`), the
+  batch slots' `slot_fit` grow target (`generate.cpp:14039` -> `session_slot_fit` `session.cpp:240-241`) and the
+  slot decode step (`yarn_fit` `generate.cpp:14519`, sized by the slot's own next cells).
+
+On the card's run: the switch backs ~546K+33K positions (a read from 0 needs every row it re-rotates, and 546K rows
+of cos+sin is what a 546K conversation costs - not the 1M table), the next 32K rows come with the reply's first
+32K tokens, each step through the cache's give-way, and `qsa_rope_yarn_trim` still hands all of it back when no YaRN
+conversation is live.
+
+## Finding 3 - the tests, for each growth allocation (`0434ba69d`)
+
+`src/core/vmm_grow_test.cpp` (the module the card names - run ALONE) now covers BOTH room paths, and its header
+lists which growth allocation runs which (table above). Five new cases for the pooled path: the budget's chunks are
+taken whole and cost the driver and the cache nothing ("unused room the experts already hold"); budget, then
+driver, then the relief asked ONCE for the SHORTFALL after the budget, `give:` before `map:` - event by event, the
+YaRN switch's order; a room that never arrives maps NOTHING and reports `from_pool` so the caller gives the
+budget's chunks back; `may_relief=false` never asks; a need of 0 touches nothing. 44 checks (the round-6 28 pass
+word for word). The pooled case caught a real bug in the helper fix 1 added: `vmm_grow_room` sized its one relief
+ask by `got.size()`, which the pooled path seeds with the budget's chunks - a grow whose budget part landed and
+whose card part refused asked the cache for ZERO bytes and died; the ask is now `need - chunks THIS call made`
+(the plain path's numbers are unchanged - its `got` starts empty).
 
 ## The nits
 
-* Taken (`59c4c6688`, `374bac012`): the two map failures that quoted nothing - `qsa_slots_grow`'s "mapping N
-  chunks failed" and the take-back's "could not map its chunks back" - and `ExpertCache`'s load-map line, which
-  claimed "out of memory" whatever the driver said, now quote `vmm_last_error()`.
-* Not taken: the rope grow (`qsa_rope_grow`) keeps its own per-chunk relief loop - it already holds its chunks
-  (it cannot lie the way the probe did), and rewriting it now would move the RoPE path the round-5 card has not
-  faulted; KMEM/HMEM stay --batch-budget-gated (round 4's stated gap, untouched here).
+* Taken (`12dc848fb`): `serve`'s `engine_refusal` matched only "no VRAM is left", so `ERR no VRAM for the YaRN RoPE
+  rows` - the very line this card hit - stayed an ordinary request error; "no VRAM for..." now ends as
+  `EngineOutOfVram` too (retry once / 503), `serve/test_vram_refusal.py` gains the case, `serve/qfn_engine.py`
+  re-extracted with `tools/saguaro/extract_qfn_engine.py`, never hand-edited.
+* Taken (`df1adca13`): the rope/YaRN grows record `qsa_dev_pin_failed()` (see finding 1).
+* Not taken: a per-window YaRN backing (the card's "or"); finding 2 says why - the kernel reads rows for any
+  position a later window re-rotates, so only the prefix rule is safe without hooking every window.
 
 ## Verification
 
-* `cmake -S engines/qfn -B scratch/build-p124e-r6 -G Ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+* `cmake -S engines/qfn -B scratch/build-p124e-r7 -G Ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
   -DCMAKE_CUDA_ARCHITECTURES=75 -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_CONVERSATION_TESTS=ON
-  -DSTRATA_MMQ_TQ_OVERLAY=OFF -DSTRATA_GGML_DIR=$PWD/scratch/ggml-pinned`; `ninja -C scratch/build-p124e-r6` ->
-  442/442, `saguaro-qfn` links. The only warnings in the touched files are the pre-existing ones the round-5
-  report lists (layer.cpp's indentation/unused-var set, generate.cpp's `w`); nothing new from
-  `vmm.cpp`/`vmm_grow.hpp`/`vmm_grow_test.cpp`/`expert_cache.cpp`. No GPU was touched (`sm_75` objects only).
-* `ctest --test-dir scratch/build-p124e-r6 -R '^kv_host_growth_test$'` run ALONE (the module the plan names) ->
-  passed, "22 checks OK" - its sizing helpers did not change; `ctest ... -R '^vmm_grow_test$'` run ALONE (the
-  module this round's card names) -> passed, "28 checks OK";
-  `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_vram_refusal` -> 3/3 OK. One at a time, nothing else
-  run.
-* No GPU here, so the card keeps the proof: `scratch/card-test-elastic-kv.sh` criterion F on mortar is the
-  acceptance of finding 2 (546K answers, needle found, cache gave way, no "no error", and - if it ever fails
-  again - a line that says which driver call refused, for how much, with how much free, and what the cache gave).
-  `serve/qfn_engine.py`'s diff is only the `engine_refusal`/`VRAM_SHORT` change, re-extracted, never hand-edited.
+  -DSTRATA_MMQ_TQ_OVERLAY=OFF -DSTRATA_GGML_DIR=$PWD/scratch/ggml-pinned`; `ninja -C scratch/build-p124e-r7` ->
+  268/268, `saguaro-qfn` links, `sm_75` objects only, no GPU run. The warnings in the touched files are exactly the
+  pre-existing set the round-5 report lists (layer.cpp's indentation/unused-var pair, generate.cpp's `w`); nothing
+  new from the rope/session/test changes.
+* `ctest --test-dir scratch/build-p124e-r7 -R '^vmm_grow_test$'` run ALONE -> passed, "44 checks OK";
+  `ctest ... -R '^kv_host_growth_test$'` run ALONE -> passed, "22 checks OK" (its helpers did not change);
+  `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_vram_refusal` -> 4/4 OK. One at a time, nothing else run.
+* No GPU here, so the card keeps the proof: `scratch/card-test-elastic-kv.sh` (gitignored, the manager's copy) gained
+  criterion G - the 546K run's log must show the YaRN rows climbing step by step (NOT 1048576 at the switch), each
+  step preceded by the cache's give on a full card, no `ERR no VRAM for the YaRN RoPE rows` anywhere, and the
+  round-7 load/speed figures of the card unchanged.
