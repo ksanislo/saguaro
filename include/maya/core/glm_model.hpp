@@ -782,9 +782,13 @@ public:
     /// size, not what the context allows - the Context card's and the VRAM line's honest figure, re-read when re-printed.
     uint64_t kv_host_bytes() const;
     /// P125g: the bound conversations' pinned host copies, every part, given back now (each part's stream synced
-    /// first; a part whose sync failed keeps its pins).  PARKING: called when a conversation's state has been saved
-    /// to a slot, so its host copy costs pinned RAM for nothing until it comes back (the hooks re-pin what it
-    /// restores).  Nothing else in the engine's life gives a still-bound conversation back.
+    /// first; a part whose sync failed keeps its pins).  PARKING: call this only from a park that DETACHES the
+    /// conversation - its context is released right after (seq_release) or the engine is shutting down, so the slot
+    /// is the conversation's only copy (its return re-pins what it restores).  A park the conversation continues
+    /// from - the system-prompt slot saved mid-read, a checkpoint continuation, a paused request - must NOT give it
+    /// back: while the conversation stays bound the host copy is the authoritative latent store (the VRAM slots are
+    /// only a cache and nothing writes rows back into it), and a released arena re-pins ZERO-FILLED, so the whole
+    /// written past would read as zeros for every later host read.
     void kv_pinned_release();
     /// ... and its block reads since the start, every part summed: those the selections named, those read from RAM
     struct KvStreamStats {

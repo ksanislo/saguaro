@@ -1131,10 +1131,13 @@ uint64_t Glm5Model::kv_host_bytes() const {   // the same walk as kv_stream_stat
 }
 
 // P125g (give-back, parking): every part's bound conversation's pinned host copy, given back now.  The serve loop
-// calls this once a conversation's state has landed in a slot: from then on the slot is the live copy, the host
-// arena's granules would only be held for a conversation that is not running, and its return re-pins what it
-// restores (slot_load's hook, then the per-position ones).  A part whose stream sync fails keeps its pins - an
-// engine that cannot say the device is idle must not unregister memory under it.
+// calls this only from a slot_put that DETACHES the conversation (its context is released right after, or the engine
+// is shutting down): from then on the slot is the live copy, the host arena's granules would only be held for a
+// conversation that is no longer running, and its return re-pins what it restores (slot_load's hook, then the
+// per-position ones).  A park the conversation keeps running in must NOT call this: the host copy is the
+// authoritative one (the VRAM slots are a cache, never written back) and a re-pin lands zero-filled.
+// A part whose stream sync fails keeps its pins - an engine that cannot say the device is idle must not unregister
+// memory under it.
 void Glm5Model::kv_pinned_release() {
     int cur = 0;
     cudaGetDevice(&cur);
