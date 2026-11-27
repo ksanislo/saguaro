@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 from serve.frontend import ChatTemplate
-from serve.server import ByteTokenizer, EngineDied, EngineStuck, MockEngine, Service, StrataEngine, serve
+from serve.server import (ENGINE_KILL_WAIT_S, ByteTokenizer, EngineDied, EngineStuck, MockEngine, Service, StrataEngine,
+                          serve)
 
 
 class ResidentEngine(StrataEngine):
@@ -72,13 +73,14 @@ class Lifecycle(unittest.TestCase):
                 self.assertTrue(engine.ended)
                 self.assertIsNone(engine.progress)
                 self.assertEqual(engine.last, {})
-                if running:
-                    proc.terminate.assert_called_once()
-                    proc.wait.assert_called_once_with(timeout=5)
+                if running:                             # the engine ignores SIGTERM (P125d): QUIT failing goes to kill
+                    proc.terminate.assert_not_called()
+                    proc.kill.assert_called_once()
+                    proc.wait.assert_called_once_with(timeout=ENGINE_KILL_WAIT_S)
                 else:
                     proc.terminate.assert_not_called()
                     proc.wait.assert_not_called()
-                proc.kill.assert_not_called()
+                    proc.kill.assert_not_called()
                 engine.close()                          # repeated cleanup is harmless
 
     def test_close_sends_eof_before_waiting_for_windows_reader(self):
@@ -102,20 +104,22 @@ class Lifecycle(unittest.TestCase):
         with self.assertRaisesRegex(EngineStuck, "still releasing"):
             engine.close()
         self.assertIs(engine.proc, proc)
-        proc.terminate.assert_called_once()
+        proc.terminate.assert_not_called()              # the engine ignores SIGTERM: QUIT, then kill (P125d)
         proc.kill.assert_called_once()
 
-    def test_close_terminates_before_it_kills(self):
-        # an engine that does not end on QUIT is terminated first (as the unload always did); kill is the last resort
+    def test_close_kills_an_engine_that_ignores_quit(self):
+        # P125d: the engine ignores SIGTERM in --serve, so a QUIT that ran out goes straight to SIGKILL - terminate
+        # was a wait that could not succeed
         engine = StrataEngine("missing-executable", [], lazy=True)
         proc = mock.Mock()
         proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
         proc.poll.side_effect = [None, 0]
-        proc.wait.side_effect = [subprocess.TimeoutExpired("engine", 20), 0]
+        proc.wait.side_effect = [subprocess.TimeoutExpired("engine", 15), 0]
         engine.proc = proc
         engine.close()
-        proc.terminate.assert_called_once()
-        proc.kill.assert_not_called()
+        proc.terminate.assert_not_called()
+        proc.kill.assert_called_once()
+        proc.wait.assert_called_with(timeout=ENGINE_KILL_WAIT_S)
         self.assertIsNone(engine.proc)
 
     def test_native_lazy_constructor_does_not_start_a_process(self):
