@@ -518,11 +518,15 @@ engines/qfn is our own port of Strata (its own CMake project; `serve/qfn_engine.
     Gain: reads +4.9 % (10.5K) / +1.9 % (33.9K) with DENSE_F32 on a P40 (ref/reports/REPORT-p40-batch.md:45-46).
     Bit-exact: `gemm_f32_parity` 5,201 sizes all bitwise against that cuBLAS 12.0
     (ref/reports/REPORT-p40-batch.md:34) - re-run it if CUDA changes.
-15. **Turbo: drop is applied, skip is not.** Why: the request-level Turbo (Settings > Turbo) is a GLM feature; the QFN
-    engine parses both. Where: `turbo_key()` and the refusal line in
-    `engines/qfn/src/program/generate.cpp:main`. Switch and default: request keys `turbo_drop=N`
-    (`turbo_drop_apply`, `src/core/verify.cpp`) and `turbo_skip=ssd|ram`, the latter logged as "this engine applies
-    only drop" (generate.cpp:18776). Gain: not measured on QFN. Answer-changing for drop; skip is inert.
+ 15. **Turbo: drop and skip, per request.** Why: the request-level Turbo (the chat's bolt, Settings > Turbo, live)
+     is a GLM feature; the QFN engine applies both since its s1 skip. Where: `turbo_drop_apply`
+     (`src/core/verify.cpp`) for drop; for skip the wire value is translated to the kernel bar once in
+     `turbo_skip_of` (`include/strata/program/turbo_skip.hpp`), the pick is left out by the residency table (and
+     the RAM mirror for `ssd`), and the engine reports `INFO turbo_skip=1` (generate.cpp:12707) so the page
+     offers Skip - a build from before it parses the key and leaves it off, which is the only case the page
+     hides the choice for; what still runs exact (re-pick on, no residency table, `ssd` without a RAM-tier
+     fact) says so once. Switch and default: request keys `turbo_drop=N` and `turbo_skip=ssd|ram`, both off.
+     Gain: not measured on QFN. Answer-changing for both when on; absent/off is the exact line, bit for bit.
 16. **Measured, exact, and left off** (near-misses kept in the ledger for a future pairing):
     `SAGUARO_SM75_Q8G_ROWS=4` (config-only; 77K reads -0.08 %, solo +0.61 % - no ship, ref/PERF-LEDGER.md:789-791) and
     the Q8_0 dense row kernels of branch pr/qfn-q8rows-sm75 (0.77x on the 1-column head, ~1 % of decode; the build

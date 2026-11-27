@@ -3,15 +3,20 @@
 Every model Maya runs adds a row to the release checks. Three tools keep a release from getting slower as that list
 grows: only the models a change can reach get the full checks, the expected answers are saved once per release instead
 of being re-derived, and the long part runs unattended every night, so on release day the table is already there.
+A fourth (section 4) keeps a load from holding memory that no context is using.
 
 | Tool | What it answers | Needs a GPU |
 |---|---|---|
 | `tools/maya_changed.py <previous release tag>` | which models need the FULL checks, which a SMOKE check, what to build | no |
 | `tools/maya_golden.py` | are this build's greedy answers the ones the release gave, and if not, where they part | yes (one `--bench`) |
 | `tools/maya_nightly.py` | per machine and model, every night: answers and speed against the previous release | yes |
+| `tools/mem_vs_ctx.py <config>` | does the model hold the same memory at load whatever `--max-context` says | yes (two loads) |
+| `tools/refresh_prices.py` | before cutting the release: refill the shipped Saved-line price fallback `data/api-prices.json` from OpenRouter's public model list (the file's `match`, `api`, `peak` and ids stay as written; docs/SETTINGS.md) | no |
 
-All three sit on `./saguaro.sh --bench` (the speed-test standard: quiet machine, GPU lock, warm-up, 3 answers of 256
-tokens, the 2K / 8K prompts, greedy, thinking off) and on the config the setup wrote - never a hand-written one.
+The first three sit on `./saguaro.sh --bench` (the speed-test standard: quiet machine, GPU lock, warm-up, 3 answers of
+256 tokens, the 2K / 8K prompts, greedy, thinking off, and after them 1 / 2 / 4 different 2K prompts sent together
+within the config's places - the total tok/s and each answer's own, queueing included, `--bench-parallel off` skips
+that section) and on the config the setup wrote - never a hand-written one.
 
 ## 1. What changed -> what to test
 
@@ -169,6 +174,42 @@ Windows, Task Scheduler (one line, from an administrator prompt; adjust the fold
 schtasks /Create /TN "Maya nightly" /SC DAILY /ST 03:30 /TR "cmd /c cd /d C:\maya && git pull -q --ff-only && cmake --build build --config Release && .venv\Scripts\python.exe tools\maya_nightly.py --once >> saguaro-nightly-task.log 2>&1"
 ```
 
+## 4. Memory at load must not depend on --max-context (1.2.4)
+
+Context not in use costs nothing: starting the same model at two context sizes must hold the same memory.
+QFN broke it - it pinned host K/V for the whole max at load - and only a box short on RAM made it visible, so
+this check runs **per engine on the smallest-RAM machine available that still runs the model - never only on
+a big one** that would absorb the problem:
+
+```
+python3 tools/mem_vs_ctx.py saguaro-inkling-2-mini.json                     # 32768 vs 262144
+python3 tools/mem_vs_ctx.py saguaro-qfn-1m.json --contexts 262144,1048576   # the sizes that broke QFN
+```
+
+For each context the tool starts the server from a copy of the config (its own port, session dir and engine
+log, no api key, `--max-context` set to that value), waits for `/health` ok, and records the pinned RAM **two
+ways** (1.2.4t): `VmLck`+`VmPin` summed over every process of the server's tree, and host-wide - the rise of
+`/proc/meminfo` Mlocked + Unevictable + Shmem between before the start and after `/health` ok, since ROCm/CUDA
+page-locked memory often lands in no process's `VmLck` (the 1.2.4 run printed 0.0 pinned everywhere while the
+engines logged "68.00 GiB page-locked"); both are shown, the rule judges on the larger. Plus the RSS, the GPU
+memory used (nvidia-smi or rocm-smi, whichever the box has, over the config's cards) and the engine's own K/V
+and expert budget lines, *read into placement figures* (1.2.4t): the experts in the VRAM cache ("1729 in the
+GPU cache", "every expert in VRAM (3072 copied", "N of M experts in VRAM", "(N of M in VRAM)"), the experts in
+RAM / pinned, the GB left for the expert pool (GLM's "VRAM before the expert pool"), and the pinned RAM the
+engine declares ("the latent cache in 2.95 GB of pinned RAM"); then it stops the run and starts the next. PASS
+when every memory figure differs by less than max(2%, 256 MiB) between the contexts and no placement figure by
+more than 2% - the placement rule is what catches Inkling's "every expert in VRAM (3072)" at 32768 becoming
+"offload: 0 of 3072 experts in VRAM" at 262144 behind equal GPU totals; FAIL names the difference furthest
+past its limit; the run copies (config, logs) stay under `scratch/mem-vs-ctx/<config>/` for the person to
+read. Run it on a **quiet machine** like every bench
+above: the host-wide pinned row and the GPU row are box-wide readings, so a neighbour job that starts between
+the two loads can move them and flip the verdict. One side effect: every load records "the config
+that worked last", so after a run a later failed start on that machine offers `scratch/mem-vs-ctx/<config>/...`
+as the config to start again - starting your own config overwrites the note.
+
+**QFN fails this check until the elastic K/V work (P124e) lands** - its FAIL line is the known state, not a
+new regression; record its figures either way. Every other engine must PASS on every machine it releases on.
+
 ## How a release uses it
 
 1. `python tools/maya_changed.py <previous tag>` -> the FULL / SMOKE plan, the builds, the suites.
@@ -188,6 +229,15 @@ What still needs a person:
 - A `DIFF` that is meant (an answer-changing fix): decide, then capture again.
 - The loop test, vision, tool calls, long context (32K and the deep points), the dashboard - the bench's requests do
   not cover them.
+- Every install's page, on every machine: `python3 tools/page_check.py http://127.0.0.1:<port>` - it loads the page
+  in headless chromium and fails on any uncaught error or console error, or when neither the shell nor the loading
+  screen draws (1.2.2 shipped a page that died on load while every API smoke passed - none of them opened the page).
+  Where a machine uses llama-swap, the page of the install it runs as well - that server's own port, with
+  llama-swap holding it loaded (the page only answers while the Saguaro runs); `--key-file <the install's key file>`
+  proves the install's key against `/v1/models` too (the page renders without it - the app asks inside). A PC with
+  no chromium prints SKIP and exits 0: open that page by hand there.
+- The load-memory check: `python3 tools/mem_vs_ctx.py <config>` per engine, on the smallest-RAM machine that
+  runs the model - never only on a big one (section 4; QFN's FAIL is the known state until P124e lands).
 - Sampling: the saved answers are greedy; nothing here checks the sampler.
 - Machines without a nightly yet, AMD on Windows, and any layout a machine's list does not name.
 - The release decision itself.

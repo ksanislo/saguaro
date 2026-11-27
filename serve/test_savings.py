@@ -1,8 +1,10 @@
 """serve/test_savings.py - the sidebar's "Saved": each request's tokens counted per model (new prompt, prompt reused
 from the cache, output), kept across starts, and priced at the model's own API (DeepSeek's peak hours at twice its
-price) - against the mock engine, no GPU.  And the prices themselves: data/api-prices.json, the newer copy fetched
-from GitHub once a day when the Savings page asks, and the precedence the page's own prices > fetched > file >
-built-ins.  urllib is mocked throughout: nothing here touches the network.
+price) - against the mock engine, no GPU.  And the prices themselves: the shipped table of data/api-prices.json, the
+OpenRouter list fetched once a day on a background thread when the user turns live_prices on (off by default: a
+default install dials nothing, ever), and the precedence the page's own prices > OpenRouter > shipped > built-ins.
+urllib is mocked throughout: nothing here touches the network; the OpenRouter answer is
+serve/testdata/openrouter-models-sample.json, a real response cut to our models.
 
     python -m unittest serve.test_savings -v
 """
@@ -14,6 +16,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -28,6 +31,14 @@ from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 UTC = lambda *a: calendar.timegm((*a, 0, 0, 0))   # noqa: E731  (year, month, day, hour, minute, second)
 TUE_OFF, TUE_PEAK, SAT = UTC(2026, 10, 27, 12, 0, 0), UTC(2026, 10, 27, 2, 30, 0), UTC(2026, 10, 31, 2, 30, 0)
+SAMPLE_TEXT = (ROOT / "serve" / "testdata" / "openrouter-models-sample.json").read_text(encoding="utf-8")   # a real OpenRouter answer
+REAL_OPEN = urllib.request.urlopen    # (the test's own client, kept out of the way of tests that patch urlopen)
+
+
+def answered(text=None):
+    r = mock.MagicMock()
+    r.__enter__.return_value.read.return_value = (SAMPLE_TEXT if text is None else text).encode()
+    return r
 
 
 class Prices(unittest.TestCase):
@@ -36,16 +47,36 @@ class Prices(unittest.TestCase):
         self.assertEqual(SV.reference("glm-5.3-flash")["output"], 0.50)
         mm = SV.reference("minimax-m3.1-flash")                       # (MiniMax's: flat, no peak hours)
         self.assertEqual((mm["api"], mm["input"], mm["cached"], mm["output"], mm.get("peak")),
-                         ("MiniMax", 0.15, 0.015, 0.60, None))
+                         ("MiniMax", 0.075, 0.0075, 0.30, None))
         self.assertEqual(SV.reference("MiniMax-M3.1-Flash")["api"], "MiniMax")
         hy = SV.reference("hy4-flash")                                # (Tencent's: flat, no peak hours)
         self.assertEqual((hy["api"], hy["input"], hy["cached"], hy["output"], hy.get("peak")),
-                         ("Tencent", 0.07, 0.003, 0.281, None))
+                         ("Tencent", 0.035, 0.0015, 0.1405, None))
         for name in ("Hy4-Flash", "tencent/Hy4-flash", "hy4_flash", "Hy4-Flash-Maya-GGUF"):
             self.assertEqual((SV.reference(name) or {}).get("api"), "Tencent", name)
         for name in ("why4-flash", "hy4", "hy4-pro"):
             self.assertIsNone(SV.reference(name), name)
-        self.assertIsNone(SV.reference("qwen3.8-flash-next"))
+        q = SV.reference("Qwen3.8-Flash-Next-UD-Q4_K_XL")             # (every quant of the family has the same API)
+        self.assertEqual((q["api"], q["input"], q["cached"], q["output"]), ("Qwen", 0.15, 0.016, 0.47))
+        ik = SV.reference("Inkling-2-Mini-UD-Q4_K_XL")
+        self.assertEqual((ik["api"], ik["input"], ik["cached"], ik["output"]), ("Thinking Machines", 0.075, 0.015, 0.30))
+        for name in ("qwen3.9-flash", "inkling-3-mini"):
+            self.assertIsNone(SV.reference(name), name)
+
+    def test_openrouter_ids(self):
+        """"openrouter" per family: the built-ins and data/api-prices.json name the same ids, and the built-ins
+        carry every price the shipped file does (tools/refresh_prices.py and the live fetch map by these)."""
+        doc = SV.load_price_file(SV.ROOT / "data" / SV.PRICE_FILE)
+        self.assertIsNotNone(doc)
+        by_id = {p["openrouter"]: (name, p) for name, p in doc["prices"].items()}
+        self.assertEqual(len(by_id), len(doc["prices"]))               # (no family listed twice)
+        for ref in SV.REFERENCES:
+            name, p = by_id[ref["openrouter"]]
+            for k in ("input", "cached", "output", "peak", "api"):
+                self.assertEqual(p.get(k), ref.get(k), f"{name}.{k}")  # (the fallback and the file agree)
+        self.assertEqual(set(p["openrouter"] for p in SV.REFERENCES),
+                         {"deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash", "minimax/minimax-m3.1-flash",
+                          "tencent/hy4-flash", "qwen/qwen3.8-flash", "thinkingmachines/inkling-2-mini"})
 
     def test_peak_hours(self):
         self.assertTrue(SV.deepseek_peak(TUE_PEAK))
@@ -70,11 +101,8 @@ class Counting(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / SV.FILE
-        self.off = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"})    # (a report asks for prices: not here)
-        self.off.start()
 
     def tearDown(self):
-        self.off.stop()
         self.tmp.cleanup()
 
     def test_kept_across_starts_and_per_model(self):
@@ -99,11 +127,11 @@ class Counting(unittest.TestCase):
         h.add(1_000_000, 400_000, 100_000, now=TUE_PEAK)              # (Tencent has no peak hours: the base price)
         s = h.summary()
         self.assertTrue(s["priced"])
-        self.assertAlmostEqual(s["start_usd"], 0.6 * 0.07 + 0.4 * 0.003 + 0.1 * 0.281, places=6)
+        self.assertAlmostEqual(s["start_usd"], 0.6 * 0.035 + 0.4 * 0.0015 + 0.1 * 0.1405, places=6)
         self.assertEqual(h.report()["prices"][0]["api"], "Tencent")
 
     def test_reused_never_above_the_prompt_and_unknown_models(self):
-        q = SV.Ledger(self.path, "x.json", "qwen3.8-flash-next")
+        q = SV.Ledger(self.path, "x.json", "no-such-model-9000")
         q.add(100, 500, 10)
         self.assertEqual(q.report()["models"][0]["tokens"]["cached"], 100)
         self.assertEqual(q.summary(), {"usd": 0.0, "start_usd": 0.0, "priced": False})
@@ -128,9 +156,10 @@ class Counting(unittest.TestCase):
         a.set_price("deepseek-v4.1-flash", None)                        # (back to the built-in ones)
         self.assertAlmostEqual(a.summary()["usd"], 0.75, places=6)
         # a model without a built-in price can get one; nonsense is refused with nothing changed
-        q = SV.Ledger(self.path, "maya-q.json", "qwen3.8-flash-next")
+        q = SV.Ledger(self.path, "maya-q.json", "no-such-model-9000")
         q.add(2_000_000, 0, 0)
-        q.set_price("qwen3.8-flash-next", {"input": 0.5, "cached": 0.05, "output": 1})
+        self.assertIsNone(q.price("no-such-model-9000"))               # (unpriced until the page gives it one)
+        q.set_price("no-such-model-9000", {"input": 0.5, "cached": 0.05, "output": 1})
         self.assertAlmostEqual(q.report()["start"]["usd"], 1.0, places=6)
         for bad in ({"input": -1, "cached": 0, "output": 0}, {"input": "1", "cached": 0, "output": 0}, {"input": 1},
                     {"input": 1, "cached": 0, "output": 0, "peak": 0.5}):
@@ -169,13 +198,10 @@ class Page(unittest.TestCase):
                            ChatTemplate(ROOT / "serve/chat_template.jinja"), model_name="glm-5.3-flash")
         self.tmp = tempfile.TemporaryDirectory()
         self.svc.savings = SV.Ledger(Path(self.tmp.name) / SV.FILE, "maya-maya-m.json", "glm-5.3-flash", "Maya-M")
-        self.off = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"})    # (the page reads prices: no fetching in tests)
-        self.off.start()
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
     def tearDown(self):
-        self.off.stop()
         self.httpd.shutdown()
         self.httpd.server_close()
         self.tmp.cleanup()
@@ -186,7 +212,7 @@ class Page(unittest.TestCase):
         r = urllib.request.Request(self.base + path, method=method, headers=h,
                                    data=json.dumps(body).encode() if body is not None else None)
         try:
-            with urllib.request.urlopen(r, timeout=30) as resp:
+            with REAL_OPEN(r, timeout=30) as resp:      # (REAL_OPEN: a test may patch urlopen to fake OpenRouter)
                 return resp.status, json.loads(resp.read())
         except urllib.error.HTTPError as e:
             with e:
@@ -225,22 +251,43 @@ class Page(unittest.TestCase):
         s, r = self.req("POST", "/api/savings/reset", {})
         self.assertEqual((s, r["usd"]), (200, 0.0))
 
+    def test_the_live_switch_from_the_page(self):
+        """POST /api/savings/live: the Settings switch (its own page only); the report answers with the new state;
+        on starts the daily path - a mock answer here, never the network."""
+        self.assertFalse(self.req("GET", "/api/savings")[1]["live"])            # (off by default)
+        with mock.patch.object(SV.urllib.request, "urlopen", return_value=answered()) as net:
+            s, r = self.req("POST", "/api/savings/live", {"live": True})
+            self.assertEqual((s, r["live"]), (200, True))
+            self.svc.savings.book.thread.join(10)
+            net.assert_called_once()
+            s, r = self.req("POST", "/api/savings/live", {"live": False})
+            self.assertEqual((s, r["live"]), (200, False))
+        s, _ = self.req("POST", "/api/savings/live", {"live": "yes"})
+        self.assertEqual(s, 400)
+        s, _ = self.req("POST", "/api/savings/live", {"live": True}, {"Origin": "http://elsewhere.example"})
+        self.assertEqual(s, 403)
+
+    def test_the_live_switch_refused_while_the_environment_says_no(self):
+        """An explicit SAGUARO_LIVE_PRICES=0 wins at runtime too: the endpoint answers 400 with the reason, the
+        setting stays off and the daily path never starts."""
+        with mock.patch.dict(os.environ, {"SAGUARO_LIVE_PRICES": "0"}):
+            s, b = self.req("POST", "/api/savings/live", {"live": True})
+        self.assertEqual(s, 400)
+        self.assertIn("SAGUARO_LIVE_PRICES", b["error"]["message"])
+        self.assertFalse(self.req("GET", "/api/savings")[1]["live"])
+
 
 class PriceFiles(unittest.TestCase):
-    """The default prices: the page's own > a fetched api-prices.json (valid, newer as_of) > data/api-prices.json >
-    the built-ins.  A file that does not check out is ignored with one log line; the fetch runs at most once a day,
-    only when the Savings page asks, and SAGUARO_UPDATE_CHECK=0 keeps it off."""
+    """The shipped table: the page's own prices > data/api-prices.json > the built-ins.  A file that does not check
+    out is ignored with one log line; nothing here fetches anything."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.repo_file = self.tmp / "api-prices.json"                # (in place of the checkout's data/api-prices.json)
-        self.save = self.tmp / "savings"                             # (the ledger's folder: the cache lives here too)
+        self.save = self.tmp / "savings"                             # (the ledger's folder)
         self.save.mkdir()
-        self.off = mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "0"})    # (no test fetches: each one says "1" itself)
-        self.off.start()
 
     def tearDown(self):
-        self.off.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     @staticmethod
@@ -251,12 +298,6 @@ class PriceFiles(unittest.TestCase):
     def ledger(self):
         return SV.Ledger(self.save / SV.FILE, "maya-maya-m.json", "glm-5.3-flash",
                          prices=SV.PriceBook(self.save, self.repo_file))
-
-    @staticmethod
-    def answered(text):
-        r = mock.MagicMock()
-        r.__enter__.return_value.read.return_value = text.encode()
-        return r
 
     def test_precedence_page_file_builtins(self):
         led = self.ledger()
@@ -269,61 +310,6 @@ class PriceFiles(unittest.TestCase):
         self.assertEqual(led.price("glm-5.3-flash")["input"], 0.5)              # (the page beats the file)
         led.set_price("glm-5.3-flash", None)
         self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)             # (back to the file's)
-
-    def test_the_fetch_once_a_day_and_only_a_newer_file_wins(self):
-        self.repo_file.write_text(self.text("2026-10", 0.10))
-        led = self.ledger()
-        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
-                mock.patch.object(SV.urllib.request, "urlopen", return_value=self.answered(self.text("2026-11", 0.99))) as net:
-            rep = led.report()
-            self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)         # (fetched beats this folder's own)
-            self.assertEqual(rep["prices_source"], {"from": "github", "as_of": "2026-11"})
-            self.assertEqual(json.loads((self.save / SV.PRICE_FILE).read_text())["as_of"], "2026-11")   # (cached for the next start)
-            req = net.call_args[0][0]
-            self.assertRegex(req.full_url, r"raw\.githubusercontent\.com/[\w.-]+/[\w.-]+/main/data/api-prices\.json$")
-            led.report()                                                        # (once a day, not on every page load)
-            net.assert_called_once()
-
-    def test_a_fetched_copy_that_is_not_newer_does_not_move_the_prices(self):
-        self.repo_file.write_text(self.text("2026-11", 0.99))
-        led = self.ledger()
-        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
-                mock.patch.object(SV.urllib.request, "urlopen", return_value=self.answered(self.text("2026-10", 0.10))):
-            rep = led.report()
-        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)
-        self.assertEqual(rep["prices_source"], {"from": "file", "as_of": "2026-11"})
-
-    def test_yesterdays_cached_copy_is_used_at_the_start(self):
-        self.repo_file.write_text(self.text("2026-10", 0.10))
-        (self.save / SV.PRICE_FILE).write_text(self.text("2026-11", 0.99))
-        self.assertEqual(self.ledger().price("glm-5.3-flash")["input"], 0.99)   # (fetched yesterday, still the newer)
-        (self.save / SV.PRICE_FILE).write_text(self.text("2026-09", 0.07))      # (older than the folder's own: not used)
-        self.assertEqual(self.ledger().price("glm-5.3-flash")["input"], 0.10)
-
-    def test_the_fetch_is_off_when_the_user_said_no_requests(self):
-        self.repo_file.write_text(self.text())
-        led = self.ledger()
-        with mock.patch.object(SV.urllib.request, "urlopen") as net:            # (SAGUARO_UPDATE_CHECK=0 from setUp)
-            rep = led.report()
-        net.assert_not_called()
-        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)
-        self.assertEqual(rep["prices_source"], {"from": "file", "as_of": "2026-11"})
-
-    def test_a_network_error_falls_back_to_the_file_and_the_builtins(self):
-        self.repo_file.write_text(self.text("2026-11", 0.99))
-        led = self.ledger()
-        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
-                mock.patch.object(SV.urllib.request, "urlopen", side_effect=OSError("offline")):
-            rep = led.report()
-        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)             # (the disk file counts meanwhile)
-        self.assertEqual(rep["prices_source"], {"from": "file", "as_of": "2026-11"})
-        self.assertIn("offline", led.book.error)
-        led2 = SV.Ledger(self.save / SV.FILE, "k.json", "glm-5.3-flash",
-                         prices=SV.PriceBook(self.save, self.tmp / "no-such-file.json"))   # (and no file at all)
-        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
-                mock.patch.object(SV.urllib.request, "urlopen", side_effect=urllib.error.URLError("no route")):
-            led2.report()
-        self.assertEqual(led2.price("glm-5.3-flash")["input"], 0.15)            # (the built-ins, again)
 
     def test_a_bad_price_file_is_ignored_with_one_log_line(self):
         import io
@@ -341,20 +327,331 @@ class PriceFiles(unittest.TestCase):
             self.assertEqual(led.price("glm-5.3-flash")["input"], 0.15, text)   # (the built-ins count)
         self.assertEqual(out.getvalue().count("ignored"), len(bad))
 
-    def test_fetched_junk_is_ignored_with_one_log_line(self):
+
+class OpenRouterPrices(unittest.TestCase):
+    """The live prices: OpenRouter's public model list (no key; nothing about the user in the request), fetched at
+    most once a day on a background thread when live_prices is on - off by default, so a default install dials
+    nothing, ever.  The cache lies beside the count, with its fetch time; on any failure the cache or the shipped
+    table counts, with one log line.  The answer here is the sample, never the network."""
+
+    SAMPLE = json.loads(SAMPLE_TEXT)
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo_file = self.tmp / "api-prices.json"                # (the shipped fallback, with prices of its own)
+        self.save = self.tmp / "savings"                             # (the ledger's folder: the cache lives here too)
+        self.save.mkdir()
+        self.env = mock.patch.dict(os.environ, {"SAGUARO_LIVE_PRICES": ""})     # (nothing ambient: the config decides)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def text(as_of="2026-11", inp=0.99):
+        return json.dumps({"as_of": as_of, "prices":
+                           {"glm-5.3-flash": {"api": "Z.ai", "input": inp, "cached": 0.03, "output": 0.5}}})
+
+    def ledger(self, live=False, config=None):
+        return SV.Ledger(self.save / SV.FILE, "maya-maya-m.json", "glm-5.3-flash",
+                         prices=SV.PriceBook(self.save, self.repo_file, live=live), config=config, live=live)
+
+    def write_cache(self, doc, fetched):
+        (self.save / SV.LIVE_FILE).write_text(json.dumps({"fetched": fetched, "as_of": doc["as_of"],
+                                                          "prices": doc["prices"]}))
+        os.utime(self.save / SV.LIVE_FILE, (fetched, fetched))
+
+    def test_per_million_converts_the_per_token_string_exactly(self):
+        self.assertEqual(SV.per_million("0.000000075"), 0.075)        # (float(...) * 1e6 would give 0.07500000000000001)
+        self.assertEqual(SV.per_million("0.0000001405"), 0.1405)
+        self.assertEqual(SV.per_million(" 0.0000000015 "), 0.0015)
+        self.assertEqual(SV.per_million("0"), 0.0)
+        for bad in ("-", "free", "", None, "0.0000001x"):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                SV.per_million(bad)
+
+    def test_the_sample_parses_and_maps_every_family(self):
+        doc, why = SV.parse_openrouter(json.dumps(self.SAMPLE), SV.price_families(None))   # (the built-in families)
+        self.assertIsNone(why)
+        self.assertEqual({k: (v["input"], v["cached"], v["output"]) for k, v in doc["prices"].items()},
+                         {"DeepSeek": (0.15, 0.003, 0.6), "Z.ai": (0.15, 0.03, 0.5),
+                          "MiniMax": (0.075, 0.0075, 0.3), "Tencent": (0.035, 0.0015, 0.1405),
+                          "Qwen": (0.15, 0.016, 0.47), "Thinking Machines": (0.075, 0.015, 0.3)})
+        # (a family the shipped file does not name is keyed by the built-in's api name, which its match regex does
+        # not fit: the peak factor still has to come through - the price shown is the one the shipped table gives)
+        self.assertEqual(doc["prices"]["DeepSeek"]["peak"], 2.0)
+        self.assertIsNone(doc["prices"]["Z.ai"].get("peak"))
+        # with the shipped file read, the families carry the file's names (and its DeepSeek peak factor stays)
+        fam = SV.price_families(SV.parse_price_file((ROOT / "data" / SV.PRICE_FILE).read_text(encoding="utf-8"))[0])
+        doc, why = SV.parse_openrouter(json.dumps(self.SAMPLE), fam)
+        self.assertIsNone(why)
+        self.assertEqual({k: (v["input"], v["cached"], v["output"]) for k, v in doc["prices"].items()},
+                         {"deepseek-v4.1-flash": (0.15, 0.003, 0.6), "glm-5.3-flash": (0.15, 0.03, 0.5),
+                          "minimax-m3.1-flash": (0.075, 0.0075, 0.3), "hy4-flash": (0.035, 0.0015, 0.1405),
+                          "qwen3.8-flash": (0.15, 0.016, 0.47), "inkling-2-mini": (0.075, 0.015, 0.3)})
+        self.assertEqual(doc["prices"]["deepseek-v4.1-flash"]["peak"], 2.0)   # (peak hours stay ours: the list shows the base)
+        self.assertEqual({v["openrouter"] for v in doc["prices"].values()},
+                         {r["openrouter"] for r in SV.REFERENCES})            # (the mapping, end to end)
+        self.assertEqual(doc["as_of"], time.strftime("%Y-%m-%d", time.gmtime()))
+
+    def test_deepseeks_peak_survives_a_shipped_file_that_cannot_be_read(self):
+        """Live on with data/api-prices.json gone: the DeepSeek family is keyed by the built-in's api name, and the
+        price counted is still the one the shipped table gives - peak hours and all."""
         import io
         from contextlib import redirect_stdout
-        self.repo_file.write_text(self.text("2026-11", 0.99))
-        led = self.ledger()
+        self.repo_file.write_text("{not json")                            # (the shipped file cannot be read)
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {"SAGUARO_UPDATE_CHECK": "1"}), \
-                mock.patch.object(SV.urllib.request, "urlopen", return_value=self.answered("<html>not a price file</html>")), \
-                redirect_stdout(out):
+        with mock.patch.object(SV.urllib.request, "urlopen",
+                               return_value=answered(json.dumps(self.SAMPLE))), redirect_stdout(out):
+            led = SV.Ledger(self.save / SV.FILE, "maya-ds.json", "deepseek-v4.1-flash",
+                            prices=SV.PriceBook(self.save, self.repo_file, live=True))
+            led.book.thread.join(10)
+        self.assertEqual(out.getvalue().count("ignored"), 1)               # (the one line for the broken file)
+        ref = led.price("deepseek-v4.1-flash")
+        self.assertEqual((ref["input"], ref["output"]), (0.15, 0.60))      # (OpenRouter's, from the sample)
+        self.assertEqual(ref["peak"], 2.0)                                 # (the shipped table's peak factor stays)
+        led.add(1_000_000, 0, 0, now=TUE_PEAK)
+        self.assertAlmostEqual(led.summary()["start_usd"], 2 * 0.15, places=6)   # (peak hours: counted twice)
+
+    def test_a_list_that_holds_none_of_ours_is_refused(self):
+        doc, why = SV.parse_openrouter(json.dumps({"data": [{"id": "other/thing", "pricing": {}}]}),
+                                       SV.price_families(None))
+        self.assertIsNone(doc)
+        self.assertIn("none of our models", why)
+
+    def test_off_by_default_nothing_is_ever_fetched(self):
+        self.repo_file.write_text(self.text())
+        led = self.ledger()                                            # (the default: no live_prices anywhere)
+        with mock.patch.object(SV.urllib.request, "urlopen") as net:
+            led.add(1_000_000, 0, 0)
+            rep = led.report()
             led.report()
-        self.assertEqual(out.getvalue().count("ignored"), 1)
-        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)             # (the disk file still counts)
-        self.assertFalse((self.save / SV.PRICE_FILE).exists())                  # (the good cache is not overwritten)
+        net.assert_not_called()
+        self.assertFalse(rep["live"])
+        self.assertEqual(rep["prices_source"]["from"], "built-in")     # (the Savings line: built-in prices, <release>)
+        self.assertEqual(rep["prices_source"]["release"], (ROOT / "VERSION").read_text().strip())
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)    # (the shipped table counts)
+
+    def test_on_fetches_once_a_day_on_a_thread_and_caches_with_its_time(self):
+        self.repo_file.write_text(self.text("2026-10", 0.10))
+        with mock.patch.object(SV.urllib.request, "urlopen",
+                               return_value=answered(json.dumps(self.SAMPLE))) as net:
+            led = self.ledger(live=True)                               # (the start: the cache is older, so fetch)
+            self.assertIsNotNone(led.book.thread)                      # ... on a thread: the start did not wait
+            led.book.thread.join(10)
+            self.assertEqual(led.price("glm-5.3-flash")["input"], 0.15)    # (OpenRouter's beat the shipped table)
+            self.assertEqual(led.price("Qwen3.8-Flash-Next-UD-Q4_K_XL")["output"], 0.47)
+            self.assertEqual(led.price("Inkling-2-Mini-UD-Q4_K_XL")["input"], 0.075)
+            rep = led.report()                                         # (the page asks again: not a second fetch)
+        net.assert_called_once()
+        self.assertRegex(net.call_args[0][0].full_url, r"^https://openrouter\.ai/api/v1/models$")
+        self.assertTrue(rep["live"])
+        self.assertEqual(rep["prices_source"]["from"], "openrouter")   # (the Savings line: OpenRouter, <date>)
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        self.assertEqual(rep["prices_source"]["date"], today)
+        self.assertEqual(rep["prices_as_of"], today)
+        cached = json.loads((self.save / SV.LIVE_FILE).read_text())    # (cached beside the count, with its fetch time)
+        self.assertAlmostEqual(cached["fetched"], time.time(), delta=30)
+        self.assertEqual(cached["as_of"], today)
+        led2 = SV.Ledger(self.save / SV.FILE, "maya-maya-m.json", "glm-5.3-flash",
+                         prices=SV.PriceBook(self.save, self.repo_file, live=True))
+        self.assertIsNone(led2.book.thread)                            # (a start with a fresh cache dials nothing)
+        self.assertEqual(led2.price("glm-5.3-flash")["input"], 0.15)   # ... and counts from the cache
+
+    def test_a_day_old_cache_is_refetched_at_the_start(self):
+        old = time.time() - 2 * 86400
+        doc, _ = SV.parse_openrouter(json.dumps(self.SAMPLE), SV.price_families(None), old)
+        self.write_cache(doc, old)
+        self.repo_file.write_text(self.text())
+        with mock.patch.object(SV.urllib.request, "urlopen",
+                               return_value=answered(json.dumps(self.SAMPLE))) as net:
+            led = self.ledger(live=True)
+            self.assertIsNotNone(led.book.thread)
+            led.book.thread.join(10)
+        net.assert_called_once()
+
+    def test_a_network_failure_keeps_the_cache_and_logs_one_line(self):
+        import io
+        from contextlib import redirect_stdout
+        doc, _ = SV.parse_openrouter(json.dumps(self.SAMPLE), SV.price_families(None), time.time() - 86400)
+        self.write_cache(doc, time.time() - 86400)                     # (yesterday's fetch; a new day: fetch again)
+        self.repo_file.write_text(self.text())
+        out = io.StringIO()
+        with mock.patch.object(SV.urllib.request, "urlopen", side_effect=OSError("offline")), redirect_stdout(out):
+            led = self.ledger(live=True)
+            led.book.thread.join(10)
+        self.assertEqual(out.getvalue().count("the OpenRouter prices did not come"), 1)
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.15)    # (yesterday's cache goes on counting)
+        self.assertEqual(led.report()["prices_source"]["from"], "openrouter")
+        self.assertIn("offline", led.book.error)
+
+    def test_a_failure_without_a_cache_keeps_the_shipped_table(self):
+        import io
+        from contextlib import redirect_stdout
+        self.repo_file.write_text(self.text())
+        out = io.StringIO()
+        with mock.patch.object(SV.urllib.request, "urlopen", side_effect=urllib.error.URLError("no route")), \
+                redirect_stdout(out):
+            led = self.ledger(live=True)
+            led.book.thread.join(10)
+        self.assertEqual(out.getvalue().count("the OpenRouter prices did not come"), 1)
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)    # (the shipped table)
+        self.assertEqual(led.report()["prices_source"]["from"], "built-in")
+        self.assertFalse((self.save / SV.LIVE_FILE).exists())          # (nothing was cached)
+
+    def test_a_junk_answer_is_refused_with_one_log_line_and_not_cached(self):
+        import io
+        from contextlib import redirect_stdout
+        self.repo_file.write_text(self.text())
+        out = io.StringIO()
+        with mock.patch.object(SV.urllib.request, "urlopen",
+                               return_value=answered("<html>not the model list</html>")), redirect_stdout(out):
+            led = self.ledger(live=True)
+            led.book.thread.join(10)
+            rep = led.report()
+        self.assertEqual(out.getvalue().count("the OpenRouter prices did not come"), 1)
+        self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)    # (the shipped table still counts)
+        self.assertEqual(rep["prices_source"]["from"], "built-in")
+        self.assertFalse((self.save / SV.LIVE_FILE).exists())
+
+    def test_turning_it_off_leaves_only_the_shipped_table(self):
+        doc, _ = SV.parse_openrouter(json.dumps(self.SAMPLE), SV.price_families(None))
+        self.write_cache(doc, time.time())                             # (a fresh cache from an on spell)
+        self.repo_file.write_text(self.text())
+        with mock.patch.object(SV.urllib.request, "urlopen") as net:
+            led = self.ledger(live=True)
+            self.assertEqual(led.price("glm-5.3-flash")["input"], 0.15)
+            led.set_live(False)
+            self.assertEqual(led.price("glm-5.3-flash")["input"], 0.99)    # (shipped table only)
+            rep = led.report()
+        net.assert_not_called()
+        self.assertEqual(rep["prices_source"]["from"], "built-in")
+
+    def test_the_setting_and_its_priority(self):
+        self.assertFalse(SV.live_enabled(None, {}))                            # (off by default: nothing leaves the box)
+        self.assertIsNone(SV.env_live({}))                                     # (says nothing: the config decides)
+        self.assertIs(SV.env_live({"SAGUARO_LIVE_PRICES": "0"}), False)
+        self.assertIs(SV.env_live({"SAGUARO_LIVE_PRICES": "on"}), True)
+        self.assertFalse(SV.live_enabled(True, {"SAGUARO_LIVE_PRICES": "0"}))  # (the env beats the run config)
+        self.assertTrue(SV.live_enabled(False, {"SAGUARO_LIVE_PRICES": "1"}))
+        self.assertTrue(SV.live_enabled(True, {"SAGUARO_LIVE_PRICES": ""}))    # (empty: the config decides)
+        self.assertTrue(SV.live_enabled(True, {}))
+        cfg = self.tmp / "maya-maya-m.json"
+        cfg.write_text(json.dumps({"model_name": "glm-5.3-flash"}))
+        led = self.ledger(config=cfg)
+        self.assertFalse(led.book.live)
+        with mock.patch.object(SV.urllib.request, "urlopen",
+                               return_value=answered(json.dumps(self.SAMPLE))) as net:
+            led.set_live(True)                                                 # (the Settings switch)
+            self.assertTrue(led.book.live)
+            self.assertEqual(json.loads(cfg.read_text())["live_prices"], True) # (saved: the next start keeps it)
+            self.assertIsNotNone(led.book.thread)                              # (and the daily path starts at once)
+            led.book.thread.join(10)
+            led.set_live(False)
+            self.assertEqual(json.loads(cfg.read_text())["live_prices"], False)
+            led.book.start()
+        net.assert_called_once()                                               # (the off spell dials nothing after)
+
+    def test_the_off_start_touches_nothing_of_the_live_cache(self):
+        """A default (off) start does not read the live cache at all: a corrupt leftover says nothing, and the
+        page turning the setting on reads it back - a fresh one counts at once, with no fetch."""
+        import io
+        from contextlib import redirect_stdout
+        (self.save / SV.LIVE_FILE).write_text("{not the cache")             # (a corrupt leftover from an on spell)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            led = self.ledger()                                             # (off, the default)
+        self.assertEqual(out.getvalue(), "")                                 # (no "price cache ... ignored" line)
+        self.assertIsNone(led.book.live_doc)
+        self.write_cache({"as_of": "2026-11-25", "prices":
+                          {"glm-5.3-flash": {"input": 0.2, "cached": 0.02, "output": 0.6}}}, time.time())
+        with mock.patch.object(SV.urllib.request, "urlopen") as net:
+            led.set_live(True)                                               # (the page's switch: the cache reads back)
+            led.report()
+            self.assertEqual(led.price("glm-5.3-flash")["input"], 0.2)       # (the on spell's fetch counts again)
+        net.assert_not_called()                                              # (a fresh cache: nothing dialled yet)
+        self.assertEqual(led.report()["prices_source"]["from"], "openrouter")
+
+    def test_the_environment_beats_the_switch_while_running(self):
+        """SAGUARO_LIVE_PRICES=0 is not only the start's answer: the page's switch cannot override it either, and a
+        refused request starts no fetch and writes nothing; an env that agrees with the page works as before."""
+        cfg = self.tmp / "maya-maya-m.json"
+        cfg.write_text(json.dumps({"model_name": "glm-5.3-flash"}))
+        led = self.ledger(config=cfg)
+        with mock.patch.dict(os.environ, {"SAGUARO_LIVE_PRICES": "0"}), \
+                mock.patch.object(SV.urllib.request, "urlopen") as net:
+            with self.assertRaises(ValueError, msg="the env says no, the switch says yes"):
+                led.set_live(True)                                             # (the explicit env "no" wins at runtime)
+            self.assertFalse(led.book.live)
+            self.assertNotIn("live_prices", json.loads(cfg.read_text()))       # (the run config untouched)
+            net.assert_not_called()
+        with mock.patch.dict(os.environ, {"SAGUARO_LIVE_PRICES": "1"}), \
+                mock.patch.object(SV.urllib.request, "urlopen", return_value=answered()) as net:
+            led.set_live(True)                                                 # (env and page agree: it works)
+            led.book.thread.join(10)
+            with self.assertRaises(ValueError, msg="the env says yes, the switch says no"):
+                led.set_live(False)                                            # (and the same the other way)
+            self.assertTrue(led.book.live)
+        self.assertTrue(json.loads(cfg.read_text())["live_prices"])            # (saved while they agreed)
+        net.assert_called_once()                                               # (one fetch; the refused one dialled nothing)
+
+    def test_a_page_turns_it_on_through_the_server(self):
+        """POST /api/savings/live: the Settings switch, its own page only; the report answers with the new state."""
+        cfg = self.tmp / "maya-maya-m.json"
+        cfg.write_text(json.dumps({"model_name": "glm-5.3-flash"}))
+        led = self.ledger(config=cfg)
+        self.assertFalse(led.report()["live"])
+        with mock.patch.object(SV.urllib.request, "urlopen",
+                               return_value=answered(json.dumps(self.SAMPLE))):
+            led.set_live(True)
+            led.book.thread.join(10)
+            rep = led.report()
+        self.assertTrue(rep["live"])
+        self.assertEqual(rep["prices_source"]["from"], "openrouter")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenamedConfigs(unittest.TestCase):
+    """C122 renamed maya-<x>.json to saguaro-<x>.json without moving the ledger's entry (and an older rename had left
+    maya-maya-<x>.json): a start under the new name folds the older names' counts into it, once."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / SV.FILE
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_older_names_fold_into_the_new_one(self):
+        band = lambda i, o, n: {"base": {"input": i, "cached": 0, "output": o, "requests": n},
+                                "peak": {"input": 0, "cached": 0, "output": 0, "requests": 0}}
+        doc = {"since": 100.0, "prices": {}, "models": {
+            "maya-maya-l-hip.json": {"since": 100.0, "model": "glm-5.3-flash", "bands": band(10, 1, 1)},
+            "maya-l-hip.json": {"since": 200.0, "model": "glm-5.3-flash", "bands": band(29328, 1204, 13)},
+            "saguaro-l-hip.json": {"since": 300.0, "model": "glm-5.3-flash", "bands": band(21512, 320, 8)},
+            "maya-s-v2-iq2_xxs-hip.json": {"since": 150.0, "model": "glm-5.3-flash", "bands": band(5, 5, 1)},
+            "maya-other.json": {"since": 120.0, "model": "another-model", "bands": band(7, 7, 1)}}}
+        self.path.write_text(json.dumps(doc), encoding="utf-8")
+        SV.Ledger(self.path, "saguaro-l-hip.json", "glm-5.3-flash", "Maya-L")
+        m = json.loads(self.path.read_text(encoding="utf-8"))["models"]
+        self.assertNotIn("maya-l-hip.json", m)
+        self.assertNotIn("maya-maya-l-hip.json", m)
+        self.assertEqual(m["saguaro-l-hip.json"]["bands"]["base"],
+                         {"input": 10 + 29328 + 21512, "cached": 0, "output": 1 + 1204 + 320, "requests": 22})
+        self.assertEqual(m["saguaro-l-hip.json"]["since"], 100.0)          # (the earliest)
+        self.assertIn("maya-s-v2-iq2_xxs-hip.json", m)                    # (another config of the same model: kept)
+        self.assertIn("maya-other.json", m)
+
+    def test_a_second_start_changes_nothing(self):
+        self.path.write_text(json.dumps({"since": 1.0, "prices": {}, "models": {
+            "maya-l-hip.json": {"since": 1.0, "model": "glm-5.3-flash", "bands": {"base": {"input": 5}}}}}), encoding="utf-8")
+        SV.Ledger(self.path, "saguaro-l-hip.json", "glm-5.3-flash")
+        first = self.path.read_text(encoding="utf-8")
+        SV.Ledger(self.path, "saguaro-l-hip.json", "glm-5.3-flash")
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["models"]["saguaro-l-hip.json"]["bands"]["base"]["input"], 5)
+        self.assertEqual(json.loads(first)["models"].keys(), json.loads(self.path.read_text(encoding="utf-8"))["models"].keys())

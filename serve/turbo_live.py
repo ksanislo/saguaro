@@ -62,15 +62,3 @@ def turbo_keys(sampling):
     if t.get("skip", "off") != "off":
         keys += f" turbo_skip={t['skip']}"
     return keys
-
-
-def turbo_badge(turbo):
-    """The Monitor's badge text for a request's Turbo options ("" when off)."""
-    if not isinstance(turbo, dict):
-        return ""
-    parts = []
-    if turbo.get("drop"):
-        parts.append(f"-{turbo['drop']} experts")
-    if turbo.get("skip", "off") != "off":
-        parts.append({"ssd": "no SSD", "ram": "VRAM only"}.get(turbo["skip"], turbo["skip"]))
-    return " · ".join(parts)

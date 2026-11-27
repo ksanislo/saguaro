@@ -37,6 +37,8 @@
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/park_policy.hpp"
 #include "strata/core/park_release.hpp"
+#include "strata/core/resident_policy.hpp"
+#include "strata/core/vram_policy.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/foresight_swap.hpp"
@@ -821,6 +823,8 @@ struct Options {
     std::string session_dir;            // --session-dir: parked conversations persisted, one file each (session_dir.hpp)
     int64_t session_dir_files = 64, session_dir_gib = 64, session_dir_days = 7;
     double session_dir_delay_s = -1.0;   // not given: 2 s with appending session files, else 30
+    double session_dir_exit_s = 10.0;    // --session-dir-exit-s: the whole exit-time save gets this long (P125d);
+                                         // past it the rest is skipped: the conversations stay saved from their last turn
     bool conversation_cache_pool = false;   // --conversation-cache-mib auto / SAGUARO_PARK_MIB=auto: the shared pool
     int64_t session_dir_preload_mib = 0;   // 0: lazy - a file is read only when a request continues it
     int conversation_cache_slots = 4;
@@ -1008,7 +1012,10 @@ void usage() {
                  "                       after the start, newest first, up to MIB (default 0 = lazy only).\n"
                  "                       The least recently used files (written or resumed) go first when the folder\n"
                  "                       is over --session-dir-gib G (64) or --session-dir-files N (64); a file unused\n"
-                 "                       for --session-dir-days D (7) goes in any case.\n"
+                  "                       for --session-dir-days D (7) goes in any case.  The exit-time save gets\n"
+                  "                       --session-dir-exit-s S (10): past it the rest is skipped and the queued\n"
+                  "                       writes dropped - what is on disk stays what the last turn left, and the\n"
+                  "                       exit is never blocked by the save.\n"
                  "  --conversation-cache-slots N  --serve: at most N parked conversations (default 4)\n"
                  "  --conversation-cache-min-free-mib N  --serve: RAM floor (under MemAvailable, the cgroup limits and\n"
                  "                       --memory-limit-mib) when parking, saving or restoring a session (default 2560)\n"
@@ -1862,12 +1869,9 @@ bool launch_blocking() {
 /// #2065: the VRAM free when the current request began (-1 before the first); the stall report prints it, because a
 /// card this full is the one measured cause of a window that never finishes (the driver pages GPU memory).
 std::atomic<int64_t> g_req_vram_free_mib{-1};
-constexpr int64_t kVramSafeMib =
-#ifdef _WIN32
-    1024;   // WDDM pages instead of failing (docs/DETAILS.md, the sysmem fallback): the line #2065 fell below
-#else
-    512;
-#endif
+// WDDM pages instead of failing (docs/DETAILS.md, the sysmem fallback): the line #2065 fell below.  P124x: the
+// one source of the figure - vram_policy.hpp's floor is what the expert cache now also sizes against.
+constexpr int64_t kVramSafeMib = strata::core::vram::safe_floor_mib();
 
 void stall_report(std::FILE* f, uint64_t layers_during) {
     strata::core::Progress& p = strata::core::progress();
@@ -3126,6 +3130,7 @@ int main(int argc, char** argv) {
         else if (a == "--session-dir-gib") o.session_dir_gib = std::max(1LL, std::atoll(next("--session-dir-gib")));
         else if (a == "--session-dir-days") o.session_dir_days = std::max(1LL, std::atoll(next("--session-dir-days")));
         else if (a == "--session-dir-delay") o.session_dir_delay_s = std::max(0.0, std::atof(next("--session-dir-delay")));
+        else if (a == "--session-dir-exit-s") o.session_dir_exit_s = std::max(0.0, std::atof(next("--session-dir-exit-s")));
         else if (a == "--session-dir-preload") o.session_dir_preload_mib = std::max(0LL, std::atoll(next("--session-dir-preload")));
         else if (a == "--prompt-cache-every") o.prompt_cache_every = std::max(0LL, std::atoll(next("--prompt-cache-every")));
         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
@@ -6493,6 +6498,50 @@ int main(int argc, char** argv) {
     }
     strata::core::ArenaExpertSource arena_src;
     strata::core::ExpertSource* srcp = nullptr;
+    // P124x (a): the resident tier keeps a real margin beside it (resident_policy.hpp).  `--resident-budget-gib`
+    // names what the tier may pin; the shared K/V pool (the live streamed K/V and the parked conversations, one
+    // budget), the turn-save captures it bounds and the host's own working set - OS, harness, and the page cache
+    // the file tier reads through - have to fit in what is left.  On a 96 GB host the asked 68 GiB reached 89 GiB
+    // of RSS, 2-5 GiB of swap and 100k+ major faults before the aborts (mortar, 2026-11-24); a budget that keeps
+    // the margin is untouched, one that does not is cut to it, said.  SAGUARO_RESIDENT_BUDGET_CAP=0 keeps the
+    // asked budget as it is (rule (a)'s knob, review N2 - (b) has SAGUARO_VRAM_RESERVE_FLOOR=0 and (c)
+    // SAGUARO_PARK_SWAP_MIB=0; rule (d) has no operator knob, its switch is the recovered note itself): an
+    // operator who measured the box wins.  Parsed strictly (re-review L2): only exactly "0" turns the cap
+    // off - atoi read "off", "no" and every typo as 0 and silenced the rule that exists to save the box.
+    static const bool resident_cap_off = [] { const char* v = std::getenv("SAGUARO_RESIDENT_BUDGET_CAP");
+                                              return v != nullptr && std::string(v) == "0"; }();
+    if (o.resident_budget > 0 && !resident_cap_off) {
+        const uint64_t host_total = strata::platform::total_physical_memory();
+        const uint64_t kv_pool = strata::core::qsa_kv_bytes_per_cell(g) *
+                                 (uint64_t) std::max<int64_t>(0, g.n_qsa_layers()) * (uint64_t) o.max_context *
+                                 (uint64_t) std::max(o.batch, 1);
+        const uint64_t cap = strata::core::resident::budget_cap(host_total, kv_pool);
+        if (host_total > 0 && o.resident_budget > cap) {
+            if (cap == 0)
+                // the tightest hosts: there is no budget that fits.  Said loudly and the asked figure kept -
+                // clamping to zero would silently flip the box out of the resident mode its setup named (N2)
+                std::fprintf(stderr, "saguaro generate: resident budget: this %.2f GiB host has no room for any tier beside "
+                                     "its K/V pool and captures (%.2f GiB) and the host's own margin (%.2f GiB): "
+                                     "--resident-budget-gib %.2f is kept as asked, but a host this full swaps every expert "
+                                     "read - shrink --max-context/--batch, or give the box more RAM (P124x)\n",
+                             (double) host_total / 1073741824.0,
+                             (double) strata::core::resident::runtime_bytes(kv_pool) / 1073741824.0,
+                             (double) strata::core::resident::host_margin_bytes(host_total) / 1073741824.0,
+                             (double) o.resident_budget / 1073741824.0);
+            else {
+                std::fprintf(stderr, "saguaro generate: resident budget: %.2f GiB of this host's %.2f GiB are kept for the tier, "
+                                     "not the %.2f GiB asked (--resident-budget-gib): the K/V pool and its captures take %.2f "
+                                     "GiB beside it and the host keeps %.2f GiB for itself, its other programs and the file "
+                                     "tier's page cache - a host with no margin swaps every expert read (P124x; "
+                                     "SAGUARO_RESIDENT_BUDGET_CAP=0 keeps the asked budget)\n",
+                             (double) cap / 1073741824.0, (double) host_total / 1073741824.0,
+                             (double) o.resident_budget / 1073741824.0,
+                             (double) strata::core::resident::runtime_bytes(kv_pool) / 1073741824.0,
+                             (double) strata::core::resident::host_margin_bytes(host_total) / 1073741824.0);
+                o.resident_budget = cap;
+            }
+        }
+    }
     if (o.mmap_experts) {
         // FileExpertSource maps the pack's experts.bin: a canonical pack has it; a native (IQ) pack has it when
         // built with `tools/iq_pack.py --experts-bin` (the per-layer blob sizes of its layout, PR #121).  The low-RAM
@@ -6932,6 +6981,55 @@ int main(int argc, char** argv) {
             }
 #endif
         }
+        // P124x (b): the same paging shape on Linux/ROCm, and the same lesson as #1376: the reserve the cache is
+        // sized against is spent by what the engine allocates after the cache (the window captures, the per-slot
+        // MTP heads, the driver's slack), and the engine's own #2065 line - kVramSafeMib, the "LOW:" the stall
+        // report prints - was a label with nothing sizing against it.  The mortar box kept the given 700 MiB,
+        // reached 416-432 MiB free at request start ten of its eleven aborts, and the driver paged GPU memory into
+        // a host RAM the expert tier had already filled.  On auto sizing, a ROCm DISCRETE card of 15 GiB and up
+        // (the #1709 figure) keeps at least the floor plus the measured slack (vram_policy.hpp); an integrated
+        // APU is left alone - its "total VRAM" is a window into system RAM (GTT), the #1709 threshold was measured
+        // on discrete cards, and the UMA block above sizes for that different shape (review N3).  A bigger reserve
+        // is kept as it is, a given one included - a reserve this side of the floor is what ended the engine, so
+        // this floor, unlike #496's, does not step back for `--vram-reserve-mib` below it.  Its own knob
+        // (re-review M1): SAGUARO_VRAM_RESERVE_FLOOR=0 skips the floor and keeps the reserve as it was given
+        // (or the default), for an operator who stays on auto sizing but measured a smaller reserve to fit.
+        // What it promises is what the CACHE is sized against here: on a card too full for even the smallest
+        // working cache at the floored reserve, #496's lowering below may still take the reserve toward
+        // kSmallReserveMib - said in its own line, never silently (re-review L1).  The cache size changes no
+        // output bit.  Linux/HIP only (re-review L3): the first cut ran the card probe on CUDA builds too,
+        // where the floor never raises - it asked the card for two figures and cleared a pending
+        // cudaGetLastError() for nothing.  Windows keeps kWddmAutoReserveMib above (the #1376 path), CUDA's
+        // free figure measures honest with the same reserve (#1376's A/B arm), and vram_policy_test still
+        // drives the header's CUDA/Windows arms directly.
+#if defined(STRATA_USE_HIP) && !defined(_WIN32)
+        {
+            const char* floor_env = std::getenv("SAGUARO_VRAM_RESERVE_FLOOR");
+            const bool floor_on = floor_env == nullptr || std::string(floor_env) != "0";
+            const int asked = o.vram_reserve_mib;
+            int floored = asked;
+            if (floor_on) {
+                size_t fb_now = 0, tb_now = 0;
+                const uint64_t total_vram = cudaMemGetInfo(&fb_now, &tb_now) == cudaSuccess ? tb_now : 0;
+                cudaDeviceProp rsv_p{};
+                int rsv_dev = 0;
+                const bool rsv_integrated = cudaGetDevice(&rsv_dev) == cudaSuccess &&
+                                            cudaGetDeviceProperties(&rsv_p, rsv_dev) == cudaSuccess && rsv_p.integrated != 0;
+                (void) cudaGetLastError();
+                floored = strata::core::vram::hip_auto_reserve_mib(true, false, rsv_integrated, total_vram, asked);
+            }
+            if (floored > asked) {
+                std::fprintf(stderr, "saguaro generate: expert cache auto: the reserve stays at least %d MiB on this ROCm "
+                                     "card, not the %d MiB %s: the window captures and the drafter's heads take about half "
+                                     "of it after the cache, and below the 512 MiB paging line the driver pages GPU memory "
+                                     "to a full host RAM and windows never finish (#2065, P124x); --expert-cache N sizes "
+                                     "the cache by hand, SAGUARO_VRAM_RESERVE_FLOOR=0 keeps the reserve as asked, and a "
+                                     "card too full for any working cache at it may still see the #496 line lower it\n",
+                             floored, asked, o.vram_reserve_given ? "it was asked for" : "it is the default");
+                o.vram_reserve_mib = floored;
+            }
+        }
+#endif
         const int64_t prefill_mib = owned_prefill_mib();
         // the draft layer's head and logits are allocated when it binds, after this: 0.1.27's CJK subset made them
         // ~110-180 MiB larger, and out of the reserve they left 16 GB cards below the stall line (#199)
@@ -8453,24 +8551,31 @@ int main(int argc, char** argv) {
     //
     // PLAN-qfn-per-request-read-stats (per-request read progress, output only - appended key=value fields, so a
     // server that does not know them reads the old positional fields exactly as before):
-    //   `PP <position> <prompt_tokens> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id>` - new_read is THIS request's
-    //   tokens read so far, counted from where this read started (the reused / restored / parked prefix never
-    //   counts), and read_ms the time this request's read has actually been running: not the waits between prompt
-    //   pieces (the slots' decode share, a yield hold), not the restore, not any queue time.  <ms> keeps its old
-    //   meaning (wall time since the request began) for servers that use it.
-    //   `RDONE rid=<id> new=<n> ms=<ms>` once per read, at its end - after the last part read, or before the DONE of
-    //   a read that ends early (cancel, BYIELD, no VRAM): the exact new tokens for this request's read (the DONE's
-    //   prompt - reused, or the clamped count when a cancel stopped it part-way) over its own read time.  The batch
-    //   path's equivalent is its `BRA <slot> 1 prompt= reused= read_ms=` line, unchanged.
-    // PLAN-u5-read-heartbeat (the read reports its progress about every second, like decode does - output only,
-    // printed from host points between layer passes / pipe pieces / KV staging passes, at most one line per ~1 s
-    // per reading request, so a one-chunk read, a long first chunk or a read mostly busy staging its K/V from
-    // RAM no longer looks frozen until it ends):
+    //   `PP <position> <prompt_tokens> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id> [stage_ms=<ms>]` - new_read is
+    //   THIS request's tokens read so far, counted from where this read started (the reused / restored / parked
+    //   prefix never counts), and read_ms the time this request's read has actually been running: not the waits
+    //   between prompt pieces (the slots' decode share, a yield hold), not the restore, not any queue time.  <ms>
+    //   keeps its old meaning (wall time since the request began) for servers that use it.  stage_ms (P124v,
+    //   PLAN-p124v-read-rate): the part of read_ms the read spent staging its K/V (copying the reused prefix in
+    //   from RAM) rather than reading new tokens - a read's TRUE read time is read_ms - stage_ms, and a server
+    //   that divides the read's tokens by read_ms alone reads a restored read as a fraction of its real speed.
+    //   `RDONE rid=<id> new=<n> ms=<ms> [stage_ms=<ms>]` once per read, at its end - after the last part read, or
+    //   before the DONE of a read that ends early (cancel, BYIELD, no VRAM): the exact new tokens for this
+    //   request's read (the DONE's prompt - reused, or the clamped count when a cancel stopped it part-way) over
+    //   its own read time.  The batch path's equivalent is its `BRA <slot> 1 prompt= reused= read_ms= [stage_ms=]`
+    //   line, unchanged otherwise.
+    // PLAN-u5-read-heartbeat + PLAN-p124v-read-rate (the read reports its progress at a steady cadence - four
+    // lines a second or so, like decode does - output only, printed from host points between layer passes / pipe
+    // pieces / KV staging passes, at most one line per ~0.23 s per reading request, so a one-chunk read, a long
+    // first chunk or a read mostly busy staging its K/V from RAM no longer looks frozen until it ends and the
+    // server's rate of it is a live figure, not a per-chunk jump):
     //   `RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-    //        pass=<i>/<n> ms=<read ms>` - stage: the reused prefix is being copied host->VRAM, read: new tokens
-    //   are being read; done / new count from where THIS read started (never a reused / restored / parked
-    //   prefix); pass is the current host pass (layer pass of the chunk, or piece of the plan between pieces) of
-    //   their total; ms is this request's own read time (the PP lines' read_ms).  The batch path prints
+    //        pass=<i>/<n> ms=<read ms> [stage_ms=<ms>]` - stage: the reused prefix is being copied host->VRAM,
+    //   read: new tokens are being read; done / new count from where THIS read started (never a reused / restored
+    //   / parked prefix); pass is the current host pass (layer pass of the chunk, or piece of the plan between
+    //   pieces) of their total; ms is this request's own read time (the PP lines' read_ms) and stage_ms the part
+    //   of it spent staging (attributed host point by host point - a close figure on one card, an approximation
+    //   across a split's pipeline, and the driver floors ms - stage_ms at 0).  The batch path prints
     //   `rid=0` with an appended `slot=<b>` (its BRP / BRA lines' slot); a batched shared chunk reports each
     //   reading slot on its own line.  U5b (PLAN-u5b-split-progress): `done` is ONE figure per reading request,
     //   shared by every host point of that read - the new tokens whose reading is complete over all the layer
@@ -10715,6 +10820,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             park_lim.severe_bytes = (uint64_t) o.conversation_cache_min_free_mib << 20;
             park_lim.psi = env_num("SAGUARO_PARK_PSI", 10.0);
             park_lim.idle_s = env_num("SAGUARO_PARK_IDLE_S", 0.0);
+            park_lim.swap_bytes = (uint64_t) env_num("SAGUARO_PARK_SWAP_MIB", 256.0) << 20;
             if (o.conversation_cache_pool) {
                 // one pool with the live K/V: every batch slot at --max-context (the solo session alone without --batch)
                 const uint64_t per_token = strata::core::qsa_kv_bytes_per_cell(g) * (uint64_t) std::max<int64_t>(0, g.n_qsa_layers());
@@ -10724,18 +10830,29 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (o.serve && o.conversation_cache_mib > 0)
                 std::fprintf(stderr, "saguaro serve: conversation cache: %s%lld MiB for up to %d parked conversations; they "
-                                     "leave when available RAM is under %lld MiB%s%s, unsaved ones only under %lld MiB\n",
+                                     "leave when available RAM is under %lld MiB%s%s%s, unsaved ones only under %lld MiB\n",
                              o.conversation_cache_pool ? "one pool with the live K/V (--max-context x batch slots), " : "",
                              (long long) o.conversation_cache_mib, o.conversation_cache_slots,
                              (long long) (park_lim.free_bytes >> 20),
                              park_lim.psi > 0 ? (" or memory stalls pass " + std::to_string(park_lim.psi).substr(0, 5)).c_str() : "",
+                             park_lim.swap_bytes > 0
+                                 ? (", or swap in use passes " + std::to_string(park_lim.swap_bytes >> 20) +
+                                     " MiB (P124x)").c_str()
+                                 : "",
                              park_lim.idle_s > 0 ? (", or after " + std::to_string((long long) park_lim.idle_s) + " s idle").c_str() : "",
                              (long long) o.conversation_cache_min_free_mib);
         }
         if (o.serve) {
-            std::printf("INFO park_pool=%d park_pool_mib=%lld park_free_mib=%lld park_psi=%.1f park_idle_s=%lld\n",
+            // park_swap_mib= joins the INFO line (P124x) WHEN THE RULE IS ON: with SAGUARO_PARK_SWAP_MIB=0 the
+            // line is exactly what it was before P124x (re-review L3 - an off switch should say nothing new);
+            // the server's parser reads the keys it knows and ignores the rest, so an external one must key
+            // on names, not on the token count of this line (report 4).
+            const std::string swap_tok = park_lim.swap_bytes > 0
+                                             ? " park_swap_mib=" + std::to_string(park_lim.swap_bytes >> 20) : "";
+            std::printf("INFO park_pool=%d park_pool_mib=%lld park_free_mib=%lld park_psi=%.1f park_idle_s=%lld%s\n",
                         o.conversation_cache_pool ? 1 : 0, (long long) (park_lim.pool_bytes >> 20),
-                        (long long) (park_lim.free_bytes >> 20), park_lim.psi, (long long) park_lim.idle_s);
+                        (long long) (park_lim.free_bytes >> 20), park_lim.psi, (long long) park_lim.idle_s,
+                        swap_tok.c_str());
             std::fflush(stdout);
         }
         auto park_clock = [] { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); };
@@ -10917,7 +11034,24 @@ vs.d_skip_usage = gs.d_skip_usage;
             int64_t dirty = INT64_MAX;      // the first position written since (INT64_MAX: nothing reported = unknown)
             std::vector<int32_t> ids;
             Clock::time_point retry{};
-            void begin(int64_t at) { dirty = std::min(dirty, at); }   // a request goes on in place from `at`
+            // PLAN-p124a2: the WHOLE capture of the last turn save here, for the park that follows the turn to adopt
+            // (park::adopt_turn_capture) instead of copying the same K/V a second time - or at least to reuse its
+            // running state (park::reuse_turn_state) when only the K/V cannot be aliased. It is the park's own turn:
+            // `begin` (a request continuing in place) invalidates it, and so do the sites that overwrite the session
+            // without a request starting (a slot's copy-in, a context restore, the checkpoint mount in
+            // live_from_checks); `reset` deliberately does not - a conversation switch goes through it, and the
+            // switch's park of the outgoing conversation is exactly what adopts the capture. HELD STRONG since the
+            // manager's card run of 2026-11-26: the parks that follow a FINISHED turn save ("saved a ... in the
+            // background" already printed, the weak reference gone) were the ones still crawling (checkpoints
+            // 1560 ms for the 237 MB running state beside the file's writeback), so the capture must outlive the
+            // writer - it is released by the next park, a continuing request, or a rewrite site, never later.
+            std::shared_ptr<const strata::core::SessionLogTurn> adopt_cap;
+            std::vector<int32_t> adopt_ids;
+            bool adopt_cvec = false;
+            bool adopt_imgs = false;
+            bool adopt_live = false;
+            void adopt_clear() { adopt_cap.reset(); adopt_ids.clear(); adopt_cvec = false; adopt_imgs = false; adopt_live = false; }
+            void begin(int64_t at) { dirty = std::min(dirty, at); adopt_clear(); }   // a request goes on in place from `at`
             void reset() { track.reset(); tokens = -1; dirty = INT64_MAX; ids.clear(); seq = 0; }   // another conversation
         };
         TurnHold turn_main;
@@ -11010,6 +11144,17 @@ vs.d_skip_usage = gs.d_skip_usage;
                 h.ids.assign(f.ids.begin(), f.ids.end());
                 h.tokens = (int64_t) f.ids.size();
                 h.dirty = INT64_MAX;
+                // PLAN-p124a2: only a whole capture holds every K/V byte and the whole running state the next park
+                // would copy, and it is held (strongly, review of 2026-11-26: the slow parks are the ones right after
+                // the writer finished) until that park consumes it or a request/rewrite clears it.
+                h.adopt_clear();
+                if (!job.turn->delta()) {
+                    h.adopt_cap = job.turn;
+                    h.adopt_ids = h.ids;
+                    h.adopt_cvec = f.cvec;
+                    h.adopt_imgs = !f.imgs.empty();
+                    h.adopt_live = true;
+                }
                 sdir->write_turn(std::move(job));
                 return true;
             } catch (const std::bad_alloc&) {
@@ -11088,6 +11233,22 @@ vs.d_skip_usage = gs.d_skip_usage;
             std::vector<strata::core::ConversationKvReuse> stage_reuse = std::move(reuse.stages);
             stage_reuse.resize(n_st);
             reuse.stages.clear();
+            // PLAN-p124a2: the whole capture the last turn save made at this place, if this park may adopt it: then
+            // the K/V is the capture's host bytes (aliased, not re-copied) and their part of the estimate is RAM
+            // this park does not allocate. And where the whole adoption cannot run but the capture still stands
+            // (manager review 2026-11-26: the retained K/V took the no_retained term, or a part refuses to alias),
+            // the park at least takes the capture's host copy of the RUNNING STATE instead of pulling ~237 MB off
+            // the device beside that save's file writeback. The hold is this park's turn's, consumed here either way.
+            TurnHold& hold = f.slot < 0 ? turn_main : turn_slot[(size_t) f.slot];
+            const std::shared_ptr<const strata::core::SessionLogTurn> turn_cap =
+                hold.adopt_live ? hold.adopt_cap : nullptr;
+            const bool same_tokens = hold.adopt_cvec == f.cvec && hold.adopt_ids == f.ids;
+            const bool no_images = f.imgs.empty() && !hold.adopt_imgs;
+            const bool adopt = strata::core::park::adopt_turn_capture(
+                turn_cap != nullptr, n_st == 0, reuse.kv.empty(), hold.adopt_live, same_tokens, no_images);
+            const bool state_reuse = !adopt && strata::core::park::reuse_turn_state(
+                turn_cap != nullptr, n_st == 0, hold.adopt_live, same_tokens, no_images);
+            hold.adopt_clear();
             // the later stages' estimates, each with its own retained K/V when it still fits
             size_t stage_estimate = 0, stage_retained = 0;
             for (size_t k = 0; k < n_st; ++k) {
@@ -11141,10 +11302,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                 return true;
             }
             const auto t0 = Clock::now();
+            strata::core::conversation_snapshot_reset_split();   // (PLAN-p124a: this line counts this park only)
             try {
                 const uint64_t floor = (uint64_t) o.conversation_cache_min_free_mib * 1024 * 1024;
-                const size_t retained = reuse.bytes() + stage_retained;
-                const size_t additional = estimate > retained ? estimate - retained : 0;
+                // (an adopted capture holds its K/V in buffers that already exist: only the rest is fresh RAM)
+                const size_t adopt_kv = adopt ? strata::core::conversation_snapshot_kv_bytes(
+                                       park_ss(f, 0), g, draft0, (int64_t) f.ids.size()) : 0;
+                size_t retained = reuse.bytes() + stage_retained + adopt_kv;
+                size_t additional = estimate > retained ? estimate - retained : 0;
                 // The physical-RAM gate: the incoming snapshot has to fit beside the floor.  make_room()
                 // above only balanced the cache's own budget, so a full cache leaves this one short even
                 // though every parked conversation could give its RAM back - and refusing here throws
@@ -11162,24 +11327,60 @@ vs.d_skip_usage = gs.d_skip_usage;
                     return strata::core::conversation_memory_admit(
                         mem ? std::optional<uint64_t>(mem->available) : std::nullopt, additional, floor);
                 };
-                while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
-                       conversations.evict_oldest())
-                    ++evicted;
-                if (!admit()) {
+                auto refuse_ram = [&] {   // the refusal line, for both admission passes
                     std::fprintf(stderr, "saguaro serve: conversation cache: skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)\n",
                                  additional >> 20, (long long) o.conversation_cache_min_free_mib, ram_note(mem).c_str(),
                                  evicted, conversations.size());
                     spill();
                     return true;
-                }
-                if (evicted)
+                };
+                auto say_evicted = [&] {
                     std::fprintf(stderr, "saguaro serve: conversation cache: evicted %zu parked conversation%s to admit this snapshot (%zu MiB plus %lld MiB floor)\n",
                                  evicted, evicted == 1 ? "" : "s", additional >> 20,
                                  (long long) o.conversation_cache_min_free_mib);
+                };
+                auto admit_room = [&] {
+                    while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
+                           conversations.evict_oldest())
+                        ++evicted;
+                    return admit();
+                };
+                if (!admit_room()) return refuse_ram();
+                if (evicted) say_evicted();
                 strata::core::SavedConversation image;
                 size_t reused_bytes = 0;
-                if (!strata::core::conversation_snapshot_save(image, view, park_ss(f, 0), g, draft0, err,
-                        std::move(reuse), &reused_bytes)) return false;
+                bool from_capture = false;
+                if (adopt) {   // PLAN-p124a2: adopt the turn save's whole host capture; a fresh capture only if it refuses
+                    std::string ae;
+                    if (strata::core::conversation_snapshot_from_capture(image, view, park_ss(f, 0), g, draft0,
+                            turn_cap, ae, &reused_bytes))
+                        from_capture = true;
+                    else {
+                        image = {};
+                        std::fprintf(stderr, "saguaro serve: conversation cache: the turn capture could not stand in "
+                                             "for this park (%s); capturing normally\n", ae.c_str());
+                        // (review M1: the gate above subtracted the capture's K/V as RAM this park would not
+                        //  allocate; the refusal says it must allocate them after all, and the evict loop already
+                        //  ran on the too-low figure. Re-read `additional` without the subtraction and re-run the
+                        //  admit/evict loop BEFORE the capture allocates - the same refusal as above if it does
+                        //  not fit - so the gate is never optimistic for exactly the long conversations whose
+                        //  parts are too split to alias.)
+                        if (adopt_kv > 0) {
+                            const size_t ev0 = evicted;
+                            retained = reuse.bytes() + stage_retained;
+                            additional = estimate > retained ? estimate - retained : 0;
+                            if (!admit_room()) return refuse_ram();
+                            if (evicted > ev0) say_evicted();
+                        }
+                    }
+                }
+                // (adopt implies reuse.kv is empty - park::adopt_turn_capture's `no_retained` - so the move is empty here)
+                // the capture's host running state for the fresh capture, where its adoption refused or the retained
+                // K/V kept the whole-image adoption off (manager review 2026-11-26): no device copy of it this park
+                const strata::core::ConversationCheckpoint* live_src =
+                    !from_capture && state_reuse && turn_cap->meta.stage_images.empty() ? &turn_cap->meta.live : nullptr;
+                if (!from_capture && !strata::core::conversation_snapshot_save(image, view, park_ss(f, 0), g, draft0,
+                        err, std::move(reuse), &reused_bytes, live_src)) return false;
                 for (size_t k = 0; k < n_st; ++k) {   // the later stages (the last one with the draft layer's K/V)
                     auto& st = stages[k];
                     const strata::core::OnDevice on(st->dev);
@@ -11204,17 +11405,16 @@ vs.d_skip_usage = gs.d_skip_usage;
                 const bool stored = conversations.put(std::move(image), held, park_clock());
                 if (stored && sdir) sdir->write(conversations.newest());   // written behind, after its delay
                 if (stored) (f.slot < 0 ? turn_main : turn_slot[(size_t) f.slot]).reset();   // (its file moves on without the track)
+                const double park_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 if (stored) {   // the server's log: a conversation going out, to RAM
                     std::printf("INFO sess_event=parked sess_tokens=%zu sess_bytes=%zu sess_ms=%.0f sess_why=ram\n",
-                                f.ids.size(), snapshot_bytes,
-                                std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+                                f.ids.size(), snapshot_bytes, park_ms);
                     std::fflush(stdout);
                 }
                 if (!stored) spill();
-                const std::string split = strata::core::conversation_snapshot_take_split();   // (read-stall instrumentation)
+                const std::string split = strata::core::conversation_snapshot_take_split(park_ms);   // (read-stall instrumentation; wait = outside the split, PLAN-p124a)
                 std::fprintf(stderr, "saguaro serve: conversation cache: %s %zu tokens in %.1f ms; parked=%zu bytes=%zu evictions=%zu snapshot_bytes=%zu reused_kv_bytes=%zu%s; %s\n",
-                             stored ? "parked" : "skipped", f.ids.size(),
-                             std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                             stored ? "parked" : "skipped", f.ids.size(), park_ms,
                              conversations.size(), conversations.bytes(), conversations.evictions(), snapshot_bytes, reused_bytes,
                              who.c_str(), split.c_str());
             } catch (const std::bad_alloc&) {
@@ -11241,6 +11441,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     c = &k;
             if (c == nullptr || c->stage_parts.size() != stages.size()) return;
             if ((size_t) conversations.best(c->ids, c->imgs, cvec_cached).tokens >= c->ids.size()) return;
+            turn_main.adopt_clear();   // (PLAN-p124a2: this mount rewrites the session: a capture before it is not its bytes)
             if (!checkpoint_restore(*c, ss, g)) return;
             for (size_t i = 0; i < stages.size(); ++i) {
                 const strata::core::OnDevice on(stages[i]->dev);
@@ -11275,6 +11476,28 @@ vs.d_skip_usage = gs.d_skip_usage;
         std::atomic<long long> pp_run_us{0};
         std::atomic<bool> pp_running{false};
         Clock::time_point pp_run_t0{};
+        // P124v (PLAN-p124v-read-rate): the read clock above also covers the KV staging passes (the reused
+        // prefix copied RAM -> VRAM runs inside sp.run), and a read that spends most of it staging 50K tokens
+        // showed its rate diluted to single digits.  stage_ms= on the PP / RHB / RDONE lines carries the
+        // staging part, and the server's rate divides by the read's time MINUS it (floored at 0).
+        std::atomic<long long> pp_stage_us{0};
+        std::atomic<long long> pp_host_t{0};    // us epoch of this run's last host point (0: none yet)
+        std::atomic<int> pp_host_staged{-1};    // its kind: 1 a KV staging pass, 0 a read pass, -1 unset
+        // A host point fires when its pass COMPLETES: the interval since the previous point of the same run is
+        // that pass's time, so it lands in the staging clock when the point says `staged` (what runs between two
+        // points is not in any clock yet - the same open interval sits in ms and in stage_ms alike, leaving
+        // ms - stage_ms the read's own elapsed READ time).  A point chain broken by a long wait attributes at
+        // most 2 s to the pass that completes after it: a held read is none's time, and the server's rate
+        // figure floors ms - stage_ms at 0.
+        auto pp_host_point = [&](bool staged) {   // every host point, before the heartbeat gate
+            const long long t = (long long) std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now().time_since_epoch()).count();
+            const long long prev = pp_host_t.exchange(t, std::memory_order_relaxed);
+            pp_host_staged.store(staged ? 1 : 0, std::memory_order_relaxed);
+            if (prev > 0 && staged && t > prev && t - prev < 2000000)
+                pp_stage_us.fetch_add(t - prev, std::memory_order_relaxed);
+        };
+        auto pp_stage_ms = [&]() -> double { return (double) pp_stage_us.load(std::memory_order_relaxed) / 1000.0; };
         auto pp_running_ms = [&]() -> double {
             double ms = (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0;
             // acquire: the release store in pp_run_begin orders the pp_run_t0 write before this flag
@@ -11287,6 +11510,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             pp_running.store(true, std::memory_order_release);
         };
         auto pp_run_end = [&]() {
+            // P124v: a held gap between runs is neither read nor staging time: the host-point chain starts over
+            pp_host_t.store(0, std::memory_order_relaxed);
+            pp_host_staged.store(-1, std::memory_order_relaxed);
             if (!pp_running.exchange(false, std::memory_order_relaxed)) return;
             pp_run_us.fetch_add((long long) (std::chrono::duration<double, std::micro>(Clock::now() -
                                                                                         pp_run_t0).count() + 0.5),
@@ -11297,14 +11523,16 @@ vs.d_skip_usage = gs.d_skip_usage;
         static long long serve_rid = 0;
         long long pp_rid = 0;
         bool rdone_done = false;   // this request's RDONE (once, at its read's end or before its DONE)
-        // U5 read heartbeat (PLAN-u5-read-heartbeat): while a read runs it reports its progress the way decode
-        // does - at most one line per ~1 s per reading request, printed from the host points between layer
-        // passes / pipe pieces / KV staging passes:
+        // U5 read heartbeat (PLAN-u5-read-heartbeat + PLAN-p124v-read-rate): while a read runs it reports its
+        // progress the way decode does - at most one line per ~0.23 s per reading request (a steady four or so a
+        // second: the server's live read rate follows the read at its own cadence, without a client-side window
+        // hiding a stall), printed from the host points between layer passes / pipe pieces / KV staging passes:
         //   RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-        //       pass=<i>/<n> ms=<read ms>
+        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it>
         // stage: its K/V prefix is coming in from RAM; read: its new tokens are being read.  ms is this read's
-        // own running time (the read clock above: not the waits between pieces).  Output only - every existing
-        // line stays exactly as it was, and rid=0 lines (the batch path's) carry an appended slot=<b>.
+        // own running time (the read clock above: not the waits between pieces) and stage_ms the part of it spent
+        // staging: ms - stage_ms is its own elapsed READ time.  Output only - every existing line stays exactly
+        // as it was, and rid=0 lines (the batch path's) carry an appended slot=<b>.
         std::mutex rhb_mu;
         Clock::time_point rhb_t{};
         long long rhb_rid = 0;
@@ -11315,29 +11543,33 @@ vs.d_skip_usage = gs.d_skip_usage;
         // at `new` when the read ends.  One card: exactly the figure its own host points report (what it printed).
         strata::program::ReadProgress solo_prog;
         auto rhb_print = [&](long long rid, const char* stage, long long done, long long newn, long long reused,
-                             long long pass_i, long long pass_n, double ms) {
+                             long long pass_i, long long pass_n, double ms, double stage_ms) {
             std::lock_guard<std::mutex> lk(rhb_mu);
             const auto now = Clock::now();
-            if (rhb_rid == rid && std::chrono::duration<double, std::milli>(now - rhb_t).count() < 950.0) return;
+            if (rhb_rid == rid && std::chrono::duration<double, std::milli>(now - rhb_t).count() < 230.0) return;
             rhb_rid = rid;
             rhb_t = now;
-            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f\n", rid, stage,
-                        done, newn, reused, pass_i, pass_n, ms);
+            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f\n",
+                        rid, stage, done, newn, reused, pass_i, pass_n, ms, stage_ms);
             std::fflush(stdout);
         };
         auto rhb_solo = [&](const char* stage, int64_t card, int64_t pos0, long long pass_i, long long pass_n) {
             if (pp_rid == 0 || pp_total <= pp_from) return;   // nothing of this request is being read (a warm run)
+            pp_host_point(stage[0] == 's');   // P124v: this pass's time into the read's staging / read clocks
             solo_prog.report(card, pos0, pass_i, pass_n);     // this card's host point, into the read's figure
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
-                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms());
+                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
+                      pp_stage_ms());
         };
         // the host point between the pieces of a pipelined read: the piece ended, everything below `pos` has
         // passed every card - the read's figure takes it as its fully-read point (U5b)
         auto rhb_solo_piece = [&](const char* stage, int64_t pos, long long pass_i, long long pass_n) {
             if (pp_rid == 0 || pp_total <= pp_from) return;
+            pp_host_point(stage[0] == 's');   // P124v: the piece boundary is a host point too
             solo_prog.report_full(pos);
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
-                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms());
+                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
+                      pp_stage_ms());
         };
         // #471: the position the prompt pass has read up to (a chunk's or a window's end): what a request cancelled
         // mid-read reports as read, instead of the whole prompt
@@ -11612,10 +11844,11 @@ vs.d_skip_usage = gs.d_skip_usage;
             pp_reached = done;
             solo_prog.report_full(done);   // U5b: this chunk's tokens passed every card (the last stage reports)
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-            std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) done,
+            std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld stage_ms=%.1f\n", (long long) done,
                         (long long) pp_total, ms,
                         ms > 0.0 ? 1000.0 * (double) (done - pp_from) / ms : 0.0,
-                        (long long) std::max<int64_t>(0, done - pp_from), pp_running_ms(), (long long) pp_rid);
+                        (long long) std::max<int64_t>(0, done - pp_from), pp_running_ms(), (long long) pp_rid,
+                        pp_stage_ms());
             strata::core::progress_at("reading the prompt (batched), done up to token", done);
             strata::core::progress_beat();
             std::fflush(stdout);
@@ -11685,7 +11918,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
         }
         // U5 read heartbeat: the prompt path's host points between layer passes feed the RHB line of the solo read
-        // in flight (every stage reports; one read runs at a time and the gate above keeps it to ~1 line per s).
+        // in flight (every stage reports; one read runs at a time and the gate above keeps it to ~4 lines a s).
         // The batch slot reads replace these for the time they hold the path (see the admission's swap below).
         // U5b: the card is its first layer (`lb`, unique across a split's stages); the read's shared figure
         // (solo_prog) is what the line's done= shows - every card reports, one figure prints.
@@ -16773,30 +17006,58 @@ vs.d_skip_usage = gs.d_skip_usage;
             Clock::time_point rhb_t{};   // U5 read heartbeat: when this read last printed an RHB line
             strata::program::ReadProgress prog;   // U5b: this read's one shared progress figure (read_progress.hpp)
             bool prog_begun = false;     // U5b: the figure is laid out once, at the read's start (a pause keeps it)
+            // P124v (PLAN-p124v-read-rate): the read's staging time (the KV staging passes inside the read's
+            // clock), attributed host point by host point; RHB / BRP / BRA carry stage_ms= and the server's
+            // rate divides by the read's time MINUS it.  The host-point chain starts over with every run of
+            // the read (a held gap is neither read nor staging time, like the read clock's own rule).
+            std::atomic<long long> stage_us{0};   // us spent staging, over the runs settled so far
+            std::atomic<long long> host_t{0};     // us epoch of the run's last host point (0: none yet)
+            std::atomic<int> host_staged{-1};     // its kind: 1 a KV staging pass, 0 a read pass
         };
         std::vector<std::unique_ptr<AdmJob>> cy_held;   // SAGUARO_READ_YIELD: reads held at a piece boundary
-        // U5 read heartbeat (PLAN-u5-read-heartbeat), batch side: a slot's read reports itself at most one line
-        // per ~1 s from host points between the layer passes of its pieces:
+        // U5 read heartbeat (PLAN-u5-read-heartbeat + PLAN-p124v-read-rate), batch side: a slot's read reports
+        // itself at most one line per ~0.23 s (a steady four or so a second) from host points between the layer
+        // passes of its pieces:
         //   RHB rid=0 stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-        //       pass=<i>/<n> ms=<read ms> slot=<b>
+        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it> slot=<b>
         // rid=0 (as in the protocol note): the slot tells which read it is, like its BRP / BRA lines. done and
         // new count from where THIS read started (never its reused / parked prefix); ms is this read's own time
-        // since it was fed, as on the BRP lines (a read held at a piece boundary prints no lines while held).
+        // over its runs so far (the legs add up like the BRP lines' read_ms; a read held at a piece boundary
+        // prints no lines and adds no time while held) and stage_ms the part of it spent staging its K/V in
+        // from RAM: ms - stage_ms is its own elapsed READ time (a restored prefix staged first must not dilute
+        // the read's rate to single digits - the server's figure divides by the read's time, staging left out).
         // U5b (PLAN-u5b-split-progress): done is this read's shared figure (its AdmJob's ReadProgress): every
         // card's host point feeds its own card, one figure prints - never decreasing, ending at `new` (the BRP
         // points report the chunks that passed every card); two reads at once keep separate figures by their slot.
+        // A host point fires when its pass COMPLETES: the interval since the run's previous point is that pass's
+        // time, landed in the staging clock when the point says `staged` (what runs between two points is in ms
+        // and stage_ms alike, leaving ms - stage_ms the read's own elapsed READ time).
+        auto adm_host_point = [&](AdmJob& j, bool staged) {
+            const long long t = (long long) std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now().time_since_epoch()).count();
+            const long long prev = j.host_t.exchange(t, std::memory_order_relaxed);
+            j.host_staged.store(staged ? 1 : 0, std::memory_order_relaxed);
+            if (prev > 0 && staged && t > prev && t - prev < 2000000)   // a held gap stays out (cap, as solo)
+                j.stage_us.fetch_add(t - prev, std::memory_order_relaxed);
+        };
+        auto adm_stage_ms = [](const AdmJob& j) -> double {
+            return (double) j.stage_us.load(std::memory_order_relaxed) / 1000.0;
+        };
         auto rhb_slot = [&](AdmJob& j, int b, int64_t n, Clock::time_point t_read, int64_t card, int64_t pos0,
                             long long pass_i, long long pass_n, bool staged) {
+            adm_host_point(j, staged);   // P124v: this pass's time into the read's staging / read clocks
             j.prog.report(card, pos0, pass_i, pass_n);   // this card's host point, into the read's figure
             std::lock_guard<std::mutex> lk(rhb_mu);   // (every stage's thread reports: two pieces of one read at a time)
             const auto now = Clock::now();
             if (j.rhb_t != Clock::time_point{} &&
-                std::chrono::duration<double, std::milli>(now - j.rhb_t).count() < 950.0) return;
+                std::chrono::duration<double, std::milli>(now - j.rhb_t).count() < 230.0) return;
             j.rhb_t = now;
-            std::printf("RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f slot=%d\n",
-                        staged ? "stage" : "read", (long long) j.prog.done(),
+            std::printf(
+                "RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f slot=%d\n",
+                staged ? "stage" : "read", (long long) j.prog.done(),
                         (long long) std::max<int64_t>(0, n - j.resume), (long long) j.resume, pass_i, pass_n,
-                        std::chrono::duration<double, std::milli>(now - t_read).count(), b);
+                        j.read_ms + std::chrono::duration<double, std::milli>(now - t_read).count(),
+                        adm_stage_ms(j), b);
             std::fflush(stdout);
         };
         // SAGUARO_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 12, two per bucket): a batch slot's conversation keeps grid checkpoints
@@ -16950,6 +17211,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         }
                         fresh = true;
                         turn_slot[(size_t) b].reset();   // (the slot started over: its file is written whole next)
+                        turn_slot[(size_t) b].adopt_clear();   // PLAN-p124a2: started over means its capture is gone
                     }
                 }
             }
@@ -17102,12 +17364,14 @@ vs.d_skip_usage = gs.d_skip_usage;
             const std::vector<int64_t>& ids = j.r.ids;
             strata::core::MtpDrafter* dr = batch_mtp ? slot_mtp[(size_t) b].get() : nullptr;
             const auto t_read = Clock::now();
+            j.host_t.store(0, std::memory_order_relaxed);      // P124v: the host-point chain starts with this run
+            j.host_staged.store(-1, std::memory_order_relaxed);
             if (!j.prog_begun) {   // U5b: the read's shared progress figure (a paused read that comes back keeps it)
                 j.prog.reset(j.resume, n, g.n_layers);
                 j.prog_begun = true;
             }
             // U5 read heartbeat: this read's host points between the layer passes (and the KV staging passes)
-            // report the slot's read, ~one RHB line per second (the solo path's callback is put back by undo)
+            // report the slot's read, ~four RHB lines a second (the solo path's callback is put back by undo)
             for (size_t k = 0; k < n_st; ++k) {
                 old_layer_pass[k] = std::move(stage_prefill(k).on_layer_pass);
                 stage_prefill(k).on_layer_pass = [&, b](int64_t pass, int64_t passes, bool staged, int64_t lb,
@@ -17128,10 +17392,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                 adm_at.store(done);
                 j.prog.report_full(done);   // U5b: this chunk's tokens passed every card (the last stage reports)
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t_read).count();
-                std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f\n", b, (long long) done,
+                std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f stage_ms=%.1f\n", b,
+                            (long long) done,
                             (long long) n, ms,
                             ms > 0.0 ? 1000.0 * (double) (done - at0) / ms : 0.0,
-                            (long long) std::max<int64_t>(0, done - j.resume), j.read_ms + ms);
+                            (long long) std::max<int64_t>(0, done - j.resume), j.read_ms + ms, adm_stage_ms(j));
                 std::fflush(stdout);
                 strata::core::progress_at("reading a prompt into a batch slot, done up to token", done);
                 strata::core::progress_beat();
@@ -17356,7 +17621,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 return AdmEnd::paused;
             }
             std::vector<ConvCheckpoint> grid = slot_grid_settle(sl.checks, j.resume, ids, j.grid_ck);   // SAGUARO_SLOT_GRID
-            if (j.yarn_mv || j.resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(j.resume);
+            if (j.yarn_mv || j.resume <= 0) { turn_slot[(size_t) b].reset(); turn_slot[(size_t) b].adopt_clear(); }   // PLAN-p124a2: a restart rewrites the slot
+            else turn_slot[(size_t) b].begin(j.resume);
             if (ckpt_pool.on())
                 for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
             sl = BSlot{};
@@ -17384,8 +17650,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             sl.adm_reused = j.resume;
             // (no first draft: that needs the last prompt token's row, which the slot's first window computes)
             ver.set_slot_sampling(b, j.r.sp);
-            std::printf("BRA %d 1 prompt=%lld reused=%lld read_ms=%.1f wait_ms=%.1f\n", b, (long long) n,
-                        (long long) j.resume, j.read_ms, j.wait_ms);
+            std::printf("BRA %d 1 prompt=%lld reused=%lld read_ms=%.1f wait_ms=%.1f stage_ms=%.1f\n", b,
+                        (long long) n,
+                        (long long) j.resume, j.read_ms, j.wait_ms, adm_stage_ms(j));
             std::fflush(stdout);
             return AdmEnd::done;
         };
@@ -17532,7 +17799,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (resume > 0) dr.kv_restore(resume);
                 dr.set_prompt_len(n);
             }
-            if (resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(resume);   // (the lane read)
+            if (resume <= 0) { turn_slot[(size_t) b].reset(); turn_slot[(size_t) b].adopt_clear(); }   // (the lane read; PLAN-p124a2: a restart rewrites the slot)
+            else turn_slot[(size_t) b].begin(resume);
             // the checkpoints this prompt continues stay the slot's: the resume point of its turn saves and parks (a
             // thinking continuation's lane read used to leave the slot none, so its file could not resume the next turn)
             std::vector<ConvCheckpoint> lane_kept;
@@ -17862,19 +18130,21 @@ vs.d_skip_usage = gs.d_skip_usage;
                     // PLAN-qfn-per-request-read-stats: new_read counts this request's tokens read from where its read
                     // started (its reused prefix left out, never a parked position); read_ms is the time this read has
                     // run since it was fed (a read held for a yield prints no lines while it is held)
-                    std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f\n", b, (long long) done,
+                    std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f stage_ms=%.1f\n", b,
+                                (long long) done,
                                 (long long) n, ms,
                                 ms > 0.0 ? 1000.0 * (double) (done - jp->resume) / ms : 0.0,
-                                (long long) std::max<int64_t>(0, done - jp->resume), ms);
+                                (long long) std::max<int64_t>(0, done - jp->resume), ms,
+                                (double) jp->stage_us.load(std::memory_order_relaxed) / 1000.0);
                     std::fflush(stdout);
                     strata::core::progress_at("reading a prompt into a batch slot, done up to token", done);
                     strata::core::progress_beat();
                     return true;
                 };
                 // U5 read heartbeat: the layer passes of this piece (and their KV staging passes, `staged`)
-                // report its read, ~one RHB line per second (batched chunks call each segment's own callback).
+                // report its read, ~four RHB lines a second (batched chunks call each segment's own callback).
                 // U5b: `lb` names the card (this one callback runs on every stage's thread); done= is the read's
-                // shared figure (jp->prog), fed by every card, printed by whichever point opens the one-second gate.
+                // shared figure (jp->prog), fed by every card, printed by whichever point opens the 230 ms gate.
                 pj->on_layer_pass = [&, jp, b, n](int64_t pass, int64_t passes, bool staged, int64_t lb,
                                                   int64_t pos0) {
                     rhb_slot(*jp, b, n, jp->t_read, lb, pos0, (long long) pass, (long long) passes, staged);
@@ -17944,6 +18214,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 const int b = j.r.slot;
                 j.queued = true;
                 j.t_read = Clock::now();
+                j.host_t.store(0, std::memory_order_relaxed);   // P124v: the host-point chain starts with this run
+                j.host_staged.store(-1, std::memory_order_relaxed);
                 if (!j.prog_begun) {   // U5b: this read's shared progress figure
                     j.prog.reset(j.resume, j.n, g.n_layers);
                     j.prog_begun = true;
@@ -18064,7 +18336,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 j.gparts.clear();
                 j.gpart_ok.clear();
                 std::vector<ConvCheckpoint> grid = slot_grid_settle(sl.checks, j.resume, ids, grid_new);
-                if (j.yarn_mv || j.resume <= 0) turn_slot[(size_t) b].reset(); else turn_slot[(size_t) b].begin(j.resume);
+                if (j.yarn_mv || j.resume <= 0) { turn_slot[(size_t) b].reset(); turn_slot[(size_t) b].adopt_clear(); }   // PLAN-p124a2: a restart rewrites the slot
+                else turn_slot[(size_t) b].begin(j.resume);
                 if (ckpt_pool.on())
                     for (ConvCheckpoint& c : sl.checks) ckpt_pool.give(std::move(c));
                 sl = BSlot{};
@@ -18117,8 +18390,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                     sl.adm_notes = nb;
                 }
                 ver.set_slot_sampling(b, j.r.sp);
-                std::printf("BRA %d 1 prompt=%lld reused=%lld read_ms=%.1f wait_ms=%.1f\n", b, (long long) n,
-                            (long long) j.resume, j.read_ms, j.wait_ms);
+                std::printf("BRA %d 1 prompt=%lld reused=%lld read_ms=%.1f wait_ms=%.1f stage_ms=%.1f\n", b,
+                            (long long) n,
+                            (long long) j.resume, j.read_ms, j.wait_ms, adm_stage_ms(j));
                 std::fflush(stdout);
                 return true;
             };
@@ -18603,20 +18877,39 @@ vs.d_skip_usage = gs.d_skip_usage;
             pk::Memory mem;
             const auto reading = strata::core::sample_host_memory();
             if (reading) mem.available = reading->available;
+            // PLAN-p124a: the resident expert tier and the live K/V pool are ours and no release gives them back -
+            // count them out of the shortage, or a resident-RAM engine drops every park seconds after parking it
+            // while the host is wide open (mortar: 8.6 GiB "free", 81 GiB actually there, 68 GiB pinned by us).
+            // Only what is really pinned is credited: during a pin or after a failed one resident_bytes() names the
+            // PLANNED tier, which is not RAM held yet (complement_ready() as at :8573; the credit stops at the
+            // hard floor anyway - review F9).
+            mem.own_pinned = (srcp == &arena_src
+                                  ? arena_src.pinned_arena_bytes()
+                                  : (src.complement_ready() ? src.resident_bytes() : 0)) +
+                             strata::core::qsa_kv_host_bytes();
             {
                 std::ifstream psi("/proc/pressure/memory");
                 if (psi) mem.psi_some10 = pk::psi_some10(psi);
             }
+            // P124x: what the kernel has already moved to swap.  The credit above is a bet that the pinned tier
+            // stays resident; with swap over the bar the bet is lost and the raw reading decides again (mortar ran
+            // 2-5 GiB of swap behind a credited-calm `available` while the releases did nothing).
+            if (park_lim.swap_bytes > 0) mem.swap_used = strata::core::host_swap_used_bytes();
             const bool pressed = pk::pressure_need(mem, park_lim) > 0;
+            // the hard floor is judged raw: below it the releases must run however big the credit is (F1)
+            const bool hard = pk::severe(mem, park_lim);
             const bool psi_due = pk::psi_high(mem, park_lim) && now - park_psi_last >= std::chrono::seconds(10);
             const bool over = conversations.parked_bytes_live() > conversations.budget();
-            if (!pressed && !psi_due && !over && park_lim.idle_s <= 0.0) return;
+            if (!pressed && !hard && !psi_due && !over && park_lim.idle_s <= 0.0) return;
             const double free_gib = mem.available ? (double) *mem.available / 1073741824.0 : -1.0;
             // the freed blocks the park pool keeps mapped are RAM nobody uses: they go before any conversation
             if (pressed && pooled > 0) {
                 const size_t n = strata::core::parked_block_pool_trim(0);
-                std::fprintf(stderr, "saguaro serve: conversation cache: memory pressure (%.1f GiB free): %zu MiB of "
-                                     "pooled park buffers go back to the OS\n", free_gib, n >> 20);
+                char sw[64] = "";
+                if (mem.swap_used && *mem.swap_used > 0)
+                    std::snprintf(sw, sizeof sw, ", %.1f GiB in swap", (double) *mem.swap_used / 1073741824.0);
+                std::fprintf(stderr, "saguaro serve: conversation cache: memory pressure (%.1f GiB free%s): %zu MiB of "
+                                     "pooled park buffers go back to the OS\n", free_gib, sw, n >> 20);
                 return;   // (the next tick samples again)
             }
             if (conversations.size() == 0) return;
@@ -18636,8 +18929,16 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::snprintf(why, sizeof why, "budget: the live K/V holds %.1f of the pool's %.1f GiB",
                                   (double) strata::core::qsa_kv_host_bytes() / 1073741824.0,
                                   (double) park_lim.pool_bytes / 1073741824.0);
+                else if (pk::swap_high(mem, park_lim))
+                    std::snprintf(why, sizeof why, "pressure: %.1f GiB free, %.1f GiB already in swap (P124x: the host is "
+                                                   "out of RAM, the engine's own pinned tier gives no calm)",
+                                  free_gib, mem.swap_used ? (double) *mem.swap_used / 1073741824.0 : 0.0);
                 else if (mem.psi_some10 && pk::psi_high(mem, park_lim) && !pressed)
                     std::snprintf(why, sizeof why, "pressure: memory stalls %.1f, %.1f GiB free", *mem.psi_some10, free_gib);
+                else if (mem.own_pinned > 0)
+                    std::snprintf(why, sizeof why,
+                                  "pressure: %.1f GiB free, short even crediting the engine's own %.1f GiB pinned",
+                                  free_gib, (double) mem.own_pinned / 1073741824.0);
                 else
                     std::snprintf(why, sizeof why, "pressure: %.1f GiB free", free_gib);
                 std::fprintf(stderr, "saguaro serve: conversation cache: dropped %llu tokens (%s), on disk: %s; "
@@ -19427,6 +19728,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                     conversations.take_reuse();   // retained K/V described the outgoing session
                     turn_main.reset();
+                    turn_main.adopt_clear();   // (PLAN-p124a2: the restore below rewrites the session)
                     live_ok = false;
                     // host -> device in synchronous copies of the whole state: one bounded allowance
                     blocking("transfer", bytes);
@@ -20099,7 +20401,13 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t turn_tokens_before = turn_main.tokens;
             // (turn saves: the same conversation going on in place from `resume`, or another one taking the session)
             if (!incoming && !borrow && slot_source < 0 && resume > 0 && live_ok) turn_main.begin(resume);
-            else turn_main.reset();
+            else {
+                turn_main.reset();
+                // PLAN-p124a2: a switch keeps the outgoing conversation's capture for its park below; a restart of
+                // the SAME session (a full re-read, a zeroed session) does not keep a capture that its re-read is
+                // about to overwrite.
+                if (!incoming && !borrow && slot_source < 0) turn_main.adopt_clear();
+            }
             const char* park_skip = nullptr;
             if (live_ok && !live.empty() && !borrow && !pin_sibling && park_worth) {
                 // (with a session folder: only when the last turn's save was captured - else the park is its save)
@@ -20157,6 +20465,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
             }
+            // (review L1: the hold survived the reset() above only for the switch's park - which consumed it if it
+            //  ran, as park_body clears it either way. Where it did not run (park_gain, a slot hold's park_skip, a
+            //  pin_sibling borrow) the session is still about to be rewritten below: the slot copy-in, the borrow
+            //  restore, the incoming restore. Drop the capture here, once the park has had its turn and before any
+            //  of those rewrites, so no later park can adopt bytes a rewrite is replacing.)
+            turn_main.adopt_clear();
             if (slot_source >= 0) {
                 lent_slot = -1;   // (a longer start than the main session's)
                 const auto t0 = Clock::now();
@@ -20271,6 +20585,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                              conversations.size(), conversations.bytes(), conversations.borrowed());
             }
             if (incoming) {
+                // (PLAN-p124a: the restore line's split counts this restore only - reset at its own start, so a
+                //  borrow's copies or a slot copy before it cannot land in it (F7: no split over its printed total))
+                strata::core::conversation_snapshot_reset_split();
                 const auto t0 = Clock::now();
                 if (strata::core::conversation_snapshot_restore(*incoming, ss, g,
                         use_mtp && (stages.empty() || mtp_first) ? &mtp.kv_state() : nullptr, err) !=
@@ -20320,8 +20637,17 @@ vs.d_skip_usage = gs.d_skip_usage;
                 resume = incoming_tokens;
                 from_live = incoming_live;
                 ctx_from = incoming_src;
-                // a mapped image's K/V are read-only views: they are not kept for the next park to write into
-                const bool mapped = !incoming->kv.empty() && incoming->kv.front().k.external();
+                // a mapped image's K/V are read-only views (and an adopted one's are aliases - review N: the whole
+                // image is checked, not one sampled buffer, so a partly-external K/V never reaches retain() to be
+                // written into by the next park): they are not kept for the next park to write into
+                auto external_image = [](const strata::core::SavedConversation& s) {
+                    for (const auto& l : s.kv)
+                        for (const strata::core::ConversationBuffer* b : {&l.k, &l.v, &l.k_scale, &l.v_scale, &l.pooled})
+                            if (b->external()) return true;
+                    return false;
+                };
+                bool mapped = external_image(*incoming);
+                for (const auto& si : incoming->stage_images) mapped = mapped || external_image(si);
                 if (std::getenv("SAGUARO_SNAPSHOT_FULL_CAPTURE") == nullptr && !mapped) {
                     std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park
                     for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));
@@ -20331,15 +20657,16 @@ vs.d_skip_usage = gs.d_skip_usage;
                 incoming.reset(); // Running-state/checkpoint copies are no longer needed.
                 lent_slot = -1;   // (the main session holds the parked conversation now)
                 // the server's log: a conversation coming back in, from RAM or (read before) from disk
+                const double restore_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 std::printf("INFO sess_event=restored sess_tokens=%lld sess_bytes=%zu sess_ms=%.0f sess_why=%s\n",
-                            (long long) resume, incoming_bytes,
-                            std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                            (long long) resume, incoming_bytes, restore_ms,
                             ctx_from ? ctx_from : "ram");
                 std::fflush(stdout);
-                const std::string r_split = strata::core::conversation_snapshot_take_split();   // (read-stall instrumentation)
+                // (read-stall instrumentation; wait = outside the split, as on the park line - the split of a
+                //  restore can no longer exceed the total printed with it, review F7)
+                const std::string r_split = strata::core::conversation_snapshot_take_split(restore_ms);
                 std::fprintf(stderr, "saguaro serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu; %s\n",
-                             (long long) resume, from_live ? "live" : "checkpoint",
-                             std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                             (long long) resume, from_live ? "live" : "checkpoint", restore_ms,
                              conversations.size(), conversations.bytes(), r_split.c_str());
             }
             if (want_cvec != cvec_cached) {
@@ -20479,6 +20806,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             pp_t0 = r0;
             pp_run_us.store(0, std::memory_order_relaxed);   // (PLAN-qfn-per-request-read-stats: this request's own
             pp_running.store(false, std::memory_order_relaxed);   //  read clock, its rid, one RDONE per read)
+            pp_stage_us.store(0, std::memory_order_relaxed);   // P124v: the read's staging time starts over too
+            pp_host_t.store(0, std::memory_order_relaxed);
+            pp_host_staged.store(-1, std::memory_order_relaxed);
             pp_rid = ++serve_rid;
             rdone_done = false;
             pp_next_check = reread_to > 0 || !req_ckpt ? INT64_MAX : resume + o.prompt_cache_every;   // ckpt=0: none
@@ -20628,10 +20958,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 pl_mtp_live[0] = pl_mtp_live[1] = false;
                 pp_run_end();   // (the read is over: its time stops here, before the line that reports it)
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) b,
+                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld stage_ms=%.1f\n",
+                            (long long) b,
                             (long long) pp_total, ms,
                             ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0,
-                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid);
+                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid,
+                            pp_stage_ms());
                 strata::core::progress_beat();
                 std::fflush(stdout);
                 return true;
@@ -20697,10 +21029,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (!ver.wait_commit(e)) return false;
                 pp_run_end();   // (the read is over: its time stops here, before the line that reports it)
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) b,
+                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld stage_ms=%.1f\n",
+                            (long long) b,
                             (long long) pp_total, ms,
                             ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0,
-                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid);
+                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid,
+                            pp_stage_ms());
                 strata::core::progress_beat();
                 std::fflush(stdout);
                 return true;
@@ -21863,10 +22197,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 }
                 if (sp_ok && merge_at >= 0) {   // the server's progress reaches the prompt's end, as after its last window
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                    std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) to,
+                    std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld stage_ms=%.1f\n",
+                                (long long) to,
                                 (long long) pp_total, ms,
                                 ms > 0.0 ? 1000.0 * (double) (to - pp_from) / ms : 0.0,
-                                (long long) std::max<int64_t>(0, to - pp_from), pp_running_ms(), (long long) pp_rid);
+                                (long long) std::max<int64_t>(0, to - pp_from), pp_running_ms(), (long long) pp_rid,
+                                pp_stage_ms());
                     std::fflush(stdout);
                 }
                 if (!sp_ok) {
@@ -21916,9 +22252,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             // gets the same line before its DONE (below); a request that ends with ERR gives none.
             if (!cancelled && !rdone_done) {
                 rdone_done = true;
-                std::printf("RDONE rid=%lld new=%lld ms=%.1f\n", (long long) pp_rid,
+                std::printf("RDONE rid=%lld new=%lld ms=%.1f stage_ms=%.1f\n", (long long) pp_rid,
                             (long long) std::max<int64_t>(0, n - resume),
-                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0);
+                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0, pp_stage_ms());
                 std::fflush(stdout);
             }
             if (!cy_held.empty()) {
@@ -23102,6 +23438,48 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: %lld tokens live\n",
                              (long long) pp_reached);
             }
+            if (cancelled && !live_ok && !nf_hit && !read_vram && yielded_at < 0 && pp_reached > 0 && !pp_exact &&
+                o.prompt_cache > 0 && (req_ckpt || req_cont)) {
+                // P124b: the read was cut INSIDE a window or a batched/pipelined part (pp_exact false: the keep above
+                // needs the session to sit exactly at a reported position), so what it read would be thrown away: the
+                // next request's switch parks finished turns, a kept-but-nowhere-to-land read nothing, and the prompt
+                // came back read from 0 (mortar, 11-25: a low read paused at 16,384 of 105,603, everything lost).
+                // The checkpoints the read took hold the complete running state at their positions: the deepest one of
+                // this prompt at or below the position reached goes back into the session (conv_cache.hpp), which then
+                // stays the live conversation exactly like a finished turn's - the next request continues from it, or
+                // the switch to another conversation PARKS it with its K/V, its checkpoints and its tokens, park
+                // budget and disk spill as for any parked conversation, and the request coming back reuses it.
+                std::vector<int64_t> land_lens;
+                for (const ConvCheckpoint& c : checks) land_lens.push_back((int64_t) c.ids.size());
+                const int64_t land = strata::program::conv_cache::cut_read_landing(
+                    land_lens.data(), land_lens.size(), pp_reached, [&](size_t i) {
+                        const ConvCheckpoint& c = checks[i];
+                        return c.stage_parts.size() == stages.size() &&
+                               imgs_below(req_imgs, (int64_t) c.ids.size()) == c.imgs &&
+                               std::equal(c.ids.begin(), c.ids.end(), cur.begin(), cur.end(),
+                                          [](int32_t a, int64_t b) { return (int64_t) a == b; });
+                    });
+                if (land >= 0) {
+                    const ConvCheckpoint& c = checks[(size_t) land];
+                    (void) strata::core::device_sync();   // (nothing of the cut read may still be writing the session)
+                    bool back = checkpoint_restore(c, ss, g);
+                    for (size_t i = 0; back && i < stages.size(); ++i) {
+                        const strata::core::OnDevice on(stages[i]->dev);
+                        back = checkpoint_restore(c.stage_parts[i], stages[i]->ss, g);
+                    }
+                    if (back) {
+                        live.assign(c.ids.begin(), c.ids.end());
+                        live_imgs = c.imgs;
+                        live_ok = true;
+                        std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: %lld tokens "
+                                             "live (its checkpoint: the read stopped inside a part)\n",
+                                     (long long) c.ids.size());
+                    } else {
+                        std::fprintf(stderr, "saguaro serve: the cancelled read could not go back to its checkpoint "
+                                             "of %lld tokens: what it read is dropped\n", (long long) c.ids.size());
+                    }
+                }
+            }
             static const bool state_hash = std::getenv("SAGUARO_STATE_HASH") != nullptr;
             if (state_hash && !cancelled && o.prompt_cache > 0) {   // every finished request, ckpt=0 too (parity gates)
                 // DEBUG: a fingerprint of every part of the session over the positions it holds ([0, L)), and
@@ -23219,8 +23597,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t read_n = cancelled ? std::clamp<int64_t>(pp_reached - resume, 0, fresh) : fresh;
             if (!rdone_done) {   // (PLAN-qfn-per-request-read-stats: this read ends here too - cancelled, yielded
                 rdone_done = true;   //  or a prompt that was whole from the start: its own count, its own read time)
-                std::printf("RDONE rid=%lld new=%lld ms=%.1f\n", (long long) pp_rid, (long long) read_n,
-                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0);
+                std::printf("RDONE rid=%lld new=%lld ms=%.1f stage_ms=%.1f\n", (long long) pp_rid, (long long) read_n,
+                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0, pp_stage_ms());
                 std::fflush(stdout);
             }
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
@@ -23290,6 +23668,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                     const auto tc2 = Clock::now();   // (the slot's old checkpoints freed)
                     turn_slot[(size_t) admit_slot].reset();   // (copied in from the main session)
+                    turn_slot[(size_t) admit_slot].adopt_clear();   // (PLAN-p124a2: the copy-in rewrote the slot)
                     sl.active = true;
                     sl.cache0 = drive.d.cache_hits;   // the request's own expert-cache figures (the tail of its BDONE)
                     sl.look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
@@ -23668,12 +24047,30 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
         }
         if (sdir) {   // --session-dir: the active conversation too, then everything queued, before the engine ends
+            // P125d: a GiB conversation parked into swapped-out RAM copies at well under 1 MiB/s (#2049/#2065/#1971) -
+            // the whole exit save gets --session-dir-exit-s (10 s).  Past it the rest is skipped: what is on disk
+            // stays what the last turn left, and the exit is never blocked by the save (the P125a box spent minutes here)
+            const auto t_save = std::chrono::steady_clock::now();
+            const auto exit_deadline = t_save + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(o.session_dir_exit_s));
+            std::fprintf(stderr, "saguaro serve: session dir: saving the live conversation and %zu slot(s) at exit "
+                                 "(up to %.0f s)\n", bs.size(), o.session_dir_exit_s);
             sdir->begin_exit();
+            bool out_of_time = false;
             park_current(0);
-            for (int b = 0; b < (int) bs.size(); ++b) persist_slot(b, false, {}, true, "the engine ends");   // after it: they supersede it
-            sdir->flush();
-            std::fprintf(stderr, "saguaro serve: session dir: %zu file(s), %llu MiB on disk at exit\n", sdir->files(),
-                         (unsigned long long) (sdir->bytes() >> 20));
+            for (int b = 0; b < (int) bs.size() && !out_of_time; ++b) {
+                if (std::chrono::steady_clock::now() >= exit_deadline) out_of_time = true;   // no slot save started after it
+                else persist_slot(b, false, {}, true, "the engine ends");   // after it: they supersede it
+            }
+            if (!out_of_time && !sdir->flush_until(exit_deadline, "exit")) out_of_time = true;
+            if (out_of_time) {   // queued writes stop at their next block; the exit waits for none of them
+                sdir->drop_queued();
+                std::fprintf(stderr, "saguaro serve: session save skipped at exit after %.1f s "
+                                     "(--session-dir-exit-s): the conversations stay saved from their last turn\n",
+                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t_save).count());
+            } else
+                std::fprintf(stderr, "saguaro serve: session dir: %zu file(s), %llu MiB on disk at exit\n",
+                             sdir->files(), (unsigned long long) (sdir->bytes() >> 20));
         }
         save_profile("exit");   // #477: QUIT, or the server closed stdin
 #if defined(STRATA_GPU_METAL)

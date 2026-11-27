@@ -283,6 +283,13 @@ class GlmExl3Folder(Tmp):
         self.a.model_dir = str(glm)
         self.assertEqual(maya.choose_model(self.a, self.root, {}), ("exl3", glm.resolve()))
 
+    def test_a_later_setup_takes_the_recorded_folder_of_your_own(self):
+        """P124f: an EXL3 folder of your own is recorded in the config's installer (model_dir): a setup again
+        without --model-dir named again takes that folder - the pinned downloads are not offered for it."""
+        glm = exl3_folder(self.root, "GLM-5.3-Flash-exl3-sc_2.10bpw", "glm5_next")
+        inst = {"models_dir": str(self.root), "quant": glm.name, "model_dir": str(glm)}
+        self.assertEqual(maya.choose_model(self.a, self.root, inst), ("exl3", glm))
+
     def test_model_step_checks_the_folders_own_index(self):
         glm = exl3_folder(self.root, "GLM-5.3-Flash-exl3-sc_2.10bpw", "glm5_next", shards=3)
         d, shards, quant = maya.model_step(self.a, self.root, ("exl3", glm))
@@ -456,14 +463,41 @@ class MiniMaxExl3Folder(Tmp):
         self.assertLess(small, maya.MM3_MEMORY_GB)                             # (a few bytes: the headroom only)
         self.assertEqual(maya.mm3_memory_gb("exl3"), maya.MM3_MEMORY_GB)       # (the pinned quant as before)
 
-    def test_a_later_setup_does_not_find_the_pinned_files_in_the_folder_of_your_own(self):
+    def test_a_later_setup_takes_the_recorded_folder_of_your_own(self):
+        """P124f: an own MiniMax folder is recorded in the config's installer (own + model_dir): a setup again
+        without --model-dir named again takes it (mm3_own_step then checks it by its OWN index - the pinned
+        download is not offered for it).  A config from before the model_dir record: the pinned folder as ever."""
         d = self.own()
-        prev = {"args": ["--pack", str(d / "maya-mm3")], "installer": {"mm3_quant": "exl3", "own": True}}
+        prev = {"args": ["--pack", str(d / "maya-mm3")], "installer": {"mm3_quant": "exl3", "own": True,
+                                                                       "model_dir": str(d)}}
         self.a.model_dir = None
-        got = maya.mm3_dir(self.a, self.root / "models", prev, "exl3")
-        self.assertEqual(got, self.root / "models" / maya.MM3_DIR)
+        self.assertEqual(maya.mm3_dir(self.a, self.root / "models", prev, "exl3"), d)
+        prev["installer"].pop("model_dir")                                     # (before the record: as it was)
+        self.assertEqual(maya.mm3_dir(self.a, self.root / "models", prev, "exl3"),
+                         self.root / "models" / maya.MM3_DIR)
+        prev["installer"].update(model_dir=str(d))
         prev["installer"].pop("own")                                           # (the pinned setup before: as it was)
         self.assertEqual(maya.mm3_dir(self.a, self.root / "models", prev, "exl3"), d)
+
+    def test_set_up_mm3_wires_the_recorded_own_folder_to_its_steps(self):
+        """P124r (REVIEW-p124f finding 1): the wiring line itself is tested, not only mm3_dir - set_up_mm3
+        takes the installer's own + model_dir as the `own` folder every later step runs on, without
+        --model-dir named again; a config without the record: the own stays None and the pinned flow follows."""
+        d = self.own()
+        self.a.model_dir = None
+
+        def memory(quant, own=None):     # the first step after the wiring: capture the folder and stop there
+            seen.append(own)
+            raise Stop("stop after the own folder")
+        for inst, want in (({"mm3_quant": "exl3", "own": True, "model_dir": str(d)}, Path(str(d))),
+                           ({"mm3_quant": "exl3"}, None)):                # (the pinned setup before: as it was)
+            seen = []
+            with patch.object(maya, "choose_mm3_quant", return_value="exl3"), \
+                    patch.object(maya, "mm3_own_dir", return_value=None), \
+                    patch.object(maya, "mm3_memory_gb", memory):
+                with self.assertRaises(Stop):
+                    maya.set_up_mm3(self.a, {"args": ["--pack", str(d / "maya-mm3")], "installer": inst})
+            self.assertEqual(seen, [want])
 
     def test_the_config_has_the_folders_sampling_and_a_name_of_its_own(self):
         d = self.own(gen={"bos_token_id": 1, "do_sample": True, "temperature": 0.5, "top_p": 0.8})

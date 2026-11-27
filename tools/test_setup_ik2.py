@@ -346,7 +346,7 @@ class Fit(unittest.TestCase):
 
 
 class Picker(unittest.TestCase):
-    def rows(self, cards, prev=None):
+    def rows(self, cards, prev=None, ram=251.0):
         got = {}
 
         def pick(title, intro, opts, default, yes, *x):
@@ -354,18 +354,27 @@ class Picker(unittest.TestCase):
             return default
         a = args(model=None)
         with patch.object(maya, "choose", pick), patch.object(maya.S, "gpus", return_value=cards), \
-                patch.object(maya, "mem_gb", return_value=(251.0, 200.0)), patch.object(maya, "WIN", False):
+                patch.object(maya, "mem_gb", return_value=(ram, ram - 51.0)), patch.object(maya, "WIN", False):
             fam = maya.choose_family(a, prev or {})
         return fam, got
 
-    def test_recommended_on_one_or_two_small_cards(self):
+    def test_qfn_wins_on_one_or_two_small_cards_now(self):
+        """P124o: on one or two T4s the setup now recommends Qwen3.8-Flash-Next (its UD-Q4_K_XL runs there -
+        the measured split); Inkling 2 Mini stays offered, unmarked."""
         for n in (1, 2):
             fam, got = self.rows([t4(i) for i in range(n)])
-            self.assertEqual(fam, "ik2", n)
-            label, note, about = got["rows"][maya.FAMILIES.index("ik2")]
-            self.assertEqual((label, note), ("Inkling 2 Mini", "recommended for this PC"))
-            for part in ("one or two", "16 GB", "8 GB", "AMD", "40 tok/s", "51 tok/s", "Apache 2.0"):
-                self.assertIn(part, about)
+            self.assertEqual(fam, "qfn", n)
+            self.assertEqual(got["rows"][maya.FAMILIES.index("ik2")][1], "new")
+            self.assertIn("recommended for this PC", got["rows"][maya.FAMILIES.index("qfn")][1])
+
+    def test_recommended_where_no_qfn_quant_runs(self):
+        """... and on a PC under every QFN quant's minimum it is the recommendation again (12 GB card, 13 GB RAM)."""
+        fam, got = self.rows([t4(0, 12.0)], ram=13.0)
+        self.assertEqual(fam, "ik2")
+        label, note, about = got["rows"][maya.FAMILIES.index("ik2")]
+        self.assertEqual((label, note), ("Inkling 2 Mini", "recommended for this PC"))
+        for part in ("one or two", "16 GB", "8 GB", "AMD", "40 tok/s", "51 tok/s", "Apache 2.0"):
+            self.assertIn(part, about)
 
     def test_four_t4s_get_hy4_and_a_setup_before_wins(self):
         fam, got = self.rows([t4(i) for i in range(4)])
@@ -685,6 +694,71 @@ class Steps(unittest.TestCase):
                 self.assertRaises(SystemExit, maya.ik2_model_step, a, d)
         with patch.object(maya, "offer_download", lambda *x, **k: False):       # (a short file, the download declined)
             self.assertIsNone(maya.ik2_model_step(a, d))
+
+    def test_a_setup_again_takes_the_recorded_folder_and_its_own_file(self):
+        """P124f: a setup again of an Inkling config that ran a GGUF of its own in a folder of its own (the
+        installer records model_dir and ik2_file): the recorded folder and file are found without --model-dir
+        named again, and taken as they are - no download."""
+        d = self.root / "the-9070-xt-card"
+        d.mkdir()
+        own = d / "Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf"
+        own.write_bytes(b"GGUF")
+        prev = {"installer": {"family": "ik2", "ik2_quant": Q.IK2_QUANT, "ik2_file": own.name, "model_dir": str(d),
+                              "models_dir": str(self.root / "models")}}
+        self.assertEqual(maya.ik2_dir(args(), self.root / "models", prev, Q.IK2_QUANT), d)
+        a = args(download_model=False)
+        a.ik2_prev_file = own.name                       # (what set_up_ik2 hands ik2_local_gguf from the installer)
+        self.assertEqual(maya.ik2_local_gguf(a, d), own)
+        with patch.object(maya, "offer_download", side_effect=AssertionError("nothing to download here")):
+            self.assertEqual(maya.ik2_model_step(a, d), own)
+
+    def test_set_up_ik2_hands_the_recorded_file_to_its_steps(self):
+        """P124r (REVIEW-p124f finding 1): the wiring line itself is tested, not only ik2_local_gguf -
+        set_up_ik2 puts the installer's ik2_file onto the args (a.ik2_prev_file) BEFORE ik2_local_gguf runs,
+        so a setup again finds its own GGUF without --model-dir named again; a config without the record:
+        the same line hands it None."""
+        class Wired(Exception):
+            """Ends set_up_ik2 right after the line under test (its steps 2-8 need a PC and a build)."""
+        d = self.root / "own-folder"
+        d.mkdir()
+        own = d / "Inkling-2-Mini-T4-NVFP4-IQ3_XXS.gguf"
+        own.write_bytes(b"GGUF")
+        for inst, want in (({"family": "ik2", "ik2_quant": Q.IK2_QUANT, "ik2_file": own.name,
+                             "model_dir": str(d), "models_dir": str(self.root / "models")}, own.name),
+                           ({"family": "ik2", "ik2_quant": Q.IK2_QUANT,
+                             "models_dir": str(self.root / "models")}, None)):   # (the pinned setup: as it was)
+            seen = []
+
+            def local(a, dd):
+                seen.append((id(a), dd, getattr(a, "ik2_prev_file", "never set")))
+                raise Wired("the wiring is what this test drives")
+            a = args(download_model=False)
+            with patch.object(maya, "check_pc", return_value={"backend": "cuda", "gpus": [card(24)]}), \
+                    patch.object(maya, "choose_ik2_quant", return_value=Q.IK2_QUANT), \
+                    patch.object(maya, "ik2_dir", return_value=d), \
+                    patch.object(maya, "ik2_local_gguf", local):
+                with self.assertRaises(Wired):
+                    maya.set_up_ik2(a, {"installer": inst})
+            self.assertEqual(seen, [(id(a), d, want)])
+            self.assertEqual(a.ik2_prev_file, want)
+
+    def test_a_setup_again_offers_only_the_file_that_is_missing(self):
+        """P124f the other half: the recorded folder, its published UD-Q4_K_XL gone: the download offered names
+        exactly that file."""
+        d, gguf = self.files()
+        gguf.unlink()
+        prev = {"installer": {"family": "ik2", "ik2_quant": Q.IK2_QUANT, "model_dir": str(d),
+                              "models_dir": str(self.root / "models")}}
+        d2 = maya.ik2_dir(args(), self.root / "models", prev, Q.IK2_QUANT)
+        self.assertEqual(d2, d)
+        asked = []
+
+        def offer(a, what, dd, files, m):
+            asked.append([f.name for f in files])
+            return False
+        with patch.object(maya, "offer_download", offer):
+            self.assertIsNone(maya.ik2_model_step(args(download_model=False), d2))
+        self.assertEqual(asked, [[maya.ik2_entry()["gguf"]]])
 
     def test_a_start_of_it(self):
         d, gguf = self.files()

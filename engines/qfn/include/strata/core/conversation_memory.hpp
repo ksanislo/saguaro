@@ -79,6 +79,13 @@ inline int64_t auto_conversation_cache_mib(std::optional<uint64_t> available, in
 
 std::optional<uint64_t> conversation_mem_available(std::istream& meminfo);
 
+/// SwapTotal - SwapFree from a /proc/meminfo-style stream (P124x: what the kernel has already parked to swap).
+/// A stream without SwapTotal: unknown.  SwapTotal 0: no swap configured - 0 used.  Malformed lines: unknown.
+std::optional<uint64_t> conversation_swap_used(std::istream& meminfo);
+
+/// The same, read from /proc/meminfo now (nullopt off Linux or when the file cannot be read).
+std::optional<uint64_t> host_swap_used_bytes();
+
 inline bool conversation_memory_admit(std::optional<uint64_t> available,
                                       uint64_t allocation, uint64_t floor) {
     return available && *available >= floor && allocation <= *available - floor;

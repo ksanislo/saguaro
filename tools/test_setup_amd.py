@@ -64,8 +64,10 @@ class Picker(unittest.TestCase):
 
     def test_amd_gets_a_recommendation(self):
         fam, got = self.pick([rx9070(), IGPU])
-        self.assertEqual(fam, "ik2")   # (one 16 GB RDNA card: Inkling 2 Mini, measured on an RX 9070 XT)
-        self.assertEqual(got["rows"][maya.FAMILIES.index("ik2")][1], "recommended for this PC")
+        self.assertEqual(fam, "qfn")   # (P124o: one 16 GB RDNA card: Qwen3.8-Flash-Next, the layout it was
+                                       #  measured on; Inkling 2 Mini where no QFN quant runs)
+        self.assertEqual(got["rows"][maya.FAMILIES.index("qfn")][1], "recommended for this PC (UD-Q4_K_XL)")
+        self.assertEqual(got["rows"][maya.FAMILIES.index("ik2")][1], "new")
 
     def test_models_without_an_amd_engine_are_marked(self):
         _, got = self.pick([rx9070()])
@@ -82,16 +84,17 @@ class Picker(unittest.TestCase):
         self.assertIn("not supported on this PC's GPU yet", text)
         self.assertNotIn("Fix the item above", text)
 
-    def test_nvidia_unchanged(self):
-        self.assertEqual(self.pick([t4(0), t4(1)], 251.0, "cuda")[0], "ik2")
-        self.assertEqual(self.pick([t4(i) for i in range(4)], 251.0, "cuda")[0], "hy4")
+    def test_nvidia_recommendations(self):
+        self.assertEqual(self.pick([t4(0), t4(1)], 251.0, "cuda")[0], "qfn")   # (P124o: QFN first on one or two)
+        self.assertEqual(self.pick([t4(i) for i in range(4)], 251.0, "cuda")[0], "hy4")   # (the four-card pick stays)
 
     def test_family_fit(self):
         with patch.object(maya, "mem_gb", return_value=(92.0, 86.0)), patch.object(maya, "WIN", False):
-            self.assertEqual(maya.family_fit([rx9070()], 92.0, "hip"), "ik2")
-            self.assertEqual(maya.family_fit([rx9070(), rx9070(1)], 92.0, "hip"), "glm")   # (Inkling: one AMD GPU)
+            self.assertEqual(maya.family_fit([rx9070()], 92.0, "hip"), "qfn")   # (P124o: QFN first, its one AMD GPU)
+            self.assertEqual(maya.family_fit([rx9070(), rx9070(1)], 92.0, "hip"), "glm")   # (QFN/Inkling: one AMD GPU)
             self.assertIsNone(maya.family_fit([], 92.0, "hip"))
-            self.assertEqual(maya.family_fit([t4()], 92.0), "ik2")
+            self.assertEqual(maya.family_fit([t4()], 92.0), "qfn")
+            self.assertEqual(maya.family_fit([t4()], 13.0), "ik2")   # (under every QFN minimum: Inkling still)
 
     def test_unavailable(self):
         with patch.object(maya, "WIN", False):

@@ -226,6 +226,7 @@ These settings change what the engine chooses (put them in the config with `--en
 | `SAGUARO_HTTP_BACKLOG`, `SAGUARO_MAX_BODY_MIB` | 256, 256 | the server: connections that may wait to be accepted, and the largest request body in MiB (a larger one gets a 413 before it is read) |
 | `SAGUARO_ENGINE_QUIT_S` | 50 | the server: how long the engine gets to end (and keep its conversation, with `SAGUARO_GLM_SLOT_KEEP`) after a stop - SIGTERM and SIGHUP are handled like Ctrl+C, a second one is ignored (a second Ctrl+C ends the server at once); a supervisor's own grace (llama-swap's `unloadTimeout`) should exceed it |
 | `SAGUARO_ENGINE_WRAP_S` | 40 | the server: on a stop, a request in progress is wrapped up instead of dropped - its thinking is closed at once and it answers for up to this long (then it is cut), so the client gets an answer and the turn ends; requests still queued are refused. Keep it plus the engine's end inside the supervisor's grace (llama-swap's `unloadTimeout`); `0` = cut at once |
+| `SAGUARO_SHUTDOWN_S` | 15 | the server, Qwen engine (batch protocol): how long the whole server-side shutdown gives the engine to end on its own after STOP + QUIT. Past it the server sends SIGKILL at once - the engine ignores SIGTERM under `--serve` by design, so a terminate step would only waste the time (P125a's 6-minute exit); the wait for the killed engine to be reaped stays bounded by 20 s. A supervisor's grace (llama-swap's `unloadTimeout`, lifeline's 10 s) should exceed it. `0` ends the engine at once |
 | `SAGUARO_FAIR_SLICE_S` | 0 (off) | the server: an answer that has been decoding this many seconds while another request waits gives the engine to it and continues afterwards, from where it was (the engine keeps its state with what it wrote: one token is read again). Concurrent chats and an agent's side requests no longer wait for a whole answer (4x RTX 4090, a short question during a 3000-token answer: first token after 34 s -> 13-17 s at 15-20). Each switch sets a conversation aside on disk (0.1-1 s up to 100K tokens on a SATA SSD array), so a slow disk wants a longer slice |
 | `SAGUARO_LOOP_GUARD` | on | the server, every model: an answer that falls into a loop (one block of tokens repeated back to back) is caught as it starts and steered out of it - see [The loop guard](#the-loop-guard). `0` = off (as `"loop_guard": false` in the config) |
 | `SAGUARO_LOOP_GUARD_COLLAPSE_MAX` | 32000 | the server: how many characters of conversation (content, reasoning and tool calls, roughly tokens x 3.5) the loop guard may still rewrite history in. Above it the prompt is left whole - a collapse changes the prompt's prefix, so the engine's snapshot and checkpoints no longer match and the whole conversation is read again (a 126K-token prompt: 16 chunks, about 2 minutes). The generation-side protections (`stops_short`, `keep_going`, the repetition penalty) still apply there. `0` = no limit, the behaviour before this setting. See #702. |
@@ -234,7 +235,7 @@ These settings change what the engine chooses (put them in the config with `--en
 | `SAGUARO_VIDEO_MAX_FRAMES` | 240 | the server (GLM): the most frames a video may give (read at 4 a second, so 240 = a minute); a longer video is refused before it is decoded, with its length in the message. Every frame takes an image's share of the context. Videos need ffmpeg and ffprobe installed |
 | `SAGUARO_FAIR_READ_S`, `SAGUARO_FAIR_READ_YIELD_S` | 0 (off), 30 | the server, several conversations at once: a prompt the engine has been reading this many seconds while another request waits behind it (sent, nothing heard from it yet) is paused at the engine's next chunk - the engine keeps what it read - and goes on with the rest once the waiting requests have started (at most the yield seconds later). A short turn no longer waits for another chat's whole long read; the read loses a pipeline refill per pause. After upstream PR #144's design |
 | `SAGUARO_PRIORITY_AGE_S` | 0 (off) | the server: set above 0: a queued low request that has waited this many seconds counts as a normal one (see Request priority below). Off by default: a low request waits as long as a higher-priority one uses or waits for the model - it is never dropped or errored for waiting |
-| `SAGUARO_PRIORITY_IDLE_S` | 30 | the server: the idle rule for `low` requests (see Request priority below): a low request starts, or resumes after a pause, only when nothing normal or high runs or waits AND none finished in the last this many seconds - so a person's follow-up a few seconds after an answer finds the model where they left it. `0` = no grace |
+| `SAGUARO_PRIORITY_IDLE_S` | 5 | the server: the idle rule for `low` requests (see Request priority below): a low request starts, or resumes after a pause, only when nothing normal or high runs or waits AND none finished in the last this many seconds - so a person's follow-up a few seconds after an answer finds the model where they left it. `0` = no grace |
 | `SAGUARO_WAIT_EVENT_S`, `SAGUARO_WAIT_SPACE_S` | 15, 20 | the server: how a request that had to wait - queued in the FIFO at least once, or paused for a higher priority - keeps its client, which sees nothing of it. Only a request that waited changes its framing; one that never queued and never paused streams and answers exactly as before, however slow it is. For one that waited: after the second many seconds without a real event its stream adds one empty event beside its keep-alive comments (chat completions a chunk whose delta is `{}`, `/v1/messages` an Anthropic `ping`, `/v1/responses` another `response.in_progress`; the ollama-style streams send nothing - an empty line would break them), never text in the answer; a non-streaming one gets its 200 and headers and a space every `SAGUARO_WAIT_EVENT_S` until the JSON - at once when it is paused, `SAGUARO_WAIT_SPACE_S` after its wait started when it only queued - spaces before a JSON body are valid, and from the headers out an error cannot change the status any more (it says so in the log once) |
 
 **Request priority** (`priority`). A request can say how long it may hold the queue: the body field `"priority"` -
@@ -246,7 +247,7 @@ and `"idle"` included - is a 400 that names the three values. Every API takes it
 nothing here.) The queue then hands the engine to the highest priority waiting - first come first served inside one
 priority - and nothing else changes while requests all have the same level. `high` goes before `normal` and `low`;
 and `low` means "only while idle": a low request starts, or resumes after a pause, only when nothing normal or high
-runs or waits AND none has finished in the last `SAGUARO_PRIORITY_IDLE_S` seconds (default 30, `0` = no grace) - a
+runs or waits AND none has finished in the last `SAGUARO_PRIORITY_IDLE_S` seconds (default 5 - long enough for an agent's tool-call gap, since a low prompt read steps aside only at the end of a chunk; `0` = no grace) - a
 person's follow-up a few seconds after an answer finds the model where they left it. While it waits out the grace
 its keep-alives go on as usual; it is never dropped for waiting.
 
@@ -341,6 +342,38 @@ what you changed there):
 
 One card streams nearly every expert over PCIe for each chunk, so fewer, larger chunks pay off on long prompts. On a
 split, a prompt that fits one chunk runs the cards one after the other, while two or more keep both busy.
+
+## Turbo
+
+Turbo trades quality for speed on purpose - benchmarks and playing with the engine. It has two halves that never
+switch each other on:
+
+- **The Turbo button** (Settings > Chat defaults, beside the model's parameters) is the model's fastest settings.
+  The page's half is greedy decoding and the fastest thinking level. The engine's half is written into the run
+  config and starts Saguaro again as a saved engine setting does (where the server can restart; one answer at a
+  time the server holds without a restart): context 32768 on GLM and MiniMax, the fastest drafter the pack has
+  (DSpark on DeepSeek and MiniMax, MTP on QFN - GLM keeps the drafter the setup measured) with DSpark's draft
+  floor at `0.3` and `SAGUARO_DS4_DSPARK_CUM=0.3`, DeepSeek's prompt lookup on, and where the engine has expert
+  skipping the rows in the tables above:   `SAGUARO_GLM_MISS_SKIP_W=0.16` with `SAGUARO_GLM_MISS_SKIP_FROM=23` and
+  `SAGUARO_GLM_RESIDENT_TOPK=4`, `SAGUARO_DS4_RAM_SKIP_W=0.14` and `SAGUARO_DS4_RESIDENT_TOPK=3` (the measured
+  values sit in the two RESIDENT_TOPK rows above, each of them flagged there as changing the answers). On
+  the smallest quants (GLM and DeepSeek Maya-XS) it keeps every routed expert: the cap only gained a few percent
+  there and their answers went bad. What the button changed is kept in the config's `"turbo"` note and switching
+  it off puts every one of them back. Inkling 2 and Hy4-Flash have no Turbo at all (no expert skipping, no
+  drafter set up): no button, and their requests run exact.
+- **The live per-request Turbo** is lossy speed that rides on the request: `"turbo": {"drop": N, "skip":
+  "off"|"ssd"|"ram"}` on a chat / messages / responses body - the engine's line gets `turbo_drop=N` and
+  `turbo_skip=ssd|ram`: run the top-k without its N lightest routed experts (renormalised), and leave out an
+  expert the SSD tier would serve, or one VRAM does not hold. It applies to that chat's tokens only; every other
+  chat in the batch stays exact. The web app's own chats run with the model's live default (Settings > Turbo,
+  live: Drop experts, Skip slow experts) unless the chat's own bolt says otherwise, and it persists between
+  restarts in the sidecar `<config minus .json>.turbo.json` beside the run config - never in the config itself,
+  not listed as a model, and deleted with it. **An API request gets Turbo only from its own field** (PLAN-p124s):
+  neither the page's panel nor the button ever switches Turbo on for one.
+
+The button never touches the live half, and no `SAGUARO_*TURBO*` environment variable exists: what the engine
+skips it says through the rows named above, and what a request skips through its keys. The Skip choice only
+shows where the engine applies it (a QFN from before its skip build says so and the page hides it).
 
 ## The expert pool's size
 
@@ -2249,3 +2282,21 @@ for `saguaro-qfn` once, by the setup or the next start, keeping its context, por
   model's mmproj (0.9 GB, pinned and sha256-checked) and writes the elastic `"vision"` entry above - `vision-qfn`
   reads it, on every quant of this family.
 * **Defaults from the model card**: temperature 1.0, top-p 0.95, top-k 20 (the GGUF's `general.sampling`).
+
+## Live API prices (`live_prices`, `SAGUARO_LIVE_PRICES`) - off by default
+
+The web page's Saved line counts what the same tokens would have cost on each model's own API. **Off by default, and
+nothing leaves the box for prices while it is off**: the figures then come from the table shipped with Saguaro
+(`data/api-prices.json`, refilled from OpenRouter's public list by `tools/refresh_prices.py` at each release;
+Settings > Savings says "built-in prices"). Turning it on - the switch in Settings > Savings (it saves
+`"live_prices": true` in the run config), or `SAGUARO_LIVE_PRICES=1` in the environment before a start - makes Saguaro
+fetch OpenRouter's public model list (GET `https://openrouter.ai/api/v1/models`, no key) at most once a day, and at a
+start whose cache has aged past a day, on a background thread that never delays a request or the start. The request
+asks for nothing but the public list: it carries nothing about the user, the chats, the model or the machine, and
+OpenRouter learns only that a Saguaro asked. The result is cached beside the token count with its fetch time; a fetch
+that fails keeps yesterday's cache or the shipped table, with one log line, and tries again an hour later.
+`SAGUARO_LIVE_PRICES=0` says no whatever the config holds and whatever the page's switch asks while the server runs:
+the env beats the run config at the start and the switch at runtime, and a toggle against it is refused with the
+reason, nothing saved; the switch off - the default - is the same no.  Right after the switch goes on the Savings
+line still says "built-in prices" - nothing waits for the network - and from the first fetch's answer on it says
+"OpenRouter, <date>".

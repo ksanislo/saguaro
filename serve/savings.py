@@ -4,8 +4,9 @@ Every finished request adds its tokens to the running model's count: the prompt 
 its own cache (an API bills that as cached input, far cheaper) and what it wrote.  The count is kept per model (per run
 config) in token-savings.json beside the configs, so it adds up across starts; "this start" is the server's own.
 
-The prices are the model's own API's (the developer's, not a reseller's), per 1M tokens, as published in October 2026
-(Hy4-flash's: at its launch, November 2026).
+The prices are the model's own API's (the developer's, not a reseller's), per 1M tokens: the built-in table below and
+data/api-prices.json are prefilled from OpenRouter's public model list at each release
+(tools/refresh_prices.py), so nothing needs a hand-maintained price list.
 DeepSeek charges twice its off-peak price at its peak hours (Monday to Friday, 01:00-04:00 and 06:00-10:00 UTC; its
 Chinese public holidays are off-peak too, which this does not know - those days count as peak), so a request finished
 then is counted at that price.  A model without a known API price is counted in tokens only.  Electricity is not
@@ -18,10 +19,12 @@ The default prices come from data/api-prices.json in this folder: {"as_of": "YYY
 - the same entries the built-in table below holds.  A file that cannot be read or does not check out (check_price) is
 ignored with one log line, and the built-ins are used; a model the file does not name keeps its built-in entry.
 
-When the Savings page asks, the server fetches the newest copy of that file from GitHub at most once a day (its origin
-repo, raw.githubusercontent.com; a short timeout; the copy is cached in the savings folder and used while it is newer
-than the folder's own), unless SAGUARO_UPDATE_CHECK=0 said no outgoing requests.  The precedence: the page's own
-prices > the fetched file > data/api-prices.json > the built-ins."""
+With live_prices on (Settings > Savings, the run config's "live_prices", or SAGUARO_LIVE_PRICES=1 - off by default,
+nothing leaves the box unless the user turns it on), the server fetches OpenRouter's public model list at most once a
+day, and at a start whose cache is older (openrouter.ai/api/v1/models, no key, no user data; a background thread, a
+10 s timeout; the result cached with its fetch time beside the count file).  On any failure the cache or the shipped
+table counts, with one log line.  The precedence: the page's own prices > the fetched OpenRouter prices >
+data/api-prices.json > the built-ins; the Savings line says which of them counts."""
 from __future__ import annotations
 
 import json
@@ -30,6 +33,7 @@ import re
 import threading
 import time
 import urllib.request
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 FILE = "token-savings.json"
@@ -43,18 +47,25 @@ def ledger_path(config: Path, env=None) -> Path | None:
     if v.lower() in ("off", "none", "0"):
         return None
     return Path(v).expanduser() if v else Path(config).parent / FILE
-PRICES_AS_OF = "2026-10"
-# per 1M tokens, in US dollars; "peak": the factor at DeepSeek's peak hours
+PRICES_AS_OF = "2026-11"
+# per 1M tokens, in US dollars; "peak": the factor at DeepSeek's peak hours; "openrouter": the family's id in
+# OpenRouter's public model list (serve/savings.py's live fetch, tools/refresh_prices.py).  The figures are the
+# OpenRouter list's of November 2026; MiniMax's and Hy4-flash's are flat (no context tiers, no peak hours).
 REFERENCES = [
     {"match": r"deepseek[-_.]?v?4\.1[-_.]?flash|deepseek[-_.]flash", "api": "DeepSeek",
+     "openrouter": "deepseek/deepseek-v4.1-flash-1017",
      "input": 0.15, "cached": 0.003, "output": 0.60, "peak": 2.0},
-    {"match": r"glm[-_.]?5\.3[-_.]?flash", "api": "Z.ai", "input": 0.15, "cached": 0.03, "output": 0.50},
-    # MiniMax's own, flat (no context tiers or peak hours for the Flash model):
-    # https://platform.minimax.io/docs/pricing/overview (read 2026-10-27)
-    {"match": r"minimax[-_.]?m3\.1[-_.]?flash", "api": "MiniMax", "input": 0.15, "cached": 0.015, "output": 0.60},
-    # Hy4-flash: Tencent's own (Tencent Cloud TokenHub, USD), https://www.tencentcloud.com/document/product/1300/78937
-    # (read 2026-11-22; its launch discount - 50% off until 2026-11-30 - not counted).  Flat: no peak hours
-    {"match": r"(?:^|[/_.-])hy[-_.]?4[-_.]?flash", "api": "Tencent", "input": 0.07, "cached": 0.003, "output": 0.281},
+    {"match": r"glm[-_.]?5\.3[-_.]?flash", "api": "Z.ai", "openrouter": "z-ai/glm-5.3-flash",
+     "input": 0.15, "cached": 0.03, "output": 0.50},
+    {"match": r"minimax[-_.]?m3\.1[-_.]?flash", "api": "MiniMax", "openrouter": "minimax/minimax-m3.1-flash",
+     "input": 0.075, "cached": 0.0075, "output": 0.30},
+    {"match": r"(?:^|[/_.-])hy[-_.]?4[-_.]?flash", "api": "Tencent", "openrouter": "tencent/hy4-flash",
+     "input": 0.035, "cached": 0.0015, "output": 0.1405},
+    # Qwen3.8-Flash-Next, every quant of it: the API's price is the family's
+    {"match": r"qwen[-_.]?3\.?8[-_.]?flash", "api": "Qwen", "openrouter": "qwen/qwen3.8-flash",
+     "input": 0.15, "cached": 0.016, "output": 0.47},
+    {"match": r"inkling[-_.]?2[-_.]?mini", "api": "Thinking Machines", "openrouter": "thinkingmachines/inkling-2-mini",
+     "input": 0.075, "cached": 0.015, "output": 0.30},
 ]
 BANDS = ("base", "peak")
 
@@ -70,7 +81,8 @@ PRICE_KEYS = ("input", "cached", "output")
 
 
 def check_price(model: str, p: dict) -> dict:
-    """A price the page set for `model`: three numbers of dollars per 1M tokens (and DeepSeek's peak factor), checked."""
+    """A price the page set for `model`: three numbers of dollars per 1M tokens, and the peak factor of an entry that
+    has one (DeepSeek's peak hours) - checked."""
     if not isinstance(p, dict):
         raise ValueError("a price is input, cached and output, in dollars per 1M tokens")
     out = {}
@@ -80,18 +92,25 @@ def check_price(model: str, p: dict) -> dict:
             raise ValueError(f"{k}: a number of dollars per 1M tokens, from 0 to 1000")
         out[k] = float(v)
     base = reference(model)
-    if base and base.get("peak"):                      # (DeepSeek's peak hours: only where they are its own)
-        f = p.get("peak", base["peak"])
-        if isinstance(f, bool) or not isinstance(f, (int, float)) or not 1 <= f <= 10:
-            raise ValueError("peak hours: a factor from 1 to 10")
+    f = p.get("peak")
+    if f is None:
+        f = base.get("peak") if base else None         # (DeepSeek's peak hours: only where they are its own)
+    if f is not None:                                  # (an entry that carries one keeps it: the live fetch builds
+        if isinstance(f, bool) or not isinstance(f, (int, float)) or not 1 <= f <= 10:   #  its entries by the api
+            raise ValueError("peak hours: a factor from 1 to 10")                          #  name, which may not match)
         out["peak"] = float(f)
     if p.get("api") is not None:
         out["api"] = str(p["api"]).strip()[:40]
+    if p.get("openrouter") is not None:                   # the family's id in OpenRouter's public model list
+        out["openrouter"] = str(p["openrouter"]).strip()[:100]
     return out
 
 
-PRICE_FILE = "api-prices.json"                                  # data/api-prices.json, and the fetched copy's name
+PRICE_FILE = "api-prices.json"                                  # the shipped fallback, beside this folder's code
+OPENROUTER_URL = "https://openrouter.ai/api/v1/models"          # the public model list: no key, nothing about the user
+LIVE_FILE = "openrouter-prices.json"                            # the cached fetch, beside the ledger's file
 AS_OF = re.compile(r"^\d{4}-\d{2}$")
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def file_prices(prices: dict) -> dict:
@@ -142,90 +161,239 @@ def load_price_file(path: Path) -> dict | None:
     return doc
 
 
+def per_million(s) -> float:
+    """One of OpenRouter's per-token USD strings ("0.000000075") as dollars per 1M tokens: exact, on the decimal
+    string - never a float multiplied by a million.  ValueError: not a price."""
+    try:
+        return float(Decimal(str(s).strip()) * 1_000_000)
+    except (InvalidOperation, AttributeError) as e:
+        raise ValueError(f"not a per-token price ({str(s)[:20]!r})") from e
+
+
+def price_families(disk: dict | None) -> dict:
+    """The families a live fetch looks up, keyed by their OpenRouter id: the built-ins, overridden by the shipped
+    file's entries (a release may add a family or retitle one there without touching the code)."""
+    fam = {r["openrouter"]: {"name": r["api"], "api": r["api"], "match": r["match"],
+                             **({"peak": r["peak"]} if r.get("peak") else {})}
+           for r in REFERENCES if r.get("openrouter")}
+    if disk:
+        for name, p in disk["prices"].items():
+            if p.get("openrouter"):
+                fam[p["openrouter"]] = {"name": name, "api": p.get("api") or name, "match": p["match"],
+                                        **({"peak": p["peak"]} if p.get("peak") else {})}
+    return fam
+
+
+def parse_openrouter(text: str, families: dict, now: float | None = None) -> tuple:
+    """OpenRouter's model list as a price doc: every family whose id the list holds, its per-token strings (prompt,
+    completion, input_cache_read) as dollars per 1M tokens - or (None, why this list cannot be used).  A family the
+    list does not price simply keeps the price below it; only an answer that holds none of ours is refused."""
+    try:
+        listed = json.loads(text).get("data")
+    except (ValueError, TypeError, AttributeError) as e:
+        return None, f"not the model list ({e})"
+    if not isinstance(listed, list):
+        return None, "not the model list (no data array)"
+    by_id = {}
+    for m in listed:
+        if isinstance(m, dict) and isinstance(m.get("id"), str):
+            by_id.setdefault(m["id"].strip().lower(), m)
+    found = {}
+    for oid, f in families.items():
+        entry = by_id.get(oid.lower())
+        pr = entry.get("pricing") if isinstance(entry, dict) else None
+        if not isinstance(pr, dict):
+            continue                                        # (not listed: the prices below this family count)
+        try:
+            p = {"input": per_million(pr["prompt"]), "output": per_million(pr["completion"]),
+                 "cached": per_million(pr["input_cache_read"])}
+        except (KeyError, ValueError):
+            continue                                        # (a free "-" or a malformed entry: same)
+        if f.get("peak"):
+            p["peak"] = f["peak"]                           # (peak hours are ours to know; the list shows the base)
+        found[oid] = p
+    if not found:
+        return None, "none of our models in the list"
+    prices = {}
+    for oid, p in found.items():
+        f = families[oid]
+        prices[f["name"]] = file_prices({f["name"]: {**p, "api": f["api"], "match": f["match"], "openrouter": oid}}
+                                        )[f["name"]]
+    when = time.time() if now is None else now
+    return {"as_of": time.strftime("%Y-%m-%d", time.gmtime(when)), "prices": prices}, None
+
+
+def load_live_file(path: Path) -> dict | None:
+    """The cached OpenRouter fetch (its prices and when they were fetched): a file that is missing is quiet, one that
+    does not check out is ignored with one log line (the shipped table below it stays)."""
+    path = Path(path)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        print(f"[saguaro] price cache {path.name} ignored ({e}): the shipped prices stay", flush=True)
+        return None
+    if not (isinstance(doc, dict) and isinstance(doc.get("prices"), dict)):
+        print(f"[saguaro] price cache {path.name} ignored (not fetched prices): the shipped prices stay", flush=True)
+        return None
+    try:
+        prices = file_prices(doc["prices"])
+    except (ValueError, TypeError) as e:
+        print(f"[saguaro] price cache {path.name} ignored ({e}): the shipped prices stay", flush=True)
+        return None
+    f = doc.get("fetched")
+    fetched = float(f) if isinstance(f, (int, float)) and not isinstance(f, bool) else None
+    as_of = str(doc.get("as_of") or "")
+    if not DATE.match(as_of):
+        as_of = time.strftime("%Y-%m-%d", time.gmtime(fetched if fetched is not None else time.time()))
+    return {"as_of": as_of, "fetched": fetched, "prices": prices}
+
+
+def env_live(env=None) -> bool | None:
+    """What SAGUARO_LIVE_PRICES says about the live prices (1/on/true/yes or 0/off/false/no), or None when it says
+    nothing: this beats the run config at the start, and the page's switch while the server runs."""
+    v = ((os.environ if env is None else env).get("SAGUARO_LIVE_PRICES") or "").strip().lower()
+    if v in ("1", "on", "true", "yes"):
+        return True
+    if v in ("0", "off", "false", "no"):
+        return False
+    return None
+
+
+def live_enabled(cfg_value=None, env=None) -> bool:
+    """Whether the OpenRouter prices are wanted: SAGUARO_LIVE_PRICES (1/0) beats the run config's "live_prices";
+    both off by default - nothing leaves the box unless the user says so (docs/SETTINGS.md)."""
+    v = env_live(env)
+    return bool(cfg_value) if v is None else v
+
+
+def release_name() -> str:
+    """What the Savings line calls this Saguaro (its built-in prices were prefilled from OpenRouter at it)."""
+    try:
+        from saguaro_version import installed_version
+    except ImportError:
+        return ""
+    return installed_version(ROOT) or ""
+
+
 class PriceBook:
     """The default prices one Ledger counts with: the page's own (Settings > Savings) beat these, and within these:
-    a fetched api-prices.json (valid and newer as_of than this folder's own) > data/api-prices.json > the built-ins.
-    The fetch happens when the Savings page asks, at most once a day; SAGUARO_UPDATE_CHECK=0 turns it off."""
+    the fetched OpenRouter prices (live_prices, off by default) > data/api-prices.json > the built-ins.
+    The fetch runs on a background thread at most once a day, and at a start whose cache is older; it never makes a
+    request or the start wait.  On any failure the cache or the shipped table counts, with one log line."""
 
     FETCH_EVERY = 24 * 3600                   # at most one fetch a day ...
     RETRY_AFTER = 3600                        # ... and after one that did not work, ask again after this
-    TIMEOUT = 8                               # seconds: a page load never waits on GitHub for longer
+    TIMEOUT = 10                              # seconds: the list is never waited on for longer
 
-    def __init__(self, folder: Path | None = None, repo_file: Path = ROOT / "data" / PRICE_FILE):
+    def __init__(self, folder: Path | None = None, repo_file: Path = ROOT / "data" / PRICE_FILE, live: bool = False):
         self.folder = Path(folder) if folder is not None else None
         self.repo_file = Path(repo_file)
-        self.cache = self.folder / PRICE_FILE if self.folder is not None else None     # the fetched copy, in the ledger's folder
+        self.live_file = self.folder / LIVE_FILE if self.folder is not None else None    # the cache, by the ledger
         self.disk = load_price_file(self.repo_file)
-        self.fetched: dict | None = None
+        self.live = bool(live)
+        self.live_doc: dict | None = None
         self.lock = threading.Lock()          # one fetch at a time; the network happens outside it
         self.next_try = 0.0
         self.error: str | None = None
-        if self.cache is not None:
-            cached = load_price_file(self.cache)                        # last run's copy, if it is there and still newer
-            if cached and self.beats_disk(cached):
-                self.fetched = cached
+        self.thread: threading.Thread | None = None
+        if self.live:
+            self.read_live_cache()            # (a default, off start touches nothing of the live cache at all)
+        self.start()                          # (at start, when the cache is older; never blocks)
+
+    def read_live_cache(self):
+        """The cached fetch and when to ask again, read from beside the count: while the setting is on - at the
+        start, and when the page turns it on - so a start with it off neither reads the file nor logs about it."""
+        self.live_doc = load_live_file(self.live_file) if self.live_file is not None else None
+        if self.live_file is not None:
             try:
-                self.next_try = self.cache.stat().st_mtime + self.FETCH_EVERY
+                self.next_try = self.live_file.stat().st_mtime + self.FETCH_EVERY
             except OSError:
                 pass
 
-    def beats_disk(self, doc: dict) -> bool:
-        return self.disk is None or doc["as_of"] > self.disk["as_of"]
+    def stale(self) -> bool:
+        return time.time() >= self.next_try
 
-    def url(self) -> str:
-        """The newest copy of the file, from the GitHub repository this folder was cloned from (serve/update.py)."""
-        from serve import update                              # (late import: update.py's repo, no import loop)
-        repo = update.origin_repo(ROOT) if (ROOT / ".git").exists() else update.REPO
-        return f"https://raw.githubusercontent.com/{repo}/main/data/{PRICE_FILE}"
+    def families(self) -> dict:
+        return price_families(self.disk)
+
+    def start(self):
+        """The prices are live and the cache is a day old: fetch on a background thread (the start, and every time
+        the Savings page asks, call this; nothing here waits for the network)."""
+        if not self.live or self.live_file is None or not self.stale():
+            return
+        with self.lock:
+            if self.thread is not None and self.thread.is_alive():
+                return                        # (one fetch at a time)
+            self.next_try = time.time() + self.RETRY_AFTER      # (a success moves it a day ahead)
+            self.thread = t = threading.Thread(target=self._fetch, daemon=True)
+        t.start()
 
     def refresh(self):
-        """The Savings page asked: fetch the newest copy if a day passed since the last try (nothing else does)."""
-        if self.cache is None or os.environ.get("SAGUARO_UPDATE_CHECK", "1") == "0":
-            return
-        now = time.time()
-        with self.lock:                                       # the claim happens inside the lock, the fetch outside it
-            if now < self.next_try:
-                return
-            self.next_try = now + self.RETRY_AFTER            # (a success moves it to a day ahead)
+        """The Savings page asked: nothing to wait for - a fetch on its thread when the cache says it is time."""
+        self.start()
+
+    def set_live(self, on: bool):
+        """Settings > Savings: on starts the daily fetch right away; off means the shipped table only - no network,
+        and the cached fetch is ignored while off.  Turning it on reads the cache back (an on spell before this
+        start counts again at once, and its age says whether a refetch is due)."""
+        on = bool(on)
+        if on and not self.live:
+            self.read_live_cache()
+        self.live = on
+        self.start()
+
+    def _fetch(self):
+        why = None
+        doc = None
         try:
-            req = urllib.request.Request(self.url(), headers={"User-Agent": "saguaro/savings"})
+            req = urllib.request.Request(OPENROUTER_URL, headers={"User-Agent": "saguaro/savings"})
             with urllib.request.urlopen(req, timeout=self.TIMEOUT) as r:
                 text = r.read().decode("utf-8", "replace")
-        except (OSError, ValueError) as e:                    # offline, a proxy, GitHub's limit: the prices below count
-            self.error = str(getattr(e, "reason", None) or e)
-            return
-        doc, why = parse_price_file(text)
-        if doc is None:                                       # GitHub answered, but not with prices: one log line
+        except (OSError, ValueError) as e:                    # offline, a proxy, OpenRouter's limit: the shipped ones count
+            why = str(getattr(e, "reason", None) or e)
+        else:
+            doc, why = parse_openrouter(text, self.families(), time.time())
+        if doc is None:                                       # one line for the log, then the prices below stay
             self.error = why
-            print(f"[saguaro] the prices fetched from GitHub were ignored ({why}): the prices below them stay", flush=True)
+            print(f"[saguaro] the OpenRouter prices did not come ({why}): the shipped prices stay", flush=True)
             return
         try:                                                  # the cache is next to the ledger's file; unwritable: this run still counts
-            tmp = self.cache.with_name(self.cache.name + ".tmp")
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, self.cache)
+            payload = {"fetched": time.time(), "as_of": doc["as_of"], "prices": doc["prices"]}
+            tmp = self.live_file.with_name(self.live_file.name + ".tmp")
+            tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+            os.replace(tmp, self.live_file)
         except OSError:
             pass
+        self.error = None
         with self.lock:
-            self.error = None
             self.next_try = time.time() + self.FETCH_EVERY
-            self.fetched = doc if self.beats_disk(doc) else None      # (not newer than the folder's own: that one stays)
+            self.live_doc = doc
 
     def source(self) -> dict:
-        """Where the default prices come from right now, and since which month (the Savings page says it in one line)."""
-        if self.fetched is not None:
-            return {"from": "github", "as_of": self.fetched["as_of"]}
-        if self.disk is not None:
-            return {"from": "file", "as_of": self.disk["as_of"]}
-        return {"from": "built-in", "as_of": PRICES_AS_OF}
+        """Where the default prices come from right now (the Savings line says it): "OpenRouter, <date>" or
+        "built-in prices, <release>"."""
+        live, doc = self.live, self.live_doc          # (read once: the fetch thread swaps the doc wholesale)
+        if live and doc is not None:
+            return {"from": "openrouter", "date": doc["as_of"], "fetched": doc.get("fetched")}
+        return {"from": "built-in", "as_of": PRICES_AS_OF, "release": release_name()}
 
     def as_of(self) -> str:
-        active = self.fetched or self.disk
-        return active["as_of"] if active else PRICES_AS_OF
+        live, doc = self.live, self.live_doc
+        if live and doc is not None:
+            return doc["as_of"]
+        if self.disk is not None:
+            return self.disk["as_of"]
+        return PRICES_AS_OF
 
     def reference(self, model: str | None) -> dict | None:
-        """The model's default prices: the file's entry whose "match" fits its name, else the built-in one."""
+        """The model's default prices: the fetched list's entry whose "match" fits its name, then the file's,
+        then the built-in one."""
         m = str(model or "")
-        for doc in ([self.fetched] if self.fetched else []) + ([self.disk] if self.disk else []):
+        live_doc = self.live_doc if self.live else None      # (read once: the fetch thread swaps the doc wholesale)
+        docs = ([live_doc] if live_doc else []) + ([self.disk] if self.disk else [])
+        for doc in docs:
             for p in doc["prices"].values():
                 if re.search(p["match"], m, re.I):
                     return {k: v for k, v in p.items() if k != "match"}
@@ -240,6 +408,36 @@ def deepseek_peak(t: float) -> bool:
 
 def zero() -> dict:
     return {b: {"input": 0, "cached": 0, "output": 0, "requests": 0} for b in BANDS}
+
+
+def bare_config_name(key: str) -> str:
+    """A ledger key without its config-family prefixes (saguaro-, maya-, also stacked: maya-maya-l-hip.json)."""
+    k = str(key)
+    while k.startswith(("saguaro-", "maya-")):
+        k = k.split("-", 1)[1]
+    return k
+
+
+def fold_renamed(models: dict, key: str, model) -> list:
+    """C122 renamed maya-<x>.json to saguaro-<x>.json (and an older rename left maya-maya-<x>.json): fold the entries
+    of THIS config kept under its older names into `key` - counts summed per band, the earliest `since` kept - and drop
+    them. Only an entry of the same model (or one that names none) is folded, never another config's."""
+    folded, want = [], bare_config_name(key)
+    for k in [k for k in list(models) if k != key and bare_config_name(k) == want]:
+        old = models.get(k) or {}
+        if old.get("model") not in (None, model):
+            continue
+        me = models.setdefault(key, {"since": old.get("since") or time.time(), "bands": zero()})
+        if old.get("since") and (not me.get("since") or old["since"] < me["since"]):
+            me["since"] = old["since"]
+        for b, c in (old.get("bands") or {}).items():
+            dst = me.setdefault("bands", {}).setdefault(b, {})
+            for f, v in (c or {}).items():
+                if isinstance(v, (int, float)):
+                    dst[f] = dst.get(f, 0) + v
+        del models[k]
+        folded.append(k)
+    return folded
 
 
 def cost(bands: dict, ref: dict | None) -> float | None:
@@ -267,11 +465,13 @@ class Ledger:
     """The running model's count (`key`: its config's file name) and the others' from the file; one lock for both."""
 
     def __init__(self, path: Path | None, key: str, model: str, quant: str | None = None,
-                 names: tuple | None = None, prices: PriceBook | None = None):
+                 names: tuple | None = None, prices: PriceBook | None = None,
+                 config: Path | None = None, live: bool = False):
         self.path = Path(path) if path else None
         self.key, self.model, self.quant = key, model, quant
         self.names = names                    # (/health's two parts (pretty, quant): what the page names the model with)
-        self.book = prices if prices is not None else PriceBook(self.path.parent if self.path else None)
+        self.config = Path(config) if config is not None else None      # (the run config: where "live_prices" is saved)
+        self.book = prices if prices is not None else PriceBook(self.path.parent if self.path else None, live=live)
         self.lock = threading.Lock()
         self.save_failed = False                      # (one log line for a file that cannot be written, not one per request)
         self.started = time.time()
@@ -284,6 +484,7 @@ class Ledger:
                     self.doc = d
             except (OSError, ValueError):
                 pass
+        folded = fold_renamed(self.doc["models"], key, model)   # (entries of this config under its older names)
         me = self.doc["models"].setdefault(key, {"since": time.time(), "bands": zero()})
         me.update(model=model, quant=quant)
         if names and names[0]:                         # (the two parts the page names this model with, as /health says
@@ -295,6 +496,9 @@ class Ledger:
             me["bands"].setdefault(b, zero()[b])
         if not isinstance(self.doc.get("prices"), dict):
             self.doc["prices"] = {}
+        if folded:
+            print(f"[saguaro] savings: {', '.join(folded)} folded into {key} (the config's older names)", flush=True)
+            self._save()
 
     def price(self, model: str | None) -> dict | None:
         """The model's prices: the page's (Settings > Savings), else the file's / built-in ones; None: none known."""
@@ -320,6 +524,29 @@ class Ledger:
             else:
                 self.doc["prices"][model] = check_price(model, p)
             self._save()
+
+    def set_live(self, on: bool):
+        """Settings > Savings: update the prices from OpenRouter once a day, or not (the shipped table only).
+        Saved in the run config ("live_prices") so the next start keeps it; on starts the fetch right away.
+        SAGUARO_LIVE_PRICES beats this switch at runtime as it beats the config at the start: when it says 1/0
+        and the switch asks for the other, the request is refused and nothing is written (docs/SETTINGS.md)."""
+        on = bool(on)
+        forced = env_live()
+        if forced is not None and forced != on:
+            raise ValueError(f"SAGUARO_LIVE_PRICES={1 if forced else 0} keeps the prices "
+                             f"{'live' if forced else 'on the shipped table'} from the environment; "
+                             "unset it to change that on the page")
+        if self.config is not None:
+            try:
+                p = Path(self.config)
+                cfg = json.loads(p.read_text(encoding="utf-8-sig"))
+                cfg["live_prices"] = on
+                tmp = p.with_name(p.name + ".tmp")
+                tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+                os.replace(tmp, p)
+            except (OSError, ValueError) as e:
+                raise ValueError(f"the setting could not be saved in the run config ({e})") from None
+        self.book.set_live(on)
 
     def price_list(self) -> list:
         """Every model counted here (and the running one) with its prices and the built-in ones (Settings)."""
@@ -383,8 +610,9 @@ class Ledger:
             return {"usd": round(total, 6), "start_usd": round(cost(self.start, self.ref) or 0.0, 6), "priced": priced}
 
     def report(self) -> dict:
-        """The breakdown (GET /api/savings): every model's tokens and dollars, this start's, and the prices.
-        The page asking is also what fetches a newer price file - at most once a day (serve/savings.py's PriceBook)."""
+        """The breakdown (GET /api/savings): every model's tokens and dollars, this start's, the prices and whether
+        the live OpenRouter prices are on.  The page asking is also what starts the daily fetch, when it is due and
+        the setting is on - on its thread, never blocking this answer (serve/savings.py's PriceBook)."""
         self.book.refresh()
         with self.lock:
             models, total, refs = [], 0.0, {}
@@ -404,7 +632,7 @@ class Ledger:
             start = cost(self.start, me)
             mine = self.doc["models"].get(self.key) or {}
             return {"usd": round(total, 6), "since": self.doc.get("since"), "prices_as_of": self.book.as_of(),
-                    "prices_source": self.book.source(),
+                    "prices_source": self.book.source(), "live": bool(self.book.live),
                     "start": {"model": self.model, "quant": self.quant, "started": self.started,
                               "tokens": tokens(self.start), "usd": None if start is None else round(start, 6),
                               **({"model_name_pretty": mine["name_pretty"], "model_quant": mine.get("name_quant") or ""}

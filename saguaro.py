@@ -86,7 +86,8 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "tools"))
 import setup as S  # noqa: E402  Strata's installer: PC checks, pip, llama.cpp, downloads (nothing runs on import)
 from setup import ask, fail, ok, run, say, step, warn  # noqa: E402
-from saguaro_version import saguaro_version  # noqa: E402  the version text: the banner's and the dashboard's About, one function
+from saguaro_version import installed_version, saguaro_version  # noqa: E402  the version text: the banner's and the
+#  dashboard's About, one function (saguaro_version); the VERSION line --bench's header and /health print (installed_version)
 import config_names as CN  # noqa: E402  the run configs' name family (saguaro-<model>.json; maya-<model>.json found too)
 import maya_import as MI  # noqa: E402  --import-model: model files downloaded some other way, found by size + sha256
 import maya_quants as Q  # noqa: E402  the quants' names users see (MiniMax M3.1 · Maya-XS) and the older ones as aliases
@@ -684,7 +685,7 @@ MM3_PROFILE = ROOT / "data" / "expert-profile-mm3.bin"
 # Listed (and offered) once published: until then --model minimax-maya-xs / minimax-maya-s (--mm3-quant gguf-xs /
 # gguf-s before) with --model-dir takes files already there.  Named as every Saguaro quant (tools/maya_quants.py): the
 # model first, in the repo peasantsmith/MiniMax-M3.1-Flash-Maya-GGUF (Maya-XS/, Maya-S/), each in <models folder>/<its
-# full name> on this PC, its config maya-minimax-maya-xs.json; the manifest's "was": the names its files had before,
+# full name> on this PC, its config saguaro-minimax-maya-xs.json; the manifest's "was": the names its files had before,
 # used as they are.
 MM3_GGUF_MANIFEST = ROOT / "tools" / "mm3" / "download_gguf.json"
 MM3_QUANTS = {"exl3": "EXL3 3.5 bits", "gguf-xs": "MiniMax-M3.1-Flash-Maya-XS", "gguf-s": "MiniMax-M3.1-Flash-Maya-S"}
@@ -722,6 +723,10 @@ QFN_CONTEXTS = [32768, 65536, 131072, 262144, 524288, 1048576]   # (C18: past 25
 QFN_DEFAULT_CONTEXT = 65536                        # (measured: 64K, prompts up to 60K tokens)
 QFN_RAM_SPARE_GB = 20                              # (RAM left beside the RAM tier: the OS, the server, the page cache)
 QFN_DEFAULT_QUANT = "ud-q4_k_xl"
+# P124o: the order the setup recommends QFN's quants by - the largest that RUNS on the PC (qfn_quant_fit, its own fit
+# check) first, as Strata sizes the model to the memory (the smaller GSQ-RCO and Coder quants suit one 16-24 GB card,
+# README). Q8_0 and CYBER-FROST's own quant are accuracy picks, never a fit-based default, and stay out of this.
+QFN_RECOMMEND = (QFN_DEFAULT_QUANT, Q.GSQ_IQ3_S, Q.GSQ_CODER_IQ1_M)
 QFN_VBUILD = ROOT / "build-vision-qfn"             # QFN's picture reader's build folder (engines/qfn/tools/vision,
                                                    #  the llama.cpp tree at engines/qfn's pin): beside vision-glm's,
                                                    #  which is built from tools/vision at the GLM path's pin
@@ -2219,6 +2224,8 @@ def choose_family(a, prev: dict) -> str:
     except Exception:  # noqa: BLE001 - no GPU tools: no figure for this PC
         cards, have = [], None
     fit = family_fit(cards, mem_gb()[0] if cards else 0.0, backend) if not metal else None
+    # P124o: the QFN row's reason line names the quant of it this PC would get (its largest that runs).
+    qfn_q = qfn_recommended_quant(cards, mem_gb()[0], backend) if fit == "qfn" else None
     default = setup_family(prev) if prev else fit or "glm"
     if family_unavailable(default, backend):
         default = "glm"
@@ -2243,7 +2250,8 @@ def choose_family(a, prev: dict) -> str:
              "up to a 1M context" + ("; or Project Maya's own GGUF quants (MiniMax-M3.1-Flash-Maya-XS ~93 GB, -Maya-S ~122 "
                                      "GB: NVIDIA from V100 on and AMD)"
                                      if any(map(mm3_gguf_published, ("gguf-xs", "gguf-s"))) else "") + "."),
-            (QFN_SHOWN, "new", qfn_about()),
+            (QFN_SHOWN, (f"recommended for this PC ({Q.QFN_QUANTS[qfn_q]})" if qfn_q else None)
+             if fit == "qfn" else "new", qfn_about()),
             (HY4_SHOWN, "recommended for this PC" if fit == "hy4" else "new", hy4_about(here)),
             (IK2_SHOWN, "recommended for this PC" if fit == "ik2" else "new", ik2_about())]
     for i, f in enumerate(FAMILIES):   # (a model this PC's GPUs have no engine for: listed, with the reason)
@@ -2260,7 +2268,10 @@ def choose_family(a, prev: dict) -> str:
 def choose_model(a, models: Path, inst: dict) -> tuple:
     """("download", one of MODELS) or ("local", the model's first .gguf file): --gguf-dir, --model, else asked among
     the downloads - the earlier download is the default.  ("exl3", the folder): --model-dir naming an EXL3 folder of
-    GLM-5.3-Flash."""
+    GLM-5.3-Flash.  A setup again of a config whose installer names the folder its model was set up from (gguf /
+    gguf_dir, or model_dir for an EXL3 folder) takes that folder when its files are all there: no download, no
+    question; a file missing from it is said in model_step / exl3_folder_files, and a download then takes only the
+    missing shards."""
     metal = getattr(a, "backend", None) == "metal"
     if getattr(a, "model_dir", None) and exl3_folder_family(a.model_dir) == "glm":
         if metal:
@@ -2275,6 +2286,20 @@ def choose_model(a, models: Path, inst: dict) -> tuple:
         if metal and is_exl3(a.model):
             fail(f"{a.model} runs on NVIDIA GPUs only", f"a GGUF quant runs on Metal: {ME} --setup --model {next(iter(MODELS))}")
         return "download", a.model
+    # a setup again of a config set up from its own files: --gguf-dir recorded gguf/gguf_dir in the installer,
+    # --model-dir with an EXL3 folder recorded model_dir.  If all the files are whole there, take them: no
+    # download, no question; what is missing is named by model_step / exl3_folder_files, and the download
+    # branch below then offers only the shards that are missing.
+    for p in [Path(x) for x in (inst.get("gguf"), inst.get("gguf_dir")) if x]:
+        first, _ = local_first(p)
+        if first is not None and not any(incomplete(s) for s in shard_set(first)):
+            return "local", first
+    own = Path(inst["model_dir"]) if inst.get("model_dir") else None
+    if own is not None and own.is_dir() and all(
+            (own / n).is_file() for n in ("config.json", "tokenizer.json", "tokenizer_config.json")):
+        if metal:   # (the recorded folder is an EXL3 quant: as --model-dir above, it runs on NVIDIA GPUs only)
+            fail("an EXL3 quant runs on NVIDIA GPUs only", f"a GGUF quant runs on Metal: {ME} --setup --model {next(iter(MODELS))}")
+        return "exl3", own
     opts = [q for q in MODELS if (q not in MODELS_BY_HAND or q == inst.get("quant"))
             and not (metal and is_exl3(q))]   # (a chosen-by-hand download: only where it is installed; Metal: GGUFs)
     # cards of 24 GB or less: Maya-S24 (its 4-bit attention leaves ~1.5 GB more of the card for experts - decode about
@@ -5627,11 +5652,13 @@ def bench_prompt_text(ref: str | None = None) -> str:
 
 def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int = 2, wait_min: float = 10.0,
           lock_ok: bool = False, tokens_file: Path | None = None, text_ref: str | None = None,
-          smoke: bool = False) -> int:
+          smoke: bool = False, parallel: bool = True) -> int:
     """--bench: the speed-test standard (tools/maya_bench.py) on the installed model - a quiet-machine check, one engine
-    session with a warm-up answer, 3 answers of 256 tokens and the 2K / 8K prompts 3 times each; medians with min-max,
-    what drafting chose, the wall time of each phase and one result line (saguaro-bench-results.txt).  --compare: the same
-    on this build and another, alternated, exactness first.  Writes saguaro-bench.txt (--report includes it).
+    session with a warm-up answer, 3 answers of 256 tokens and the 2K / 8K prompts 3 times each and (parallel, the
+    default: --bench-parallel off skips it) rounds of 1, 2 and 4 different 2K prompts sent together within the
+    config's places, ref/parallel.py's method; medians with min-max, what drafting chose, the wall time of each phase
+    and one result line (saguaro-bench-results.txt).  --compare: the same on this build and another, alternated,
+    exactness first (several-at-once rounds are not part of an A/B).  Writes saguaro-bench.txt (--report includes it).
     smoke (--bench-smoke): two short answers and no 2K / 8K prompts - does the model load and answer (the saved
     answers and the nightly check use it for a model too large for its box); no result line, never a speed number."""
     import socket
@@ -5685,10 +5712,16 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
         ctx = int(args[args.index("--max-context") + 1]) if "--max-context" in args[:-1] else 32768
         fmt = bench_chat(config_family(cfg), tp)   # (each family's own chat format, thinking off - #416, #549)
         chats = [tok.encode(fmt(q), parse_special=True) for q in BENCH_TOPICS]
+        par_plan = None
         if smoke:                                # (the last topic warms up, the first ones are the answers)
             prompts, warm, chats = {}, chats[-1], chats[:MB.SMOKE_ANSWERS]
         else:
-            prompts, warm = MB.plan_prompts(tok.encode(bench_prompt_text(text_ref)), ctx)
+            doc = tok.encode(bench_prompt_text(text_ref))
+            prompts, warm = MB.plan_prompts(doc, ctx)
+            if parallel and not compare:         # (the several-at-once rounds: same session, the engine still warm)
+                par_plan = MB.plan_parallel(doc, ctx)
+            elif not compare:                    # (off: said on the console only - the bench file keeps its old bytes)
+                say("  several at once: skipped (--bench-parallel off)")
         start = lambda c, cmd, env, tag: (cmd, env, c.get("cwd") or str(ROOT), ROOT / f"saguaro-bench{tag}.log")  # noqa
         cmd, env = bench_start_command(cfg, tok)      # (QFN's batch driver as its server starts it; the rest: SV's)
         here = start(cfg, cmd, env, "")
@@ -5703,9 +5736,12 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
         if not compare:
             before = MB.learned_listing(ROOT, cfg)
             run = MB.run_session(here, chats, prompts, warm, "", say,
-                                 MB.SMOKE_TOKENS if smoke else MB.DECODE_TOKENS)
+                                 MB.SMOKE_TOKENS if smoke else MB.DECODE_TOKENS,
+                                 par=par_plan, cfg_places=MB.parallel_places(cfg))
             runs = {"this": [run]}
             res = MB.summarize([run], prompts)
+            if not smoke and parallel:           # (the section only of an on run: off keeps the old file bytes,
+                res["parallel"] = run["parallel"]  #  like --compare, which runs no such round at all)
             drafting = MB.drafting_choice(args, cfg.get("env") or {}, run["engine_lines"], res["answers"],
                                         config_family(cfg))
             new = sorted(set(MB.learned_listing(ROOT, cfg)) - set(before))
@@ -5720,7 +5756,7 @@ def bench(cfg_path: Path, version: str, compare: str | None = None, rounds: int 
             records = [MB.record_line(rec)]
             if smoke and any(a["produced"] == 0 for a in run["answers"]):
                 fail("the model answered nothing (0 tokens) in the smoke run",
-                     f"its log: {ROOT / 'maya-bench.log'}")
+                     f"its log: {ROOT / 'saguaro-bench.log'}")
             if smoke:                            # (not the standard: no result line, the answers are what it is for)
                 lines = [lines[0].replace(" benchmark, ", " smoke run, ")] + lines[1:3] + [
                     f"{len(run['answers'])} answers of up to {MB.SMOKE_TOKENS} tokens (greedy, thinking off): " +
@@ -5778,6 +5814,8 @@ def bench_text(version, cfg_path, cfg, ctx, gpu_text, res, drafting, runs, t_qui
              (f"; {res['short']} ended early, left out" if res["short"] else "")]
     lines += [f"prompt reading: {n // 1024}K tokens, median {MB.fmt_stats(s, 0)} tokens/s"
               for n, s in sorted(res["prompt"].items())]
+    if res.get("parallel"):    # (the several-at-once section: absent when --compare runs no such round and when
+        lines += MB.parallel_section(res["parallel"])   #  --bench-parallel off skipped it - the old file bytes)
     lines.append(f"wall time: quiet check {t_quiet:.0f} s, {MB.phase_line(runs)}; all {time.time() - t_all:.0f} s")
     return lines
 
@@ -5829,7 +5867,7 @@ def bench_compare(cfg, cfg_path, spec, rounds, here, start, chats, prompts, warm
     res = {k: MB.summarize(v, prompts) for k, v in runs.items()}
     verdict, exact = MB.exact_verdict([r["tokens"] for r in runs["this"]], [r["tokens"] for r in runs["other"]])
     again = {k: MB.exactness(v[0]["tokens"], v[-1]["tokens"]) for k, v in runs.items() if len(v) > 1}
-    o_ver = (other / "VERSION").read_text().strip() if (other / "VERSION").exists() else "?"
+    o_ver = installed_version(other) or "?"          # (the other checkout's VERSION line, same single source)
     names = {"this": f"{MB.commit_of(ROOT)} (v{version})", "other": f"{MB.commit_of(other)} (v{o_ver})"}
     records, lines = [], []
     for side, root, ver in (("other", other, o_ver), ("this", ROOT, version)):
@@ -6702,15 +6740,18 @@ def ds4_shards(d: Path) -> list:
 
 def ds4_dir(a, models: Path, prev: dict, quant: str = "exl3") -> Path:
     """The model's folder: --model-dir, else the folder of the DeepSeek setup before when it holds the same files
-    (its pack is inside it), else <models folder>/DeepSeek-V4.1-Flash-1017 (a GGUF: .../DeepSeek-V4.1-Flash-1017-GGUF/
-    <its folder>)."""
+    (its pack is inside it - its args' --pack folder, or the folder its installer recorded), else
+    <models folder>/DeepSeek-V4.1-Flash-1017 (a GGUF: .../DeepSeek-V4.1-Flash-1017-GGUF/<its folder>)."""
     if a.model_dir:
         return Path(a.model_dir).expanduser().resolve()
     args = prev.get("args") or []
-    if "--pack" in args[:-1] and (prev.get("installer") or {}).get("ds4_quant", "exl3") == quant:
-        d = Path(args[args.index("--pack") + 1]).parent
-        if (d / "config.json").exists() or (quant not in DS4_EXL3 and ds4_shards(d)):
-            return d
+    inst = prev.get("installer") or {}
+    if inst.get("ds4_quant", "exl3") == quant:
+        cands = ([Path(args[args.index("--pack") + 1]).parent] if "--pack" in args[:-1] else []) + \
+                ([Path(inst["model_dir"])] if inst.get("model_dir") else [])
+        for d in dict.fromkeys(cands):                 # (a setup again: the same files in place - no download;
+            if (d / "config.json").exists() or (quant not in DS4_EXL3 and ds4_shards(d)):   #  what is missing is
+                return d                               #  said and downloaded by ds4_model_step, only that)
     if quant in DS4_EXL3:
         return models / DS4_EXL3[quant]["dir"]
     return models / (f"{DS4}-abliterated-GGUF" if quant in DS4_ABL else f"{DS4}-GGUF") / DS4_QUANTS[quant]
@@ -7232,7 +7273,8 @@ def choose_mm3_quant(a, prev: dict) -> str:
 
 def mm3_dir(a, models: Path, prev: dict, quant: str = "exl3") -> Path:
     """The model's folder: --model-dir, else the folder of the MiniMax setup before when it holds the same quant (its
-    pack is inside it), else <models folder>/MiniMax-M3.1-Flash-EXL3-3.5bpw (a GGUF: <models folder>/<its name>)."""
+    pack is inside it; a folder of your own - installer own/model_dir - the same way without naming --model-dir
+    again), else <models folder>/MiniMax-M3.1-Flash-EXL3-3.5bpw (a GGUF: <models folder>/<its name>)."""
     if a.model_dir:
         return Path(a.model_dir).expanduser().resolve()
     args = prev.get("args") or []
@@ -7241,6 +7283,9 @@ def mm3_dir(a, models: Path, prev: dict, quant: str = "exl3") -> Path:
         d = Path(args[args.index("--pack") + 1]).parent
         if (d / "config.json").exists() or (quant != "exl3" and any(d.glob("*.gguf"))):
             return d
+    if inst.get("own") and inst.get("mm3_quant", "exl3") == quant and inst.get("model_dir") and \
+            Path(inst["model_dir"]).is_dir():          # (a setup again: your own folder, named there by the installer -
+        return Path(inst["model_dir"])                 #  --model-dir need not be named again)
     return models / (MM3_DIR if quant == "exl3" else MM3_QUANTS[quant])
 
 
@@ -7542,6 +7587,9 @@ def set_up_mm3(a, prev: dict) -> Path | None:
     quant = choose_mm3_quant(a, prev)
     gguf = quant != "exl3"
     own = mm3_own_dir(a, quant)                        # --model-dir: an EXL3 folder of your own, not the pinned download
+    if own is None and inst.get("own") and inst.get("mm3_quant", "exl3") == quant and \
+            inst.get("model_dir") and Path(inst["model_dir"]).is_dir():   # (a setup again: the config's own EXL3
+        own = Path(inst["model_dir"])                  #  folder, taken whole by its own index - mm3_own_step)
     need = mm3_memory_gb(quant, own)
     pc = check_pc(a, "minimax", gguf=gguf)             # 1
     total, _ = mem_gb()
@@ -7686,23 +7734,45 @@ def qfn_quant_fit(quant: str, gpus: list, ram: float) -> str | None:
     return None
 
 
+def qfn_recommended_quant(cards: list, ram: float, backend: str = "cuda") -> str | None:
+    """The quant the setup recommends Qwen3.8-Flash-Next in on these cards and this RAM (P124o): the largest of
+    QFN_RECOMMEND (UD-Q4_K_XL before GSQ IQ3_S before the Coder IQ1_M) its own fit check lets RUN
+    (qfn_quant_fit), or None where none of them runs at all.  Priced on the cards the QFN setup would take from
+    these: AMD its one RDNA GPU (the largest, no APU - set_up_qfn refuses one), NVIDIA the group qfn_fit's picker
+    takes, Pascal and newer.  A PC below every minimum still gets the model question - Inkling's rule or no
+    recommendation - only the quant's never a recommendation of its own."""
+    if backend == "hip":
+        gfx = [g for g in cards if str(g.get("arch") or "").startswith("gfx")
+               and not hip_unified_memory(g) and not g.get("unified_memory")]
+        gpus = [max(gfx, key=lambda g: float(g.get("vram_gb") or 0))] if gfx else []
+    else:
+        cc = [g for g in cards if QF._cc(g) >= QF.MIN_CC]
+        gpus = QF.best_gpus(cc)
+    if not gpus:
+        return None
+    return next((k for k in QFN_RECOMMEND if qfn_quant_fit(k, gpus, ram) is None), None)
+
+
 def choose_qfn_quant(a, prev: dict, gpus: list, ram: float) -> str:
-    """--model's quant, else asked among the ones that fit (UD-Q4_K_XL the default; a quant that does not fit is
-    listed with the reason and refused).  `gpus`: the chosen cards - the fit is every quant's per-card minimum
-    over the split this layout would use (qfn_quant_fit), not the smallest card priced alone."""
+    """--model's quant, else asked among the ones that fit (the largest of QFN_RECOMMEND that runs here the default
+    and the one marked recommended, P124o - UD-Q4_K_XL where the PC holds it, a smaller GSQ-RCO quant on a thin one;
+    a quant that does not fit is listed with the reason and refused).  `gpus`: the chosen cards - the fit is every
+    quant's per-card minimum over the split this layout would use (qfn_quant_fit), not the smallest card priced
+    alone."""
     keys = list(Q.QFN_QUANTS)
     want = getattr(a, "qfn_quant", None)
     if not want:
         before = (prev.get("installer") or {}).get("qwen_quant")
+        rec = next((k for k in QFN_RECOMMEND if qfn_quant_fit(k, gpus, ram) is None), QFN_DEFAULT_QUANT)
         rows = []
         for k in keys:
             m, why = qfn_entry(k), qfn_quant_fit(k, gpus, ram)
-            note = ("cannot run on this PC" if why else "recommended" if k == QFN_DEFAULT_QUANT else
+            note = ("cannot run on this PC" if why else "recommended" if k == rec else
                     "not measured on AMD yet" if not m.get("measured") else None)
             rows.append((Q.shown("qfn", k, m["download_gb"]), note,
                          (why + ". " if why else "") + m["about"] + (f". Measured: {m['measured']}" if m.get("measured")
                                                                      else "")))
-        default = keys.index(before) if before in keys else keys.index(QFN_DEFAULT_QUANT)
+        default = keys.index(before) if before in keys else keys.index(rec)
         want = keys[choose("Which quant?", [f"{Q.QFN_SHOWN}'s files:"], rows, default, a.yes)]
     why = qfn_quant_fit(want, gpus, ram)
     if why:
@@ -8552,15 +8622,24 @@ def set_up_qfn(a, prev: dict) -> Path | None:
 
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
 def family_fit(cards: list, ram_gb: float, backend: str = "cuda") -> str | None:
-    """The model the setup recommends for a PC's cards when no model was set up before: Hy4-Flash where four equal
-    16 GB cards and the memory for its Maya-S are there (the layout measured), Inkling 2 Mini on one or two small
-    cards (under 24 GB each) - each only where the backend has its engine (family_unavailable); on AMD otherwise
-    GLM-5.3-Flash where its smallest quant fits in VRAM + RAM; None elsewhere - the model question keeps its usual
-    default."""
+    """The model the setup recommends for a PC's cards when no model was set up before: P124o - on lower-end
+    hardware (all cards 24 GB or less: the line GLM's own Maya-S24 note uses) Qwen3.8-Flash-Next first, its largest
+    quant that runs (qfn_recommended_quant, the setup's own fit check; the Strata ladder UD-Q4_K_XL > IQ3_S > Coder
+    IQ1_M) - on NVIDIA one or two cards, on AMD its one GPU, and only where the QFN engine exists for the backend;
+    Inkling 2 Mini (still offered) only where no QFN quant runs, on one or two small cards (under 24 GB each) - each
+    only where the backend has its engine (family_unavailable). Hy4-Flash where four equal 16 GB cards and the memory
+    for its Maya-S are there (the layout measured); on AMD otherwise GLM-5.3-Flash where its smallest quant fits in
+    VRAM + RAM; None elsewhere - the model question keeps its usual default (GLM, DS4 and MM3 for the bigger PCs as
+    before)."""
     if not cards:
         return None
     small = all(float(g.get("vram_gb") or 0) < 24 for g in cards)
     vram = sum(float(g.get("vram_gb") or 0) for g in cards)
+    if (not family_unavailable("qfn", backend)
+            and (len(cards) == 1 if backend == "hip" else len(cards) <= 2)   # (the cards each engine runs on)
+            and all(float(g.get("vram_gb") or 0) <= 24 for g in cards)       # (lower-end: a P40's 24 GB included)
+            and qfn_recommended_quant(cards, ram_gb, backend)):
+        return "qfn"
     if not family_unavailable("ik2", backend) and small and (
             IK2F.amd_unsupported(cards[:1]) is None and len(cards) == 1 if backend == "hip"
             else len(cards) <= 2 and IK2F.usable(cards)):
@@ -8605,7 +8684,8 @@ def ik2_about() -> str:
     return (f"thinkingmachines' Inkling-2-Mini (26B, a looped MoE: 8 of 128 experts a token) on its own engine, in "
             f"unsloth's UD-Q4_K_XL GGUF ({gb}); Linux, NVIDIA V100 / Tesla T4 / RTX 20 and newer with 8 GB or more "
             "(Pascal - a Tesla P40, GTX 10 - second-class; the experts a card does not hold stay in RAM), or an AMD RDNA 3 / 4 GPU with 12 GB or more. The "
-            "model for one or two 16 GB cards: one Tesla T4 writes about 40 tok/s (a 32K context, part of the experts "
+            "model for one or two 16 GB cards where Qwen3.8-Flash-Next does not run: one Tesla T4 writes about "
+            "40 tok/s (a 32K context, part of the experts "
             "in RAM), two write about 51 tok/s with every expert in VRAM (a 131K context); tool calls, its thinking "
             "levels, pictures (its vision tower, 0.6 GB), one conversation at a time on two cards (several at once "
             "where one GPU holds every expert). Apache 2.0.")
@@ -8826,7 +8906,7 @@ def hy4_pack_step(a, d: Path, files: dict) -> Path:
 
 def write_config_hy4(a, pc: dict, meta: dict, pack: Path, ctx: int, models: Path, d: Path, quant: str,
                      lay: dict) -> Path:
-    """maya-hy4-flash-maya-s.json and its start script: the layout's flags for these cards (hy4_fit.layout), the
+    """saguaro-hy4-flash-maya-s.json and its start script: the layout's flags for these cards (hy4_fit.layout), the
     model's own sampling and thinking level.  A setup again keeps the flags set by hand on the same cards, the env,
     where the server listens and its key.  saguaro-hy4 stops at a flag it does not know: only its own are written."""
     step(8, "the configuration and the start script")
@@ -9069,10 +9149,15 @@ def ik2_dir(a, models: Path, prev: dict, quant: str = Q.IK2_QUANT) -> Path:
 
 def ik2_local_gguf(a, d: Path) -> Path | None:
     """--model-dir with another Inkling 2 Mini GGUF than the published one (a quant of your own, e.g. one whose experts
-    all fit a 16 GB card): that file - the only *.gguf there beside an mmproj, the published one absent - else None."""
-    if not getattr(a, "model_dir", None) or not d.is_dir():
+    all fit a 16 GB card): that file - the only *.gguf there beside an mmproj, the published one absent - else None.
+    A setup again without --model-dir named again: the file the config's installer recorded (ik2_file, handed in by
+    set_up_ik2 as a.ik2_prev_file) - found in the recorded folder, it is taken as it is, no download."""
+    if not d.is_dir() or (d / ik2_entry()["gguf"]).is_file() or ik2_pack_in(d):   # (published, or a pack: not yours)
         return None
-    if (d / ik2_entry()["gguf"]).is_file() or ik2_pack_in(d):   # (the published GGUF, or a Strata pack)
+    was = getattr(a, "ik2_prev_file", None)
+    if was and (d / was).is_file():
+        return d / was
+    if not getattr(a, "model_dir", None):
         return None
     found = [f for f in sorted(d.glob("*.gguf")) if not f.name.startswith("mmproj")]
     return found[0] if len(found) == 1 else None
@@ -9336,7 +9421,7 @@ def ik2_fit_user_flags(a, args: list, lay: dict, ctx: int) -> list:
 def write_config_ik2(a, pc: dict, meta: dict, gguf: Path, tok: Path, ctx: int, models: Path, d: Path, lay: dict,
                      vision: dict | None = None, drafter: Path | None = None, prev: dict | None = None,
                      quant: str = Q.IK2_QUANT) -> Path:
-    """maya-inkling-2-mini[-<file>].json (each file its own: ik2_config_path) and its start script: the layout's flags
+    """saguaro-inkling-2-mini[-<file>].json (each file its own: ik2_config_path) and its start script: the layout's flags
     for one card or two (ik2_fit.layout; AMD: ik2_fit.amd_layout), drafting (ik2_fit.default_drafting: on or auto;
     off where it does not run).  A setup again keeps the config before's env, where the server listens and its key (another
     Inkling config's where this file has none yet); of the flags, only those the user set on the same file and cards
@@ -9416,6 +9501,7 @@ def set_up_ik2(a, prev: dict) -> Path | None:
     engine (build/saguaro-ik2), the file (pinned, resumable, sha256-checked - or a GGUF of your own in --model-dir),
     the drafter where drafting runs, the tokenizer with the model's own template, the pictures, the config."""
     inst = prev.get("installer") or {}
+    a.ik2_prev_file = inst.get("ik2_file")             # (ik2_local_gguf: a setup again finds your own GGUF there)
     prev_args = prev.get("args") or []
     prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
     pc = check_pc(a, "ik2")                            # 1
@@ -9500,7 +9586,8 @@ def set_up_and_serve(a, prev: dict) -> tuple | None:
 
 # ------------------------------------------------------------------------------------------------ main
 def maya_version() -> str:
-    return (HERE / "VERSION").read_text(encoding="utf-8").strip() if (HERE / "VERSION").exists() else "?"
+    """--bench's header (and its records) name the version from saguaro_version.py: the VERSION file's line."""
+    return installed_version(HERE) or "?"
 
 
 def model_option(a) -> str | None:
@@ -9790,6 +9877,11 @@ def main() -> int:
                                                                "(not a speed number, no result line)")
     ap.add_argument("--bench-wait", type=float, default=10.0, help="--bench: minutes to wait for a quiet machine "
                                                                    "before refusing (default 10; 0 = refuse at once)")
+    ap.add_argument("--bench-parallel", choices=("on", "off"), default="on",
+                     help="--bench: also measure several answers at once - 1, 2 and 4 different 2K prompts sent "
+                          "together within the config's places (\"parallel\" / the engine's batch slots), each "
+                          "answer's own figure including its prompt read and queueing (ref/parallel.py's method; "
+                          "the default on, off skips the section)")
     ap.add_argument("--calibrate", action="store_true",
                     help="tune the engine's CPU lane for this PC (the PCIe share and the CPU threads, ~10-15 minutes; "
                          f"{DS4}: the tensor parallel groups and the CPU threads, an engine start each, ~25-40 "
@@ -9844,7 +9936,8 @@ def main() -> int:
             fail("Saguaro is not set up here yet", f"run {ME} first")
         more = {k: v for k, v in (("lock_ok", a.bench_lock_ok), ("tokens_file", a.bench_tokens),
                                   ("text_ref", a.bench_text_ref), ("smoke", a.bench_smoke)) if v}
-        return bench(have[0], version, a.compare, max(1, a.bench_rounds), max(0.0, a.bench_wait), **more)
+        return bench(have[0], version, a.compare, max(1, a.bench_rounds), max(0.0, a.bench_wait),
+                     parallel=a.bench_parallel == "on", **more)
 
     if not a.check:                                      # (1.2.2 on an existing install: the maya-<model>.json
         renamed = migrate_config_names()                 #  configs move to the saguaro- name once, sidecars with

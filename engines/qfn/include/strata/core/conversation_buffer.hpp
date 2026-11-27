@@ -84,6 +84,9 @@ inline size_t parked_block_pool_held() {
 // needed because a parked image and its retained active buffers have one owner.
 // A VIEW (session files read through a mapping, low-RAM restores) reads bytes it does not own: it counts no RAM
 // (bytes() == 0), a read visit hands out the mapped bytes, a writing visit fails, and resizing copies it first.
+// An ALIAS (PLAN-p124a2: a park taking over a turn save's host K/V) is a view whose bytes are RAM another owner
+// holds pinned in RAM - not file cache the OS can hand back - so it counts its full length in bytes() while the
+// keeping owner exists. Same read-only rules as a view.
 class ConversationBuffer {
 public:
     static ConversationBuffer view(const uint8_t* data, size_t n, std::shared_ptr<const void> keep) {
@@ -93,7 +96,21 @@ public:
         b.keep_ = std::move(keep);
         return b;
     }
+    static ConversationBuffer alias(const uint8_t* data, size_t n, std::shared_ptr<const void> keep) {
+        ConversationBuffer b;
+        b.ext_ = data;
+        b.size_ = n;
+        b.keep_ = std::move(keep);
+        b.charge_ = n;
+        return b;
+    }
     bool external() const { return ext_ != nullptr; }
+    // PLAN-p124a2: the single block of an owned buffer's bytes, for an alias: nullptr when empty, when this is
+    // already a view, or when the payload is split across segments (an alias needs one contiguous run).
+    const uint8_t* contiguous() const {
+        if (ext_ || segments_.size() != 1) return nullptr;
+        return segments_.front().data();
+    }
     static constexpr size_t segment_bytes = 16 * 1024 * 1024;
     ConversationBuffer() = default;
     ConversationBuffer(std::initializer_list<uint8_t> values) {
@@ -107,20 +124,22 @@ public:
     ConversationBuffer& operator=(const ConversationBuffer&) = default;
     ConversationBuffer(ConversationBuffer&& other) noexcept
         : segments_(std::move(other.segments_)), size_(std::exchange(other.size_, 0)),
-          ext_(std::exchange(other.ext_, nullptr)), keep_(std::move(other.keep_)) {}
+          ext_(std::exchange(other.ext_, nullptr)), keep_(std::move(other.keep_)),
+          charge_(std::exchange(other.charge_, 0)) {}
     ConversationBuffer& operator=(ConversationBuffer&& other) noexcept {
         if (this == &other) return *this;
         segments_ = std::move(other.segments_);
         size_ = std::exchange(other.size_, 0);
         ext_ = std::exchange(other.ext_, nullptr);
         keep_ = std::move(other.keep_);
+        charge_ = std::exchange(other.charge_, 0);
         return *this;
     }
 
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0; }
     size_t bytes() const {
-        if (ext_) return 0;   // the mapping's pages are the OS file cache's, not this process's RAM
+        if (ext_) return charge_;   // a mapping's pages are the OS file cache's (charge 0); an alias's are held RAM
         size_t n = segments_.capacity() * sizeof(Segment);
         for (const auto& segment : segments_) n += segment.capacity();
         return n;
@@ -288,6 +307,7 @@ private:
         resize(n);
         visit(0, n, [&](uint8_t* p, size_t c, size_t at) { std::memcpy(p, src + at, c); return true; });
         keep_.reset();
+        charge_ = 0;   // owned bytes from here: bytes() counts the segments themselves
     }
     template<class Self, class Fn> static bool visit_impl(Self& self, size_t offset, size_t count, Fn fn) {
         if (offset > self.size_ || count > self.size_ - offset) return false;
@@ -318,8 +338,9 @@ private:
     }
     std::vector<Segment> segments_;
     size_t size_ = 0;
-    const uint8_t* ext_ = nullptr;      // a view's bytes (none: owned segments)
-    std::shared_ptr<const void> keep_;  // keeps a view's mapping alive
+    const uint8_t* ext_ = nullptr;      // a view's or alias's bytes (none: owned segments)
+    std::shared_ptr<const void> keep_;  // keeps a view's mapping, or an alias's holding owner, alive
+    size_t charge_ = 0;                 // an alias counts these bytes as RAM (a file mapping's view: 0)
 };
 
 } // namespace strata::core

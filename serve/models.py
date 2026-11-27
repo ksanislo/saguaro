@@ -1081,11 +1081,10 @@ TURBO_ENV = {"glm": {"SAGUARO_GLM_MISS_SKIP_W": "0.16", "SAGUARO_GLM_MISS_SKIP_F
 # the drafter that goes fastest where the pack has it: DSpark (DeepSeek, MiniMax), MTP (QFN).  GLM keeps the drafter the
 # setup measured for this PC (MTP or DFlash2: which is faster depends on the GPUs).
 TURBO_DRAFT = {"deepseek": "dspark", "minimax": "dspark", "qfn": "mtp"}
-# Turbo's live half for engines whose engine-side levers are per-request rather than in the config: switching Turbo on
-# (serve/server.py's set_turbo) puts the model's live Turbo (serve/turbo_live.py, the sidecar beside the config) on
-# with these options and restores what it was when Turbo goes off.  QFN has no expert-skipping environment knobs:
-# its lossy speed is turbo_drop / turbo_skip on every request the engine answers without its own Turbo.
-TURBO_LIVE_DEFAULT = {}                             # (none: QFN's drop gains little and costs quality - it stays the user's own choice)
+# The button never touches the live per-request Turbo (serve/turbo_live.py, the sidecar beside the config): since
+# c3844c07d the experts it drops are the user's own choice in Settings and per chat, and since PLAN-p124s that
+# live setting is the web app's own chats' half - an API request gets Turbo only from its own fields.  QFN has
+# no expert-skipping environment knobs: its lossy speed lives wholly in that live half.
 # DSpark's draft confidence floor (default 0.7), lowered so that longer windows are verified
 TURBO_DSPARK_CONF = 0.3
 TURBO_DSPARK_FAMILIES = ("deepseek", "minimax")
@@ -1160,9 +1159,9 @@ def turbo_info(cfg: dict) -> dict:
             "env": {k: v for k, v in (patch.get("env") or {}).items() if cur["env"].get(k) != v}}
 
 
-def turbo_enable(path: Path, live_before: dict | None = None) -> dict:
+def turbo_enable(path: Path) -> dict:
     """Turbo on: its settings written into the config at `path`, and the note that undoes them.  "changed": the engine
-    must start again."""
+    must start again.  The live per-request Turbo (the sidecar, the page's own chats) is none of its business."""
     cfg = read(path)
     if not cfg:
         raise ValueError(f"{Path(path).name}: not a config Saguaro can read")
@@ -1183,8 +1182,6 @@ def turbo_enable(path: Path, live_before: dict | None = None) -> dict:
                     "applied": {"args": list(new.get("args") or []), "env": new.get("env")}}
     if held:
         new["turbo"]["one_at_a_time"] = True
-    if live_before:
-        new["turbo"]["live_before"] = dict(live_before)   # (the live Turbo as it was: kept across the restart)
     return _commit(path, cfg, new)
 
 
@@ -1432,10 +1429,11 @@ def delete_plan(root: Path, path: Path) -> dict:
 
 def delete(root: Path, path: Path, files: bool = False) -> dict:
     """The config at `path` off the list: it, its start scripts, the settings kept beside it (.prev,
-    .shared-settings.json), and its old-name shadow if one sits there (a hand-made pair: left, the next start's
-    rename would move it back and resurrect the deleted model); with `files`, delete_plan's files first (a file
-    that cannot be deleted keeps the config, and says which).  {"deleted", "freed" (bytes), "drafter_users"
-    (now drafting with MTP)}."""
+    .shared-settings.json, the live Turbo sidecar .turbo.json - left, its options would re-switch Turbo on for
+    a later model under the same name), and its old-name shadow if one sits there (a hand-made pair: left, the
+    next start's rename would move it back and resurrect the deleted model); with `files`, delete_plan's files
+    first (a file that cannot be deleted keeps the config, and says which).  {"deleted", "freed" (bytes),
+    "drafter_users" (now drafting with MTP)}."""
     path = Path(path)
     freed, users, errors = 0, [], []
     if files:
@@ -1473,11 +1471,14 @@ def delete(root: Path, path: Path, files: bool = False) -> dict:
         if errors:
             raise OSError("could not delete " + "; ".join(errors) + " - the model stays on the list")
     stale = [path, path.with_name(f"run-{path.stem}.sh"), path.with_name(f"run-{path.stem}.bat"),
-             path.with_name(path.name + ".prev"), path.with_name(path.stem + ".shared-settings.json")]
-    if path.name.startswith(config_names.NEW):         # (its maya- shadow, the other half of a hand-made pair)
+             path.with_name(path.name + ".prev"), path.with_name(path.stem + ".shared-settings.json"),
+             path.with_name(path.stem + ".turbo.json")]   # (its live Turbo too: left, a later model set up under
+    if path.name.startswith(config_names.NEW):            #  this name would start with its panel options on)
+        # (its maya- shadow, the other half of a hand-made pair)
         shadow = path.with_name(config_names.OLD + path.stem[len(config_names.NEW):] + ".json")
         stale += [shadow, shadow.with_name(f"run-{shadow.stem}.sh"), shadow.with_name(f"run-{shadow.stem}.bat"),
-                  shadow.with_name(shadow.name + ".prev"), shadow.with_name(shadow.stem + ".shared-settings.json")]
+                  shadow.with_name(shadow.name + ".prev"), shadow.with_name(shadow.stem + ".shared-settings.json"),
+                  shadow.with_name(shadow.stem + ".turbo.json")]
     for p in stale:
         try:
             p.unlink()

@@ -86,7 +86,10 @@ needs: [docs/MODELS.md](docs/MODELS.md#how-the-quants-are-named).
 A quant trades size for how close it stays to the original model, and each one is measured by whoever made it:
 
 - **Qwen3.8-Flash-Next:** unsloth's UD-Q4_K_XL and Q8_0, the GSQ-RCO and Coder quants and CYBER-FROST are the community's own; their
-  model cards say how they were made. UD-Q4_K_XL is the default and Q8_0 the closest to the original.
+  model cards say how they were made. UD-Q4_K_XL is the default and Q8_0 the closest to the original. A ~250 GB
+  full-precision reference cannot run on these boxes, so each quant's number here is a task score on a fixed question
+  set: run [tools/quality_score.py](tools/quality_score.py) against each quant's server with the same set (your own
+  file - no copyrighted question text ships) and the scores come out with a 95 % confidence interval.
 - **GLM, DeepSeek and MiniMax Maya quants** are Project Maya's: their numbers are on each model's
   [card](https://huggingface.co/peasantsmith), the GLM ones in [MAYA-S](bench/results/MAYA-S.md),
   [MAYA-S24](bench/results/MAYA-S24.md), [MAYA-M](bench/results/MAYA-M.md) and [MAYA-L](bench/results/MAYA-L.md).
@@ -263,7 +266,11 @@ measurements are in [Measured on Saguaro](#measured-on-saguaro).
 ### Measured on Saguaro
 
 Our own machines on Saguaro 1.2.1 (2026-11-25; the row that says so is a user's), with `./saguaro.sh --bench`: decode = three greedy 256-token answers, the median
-(range); prefill = a 2K / 8K-token prompt.
+(range); prefill = a 2K / 8K-token prompt.  `--bench` now measures the several-at-once figures too (the
+several-chats table's method): for 1, 2 and 4 answers - as many as the config's places allow (`parallel`,
+the engine's batch slots) - it sends that many different 2K prompts together and prints the total tok/s and
+each answer's own, prompt reading and queueing included; `--bench-parallel off` skips that section of
+saguaro-bench.txt.
 
 | Machine | Model | Decode (writing the answer) | Prefill (2K / 8K prompt) |
 | --- | --- | ---: | ---: |
@@ -295,10 +302,12 @@ the slowest while the caches fill with what you use.
   what fills each GPU's memory), a context size and port you can change in Settings, and **Models**: every model
   set up on this machine, switching to another (Saguaro starts again with it) and each one's engine settings
   (context, GPUs, drafting, images, memory), saved into its `saguaro-<model>.json`.
-- **Saved:** the sidebar's Saved line adds up what the model's own API (DeepSeek's, Z.ai's, MiniMax's or
-  Tencent's) would have charged for the same tokens - the prompt Saguaro reuses from its cache at the API's
-  cached price, DeepSeek's peak hours at its peak price - kept per model in `token-savings.json`; its prices can
-  be changed in **Settings › Savings**.
+- **Saved:** the sidebar's Saved line adds up what the model's own API (Qwen's, Thinking Machines', DeepSeek's,
+  Z.ai's, MiniMax's or Tencent's) would have charged for the same tokens - the prompt Saguaro reuses from its cache
+  at the API's cached price, DeepSeek's peak hours at its peak price - kept per model in `token-savings.json`. The
+  prices ride with Saguaro (no network at default), and **Settings › Savings** can refresh them once a day from
+  OpenRouter's public list - that sends nothing about you - or set any price of your own
+  ([docs/SETTINGS.md](docs/SETTINGS.md#live-api-prices-live_prices-saguaro_live_prices--off-by-default)).
 - **Your apps and coding agents:** an OpenAI-compatible API at `http://127.0.0.1:8080/v1`, and Anthropic's at
   `http://127.0.0.1:8080/v1/messages` (Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`). Tool calls are
   streamed as the model writes them, and a long prompt's reading progress too when a request asks for it

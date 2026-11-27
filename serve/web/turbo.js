@@ -3,7 +3,8 @@
 // starts again" flow as the Models page - a 32K context (GLM, MiniMax), expert skipping and the fastest drafting where the
 // engine has them.  Off: every one of those back as it was.  The snapshot of the page's settings is kept here (localStorage);
 // the engine's is in the run config (serve/models.py).  Below it lives the LIVE per-request Turbo (PLAN-turbo-live): the
-// model's global options for requests that carry none of their own - engine state only, applied at once, no config rewrite,
+// model's options for this app's own chats that carry none of their own (PLAN-p124s: an API request gets Turbo only
+// from its own fields) - engine state only, applied at once, no config rewrite,
 // no reload, and it stays visible under llama-swap (it never touches configs there).
 import {html} from "./preact.js";
 import {api, esc, store} from "./lib.js";
@@ -116,8 +117,13 @@ export function TurboButton() {
   if (S.health && S.health.supervisor) return null;   // (under llama-swap the engine settings are its config)
   const t = S.turbo;
   if (t.unavailable || t.supported === false) return null;   // (Inkling 2, Hy4-Flash: their engines have no Turbo)
-  const tip = t.on ? "Turbo ON: trades quality for maximum speed (greedy decoding, no thinking, expert skipping, aggressive drafting). Click to put your settings back."
-                   : "Turbo: trades quality for maximum speed, for benchmarks and playing with the engine. Your own settings come back when you switch it off.";
+  // one place that says what Turbo is on now: the button's own state.  What exactly it changes this model
+  // has, the dialog says from the server's plan rows before anything is written (engineLines); the live
+  // options are a separate choice below (TurboLive), which this button never touches.
+  const tip = t.on ? "Turbo ON: this model runs its fastest settings - greedy decoding, no thinking and what "
+                    + "else the engine has for speed. Click to put your settings back."
+                   : "Turbo: trades quality for maximum speed, for benchmarks and playing with the engine. It says "
+                   + "what it changes before it changes it; your own settings come back when you switch it off.";
   return html`<button type="button" class=${`turbo${t.on ? " turbo--on" : ""}${t.busy ? " turbo--busy" : ""}`} aria-pressed=${t.on ? "true" : "false"}
       title=${tip} disabled=${t.busy} onClick=${() => setTurbo(!t.on)}>
     <svg class="turbo__flame" viewBox="0 0 24 24" aria-hidden="true">
@@ -128,10 +134,11 @@ export function TurboButton() {
   </button>`;
 }
 
-// ---- live per-request Turbo (PLAN-turbo-live): the model's global setting for the control panel.  Every request
-// that does not carry its own `turbo` - the page's per-chat chip overrides it, API clients and agents included -
-// runs with these lossy options.  Changes apply at once (from the next request), persist across restarts, and
-// touch no config: unlike Maya's Turbo above there is no restart, and this stays visible under llama-swap.
+// ---- live per-request Turbo (PLAN-turbo-live): the model's global setting for the control panel.  It holds the lossy
+// options for this app's own chats that carry none of their own - the page's per-chat chip overrides it; an API
+// request runs exact unless it asks for Turbo itself (PLAN-p124s: a page setting never makes Turbo on for one).
+// Changes apply at once (from the next chat turn), persist across restarts, and touch no config: unlike Maya's
+// Turbo above there is no restart, and this stays visible under llama-swap.
 
 S.turboLive = undefined;   // until loaded: null = exact (off); {"drop": N, "skip": "off"|"ssd"|"ram"}; still undefined = an older server has none
 S.turboSkip = true;        // PLAN-p5: does this engine apply skip at all (only a QFN whose engine does not report it says false)
@@ -154,8 +161,8 @@ export async function setTurboLive(next) {   // {"drop","skip"} (parts that stay
     const t = await api("api/turbo/options", {method: "POST", body: {turbo: next}});
     S.turboLive = t.turbo || null;
     toast("success", S.turboLive ? "Live Turbo is on" : "Live Turbo is off",
-          S.turboLive ? "Every request without its own Turbo runs with these options, from the next one."
-                      : "Requests run exact again, from the next one.", 4000);
+          S.turboLive ? "This app's own chats without their own Turbo run with these options, from the next turn."
+                      : "Chats run exact again, from the next one.", 4000);
   } catch (e) {
     S.turboLive = prev;
     toast("error", "The live Turbo setting was not saved", e.message, 6000);
@@ -171,8 +178,9 @@ export function TurboLive() {
     setTurboLive(n.drop || n.skip !== "off" ? n : null);
   };
   return html`<div class="set-head"><h3>Turbo, live</h3></div>
-    <p class="set-intro">Lossy speed for every request this model answers that does not set its own - the apps, the
-      agents and new chats. A chat's own Turbo (the bolt in its message box) wins over this. It applies to the next
+    <p class="set-intro">Lossy speed for this app's own chats that do not set their own - the agents and the API
+      apps run exact unless a request asks for Turbo. A chat's own Turbo (the bolt in its message box) wins over
+      this. It applies to the next
       request - nothing restarts. Both off: requests run exact.</p>
     <div class="set-row"><span class="set-row__text"><span class="set-row__label">Drop experts</span><span class="set-row__sub">${TURBO_DROP_HINT}</span></span>
       <${Seg} label="Experts dropped" value=${String(t.drop || 0)} onChange=${(v) => set({drop: +v})}

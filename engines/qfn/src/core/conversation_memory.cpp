@@ -252,6 +252,38 @@ std::optional<uint64_t> conversation_mem_available(std::istream& meminfo) {
     return meminfo_kb_bytes(meminfo, "MemAvailable:");
 }
 
+std::optional<uint64_t> conversation_swap_used(std::istream& meminfo) {
+    std::optional<uint64_t> total, free;
+    std::string line;
+    while (std::getline(meminfo, line)) {
+        std::istringstream fields(line);
+        std::string key, value, unit, extra;
+        if (!(fields >> key) || (key != "SwapTotal:" && key != "SwapFree:")) continue;
+        std::optional<uint64_t>& into = key == "SwapTotal:" ? total : free;
+        if (into || !(fields >> value >> unit) || unit != "kB" || (fields >> extra)) return {};
+        uint64_t kb = 0;
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), kb);
+        if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+            kb > std::numeric_limits<uint64_t>::max() / 1024)
+            return {};
+        into = kb * 1024;
+    }
+    if (meminfo.bad() || (meminfo.fail() && !meminfo.eof())) return {};
+    if (!total) return {};                    // no SwapTotal line: the kernel's swap picture is unknown
+    if (!free) return {};                     // SwapTotal without SwapFree: do not guess
+    return *total >= *free ? *total - *free : 0;
+}
+
+std::optional<uint64_t> host_swap_used_bytes() {
+#if defined(__linux__)
+    std::ifstream meminfo("/proc/meminfo");
+    if (!meminfo) return {};
+    return conversation_swap_used(meminfo);
+#else
+    return {};
+#endif
+}
+
 void set_memory_limit_bytes(uint64_t bytes) { g_memory_limit_bytes.store(bytes, std::memory_order_relaxed); }
 uint64_t memory_limit_bytes() { return g_memory_limit_bytes.load(std::memory_order_relaxed); }
 

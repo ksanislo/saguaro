@@ -524,8 +524,8 @@ class Settings(unittest.TestCase):
 
 class QfnTurbo(unittest.TestCase):
     """QFN's Turbo: in the config it turns the Lamina drafting on and Answers at once back to one (no no-op: QFN has
-    no expert-skipping environment knobs); the engine's lossy half is the live per-request Turbo, so the server puts
-    the model's live Turbo to its default while Turbo is on and restores what it was when Turbo goes off."""
+    no expert-skipping environment knobs).  Its lossy half is the live per-request Turbo, which the button never
+    touches (PLAN-p124s, P125f): what the panel holds before and after a switch is what it holds."""
 
     def setUp(self):
         os.environ.pop("SAGUARO_RESTART_ON_UPDATE", None)
@@ -579,9 +579,10 @@ class QfnTurbo(unittest.TestCase):
         self.assertTrue(svc.fifo.acquire(False, units=1))
         self.assertFalse(svc.fifo.acquire(False, units=1))             # (8 places, one answer at a time)
         self.assertTrue(svc.fifo.claim_yield(0.0) is False)            # (nobody waits)
-        svc.turbo_live_before = None                                   # (as after a restart: the note keeps it)
         self.assertEqual(svc.set_turbo(False)["changed"], False)
-        self.assertEqual(svc.turbo_default, {"drop": 2, "skip": "off"})
+        self.assertEqual(svc.turbo_default, {"drop": 2, "skip": "off"})   # (the panel's choice is the button's
+        self.assertEqual(json.loads(Path(svc.turbo_path).read_text()),    #  neighbour: on and off, it and its
+                         {"drop": 2, "skip": "off"})                      #  sidecar stay exactly as they were)
         self.assertTrue(svc.fifo.acquire(False, units=1))              # (a flip with one running: the places still add up)
         svc.fifo.release(units=1), svc.fifo.release(units=1)
         self.assertFalse(svc.fifo.locked())
@@ -592,7 +593,9 @@ class QfnTurbo(unittest.TestCase):
         M.turbo_enable(self.p)
         self.assertTrue(M.turbo_info(M.read(self.p))["off_restarts"])
 
-    def test_the_server_turns_the_live_turbo_with_it(self):
+    def test_the_server_leaves_the_live_turbo_alone(self):
+        # (P125f: the button used to have a live half - TURBO_LIVE_DEFAULT and the turbo.live_before note - which
+        # c3844c07d emptied and PLAN-p124s made a violation; gone now, so a switch writes no sidecar at all)
         tok = ByteTokenizer()
         svc = Service(MockEngine(tok, "x", max_context=32768), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
         svc.config_path = str(self.p)
@@ -601,11 +604,12 @@ class QfnTurbo(unittest.TestCase):
         out = svc.set_turbo(True)
         self.assertEqual(out["changed"], True)
         self.assertIsNone(svc.turbo_default)                           # (the button drops no experts)
-        self.assertFalse(Path(svc.turbo_path).exists())
+        self.assertFalse(Path(svc.turbo_path).exists())                # (and writes no sidecar doing it)
+        self.assertNotIn("live_before", M.read(self.p).get("turbo") or {})   # (the note carries no live half either)
         self.assertEqual(M.settings_of(M.read(self.p))["draft"], "mtp")
         svc.set_turbo(False)
         self.assertIsNone(svc.turbo_default)
-        self.assertFalse(Path(svc.turbo_path).exists())               # (off: the sidecar goes, as any live Turbo off)
+        self.assertFalse(Path(svc.turbo_path).exists())               # (off: still no sidecar, as any live Turbo off)
         back = M.read(self.p)
         self.assertEqual(back["args"], self.before["args"])
         self.assertEqual(back.get("parallel"), 8)                     # (drafting and the 8 at once back as they were)
@@ -858,12 +862,15 @@ class Delete(unittest.TestCase):
     def test_off_the_list_only(self):
         l = glm_quant(self.d, "Maya-L")
         prev, shared = l.with_name(l.name + ".prev"), l.with_name(l.stem + ".shared-settings.json")
+        turbo = l.with_name(l.stem + ".turbo.json")        # (the live Turbo sidecar: P125f, the third one swept)
         prev.write_text("{}")
         shared.write_text("{}")
+        turbo.write_text('{"drop": 1, "skip": "off"}')
         out = M.delete(self.d, l)
         self.assertEqual((out["freed"], out["files"]), (0, False))
         self.assertFalse(l.exists() or prev.exists() or shared.exists())
-        self.assertTrue((self.d / "GLM-5.3-Flash" / "Maya-L" / "pack").is_dir())
+        self.assertFalse(turbo.exists())                   # (left, its options would re-switch Turbo on for a
+        self.assertTrue((self.d / "GLM-5.3-Flash" / "Maya-L" / "pack").is_dir())   #  later model of this name)
 
     def test_a_folder_another_model_runs_from(self):
         # two quants' files in one folder (the setup's pack-<model>/ beside pack/): only its own pack and GGUF files

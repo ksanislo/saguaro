@@ -515,6 +515,36 @@ int main() {
         }
         fs::remove_all(d3);
     }
+    // P125d: the exit save is bounded - flush_until ends at its deadline with writes left, drop_queued gives up on
+    // them (the conversations stay saved from their last turn), and the shutdown after that waits for nothing
+    {
+        const fs::path d4 = fs::temp_directory_path() / ("strata-sessiondir-exit-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(d4);
+        {
+            SessionDir::Options stall = opts(d4, id);
+            std::atomic<bool> writing{false};
+            stall.write_block = [&] {   // a write far slower than the exit budget
+                writing = true;
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            };
+            {
+                SessionDir sd(stall);
+                sd.open();
+                sd.write(std::make_shared<SavedConversation>(conv(tokens(400000, 1500), 21)));   // the running one
+                sd.write(std::make_shared<SavedConversation>(conv(tokens(410000, 1500), 22)));   // stays queued
+                while (!writing) std::this_thread::yield();
+                const auto t0 = std::chrono::steady_clock::now();
+                const bool done = sd.flush_until(t0 + std::chrono::milliseconds(200), "exit");
+                check(!done, "flush_until: false when the deadline passed with writes still queued");
+                check(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(1),
+                      "flush_until waits only until the deadline");
+                sd.drop_queued();
+            }   // the destructor: the cancelled write stops at its next block, no file of its own is published
+            check(session_files(d4) == 0, "a dropped exit save leaves no partial files behind");
+        }
+        fs::remove_all(d4);
+    }
     fs::remove_all(dir);
     std::printf("session_dir_test: %d checks passed\n", checks);
     return 0;
