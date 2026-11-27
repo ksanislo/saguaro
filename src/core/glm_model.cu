@@ -1599,7 +1599,7 @@ static std::vector<int> glm_search_bounds(const std::string& pack_dir, int64_t m
     // elastic pool a fixed amount, without it one whole context's (per DSA layer)
     double el_card = 0.0;
     if (const char* ev = getenv("SAGUARO_GLM_ELASTIC"); fast && kv_cells == 0 && ev != nullptr && std::atoi(ev) != 0) {
-        const double ring = (double) std::min<int64_t>(max_ctx, 8192 + 64);
+        const double ring = (double) std::min<int64_t>(max_ctx, glmfast::kScoreGridPositions);
         const double grow = 4.0 * (lat + (double) g.idx_key * max_pools);
         const char* kv = getenv("SAGUARO_GLM_ELASTIC_KV_GB");
         const char* pv = getenv("SAGUARO_GLM_ELASTIC_POOL");
