@@ -1,94 +1,73 @@
-# FIX-REPORT - manager FIX-FIRST card round 9 (`8dee8bf1c` rig, the 546K request still does not answer)
+# FIX-REPORT - manager card round 10 (`REVIEW-RESULT.md` + MANAGER UPDATE 2: the first cause is disproved - the slot guard + 40K repro FIRST)
 
-The manager's round-9 card (`REVIEW-RESULT.md`, committed with this report): LOAD and SPEED pass again, the
-SIGSEGV the last two rounds chased is NOT in the read (it is at exit - finding 2), and the read ends early two
-ways. Finding A run 2 is the loud one: "the context's device state could not be grown ... 70 MiB asked",
-"the expert cache was asked to give way of 70 MiB and gave 70 MiB" - while `2396 of 2541 slots` still held
-experts (~7 GiB). Finding A run 1 is the quiet one: `done: 0 tokens ... (length, cancel=False)` 3.5 s after
-"the prompt path's K/V staging holds 786432 cells", no ERR. Three commits: `82ba099e2` (fix 1 - the relief
-frees until the ask fits), `22d3cf546` (fix 2 - the silent ends around the read), `26666fe8d` (fix 3 - the
-exit order). New build dir `scratch/build-p124e-r10` (CUDA sm_75, ggml from `scratch/ggml-pinned`, the options
-byte-match the card-verification r9 build's), clean link; the three named modules each run ALONE -> pass.
+What the card asked this round, and what this box did, in its own order. Straight first: the card's decisive
+step is the 40K-token repro **on the card** with the guard on ("the manager runs it"); this box has no GPU, so
+what follows is the guard itself - shipped, tested, off by default - not a speculative rework of the give-ways.
 
-## Finding A run 2 - the relief freed once and gave up; now it frees until the ask fits (`82ba099e2`)
+## Finding A (run 1: `done: 0 tokens (length, cancel=False)`; run 2: `hipMemCreate` refusal with ~7 GiB of experts resident) - already fixed in round 9; cause lead superseded by the card; guard now stands
 
-The card is right about the mechanism: the give-way hands the slot/context budget chunks, but a follow grow
-maps NEW physical chunks (`hipMemCreate`), so what must reach the DRIVER is physical memory - and
-`vmm_grow_room` (vmm_grow.hpp) asked the expert cache exactly ONCE per grow (`st.relief_ask == 0` guard),
-retried the next chunk once, and failed the whole grow. The cache goes floor by SLOT (`give()` drops `v.lo`
-one slot at a time to `give_floor = 128`, and its log says so: "CUDA0's expert cache gives 48/60/62/72 MiB
-... 2524 ... 2396 of 2541 slots hold experts"), so a single ask hands back less than a 35-chunk ask needs -
-run 2's eight grow attempts shed ~420 MiB in eighths and refused each time, cache nowhere near its floor.
-Now (the card's fix, its wording):
+The r9 fixes for both run-modes are committed (`82ba099e2` relief frees until the ask fits, `22d3cf546` the
+silent ends closed - the zero-token clean end now prints the numbers that name the culprit). UPDATE 2
+disproved the "give takes a slot inside the active loan" cause (the `room_p` clamp keeps a loan at or above
+the setup give line, and a loan layout takes its residents off `host_res`), and named the remaining lead:
+**the two give-ways start from the same lend line and can hand the same chunks out twice**. That is now
+detectable in one card run - see the guard below. The fix for the path it names deliberately waits for that
+run: the two bands share one top (`kvg.top = lend_first = v.top`) by design, so any blind clamp of one at the
+other's line would simply starve whichever give-way moves second - the guard's abort line names who crossed,
+and the fix is then targeted, which is exactly what the card sequences ("DO THIS FIRST ... Fix that path").
 
-* every refusal asks the relief for the WHOLE shortfall still missing and retries; when the retry still fails
-  AND the relief handed back bytes, it is ASKED AGAIN - until the ask fits, the relief answers 0 (at the
-  floor: `free_to_driver` gives no cache once `gv[k].lo` is at `give_floor` and the budget spare is gone), or
-  `kVmmReliefRounds = 24` rounds of bytes that never become chunks.
-* `st.relief_ask` / `st.relief_got` accumulate across the rounds, so the grow's failure line says what was
-  asked and what was freed IN TOTAL; every individual shed keeps its own stderr line (give()'s "gives N MiB
-  ... N of 2541 slots hold experts") - the card's "log what was freed" is satisfied at both granularities.
-* `free_to_driver` device-syncs after handing released chunks to the driver. Run 2 "gave 70 MiB" and failed
-  the very next `hipMemCreate` with 0.13 GiB free: physical memory a release lets go of is reclaimed once the
-  card's work has drained, and the grow's retry must see it. (Straight: on a GPU-less box this is the
-  half of the fix I cannot prove; if the card's next run shows the loop asking 24 rounds and still failing
-  with the totals growing, the reclamation is NOT the driver's to reuse - then the card's second alternative,
-  remapping the given slots' chunks instead of releasing them, is the one to build.)
+## Finding B (exit: SEGFAULT in `VmmRange::release()` after `exit(0)`) - fixed in round 9, nothing new needed
 
-`vmm_grow_test` (54 checks): the asked-ONCE expectations become the ask-until-the-floor order; new cases:
-a cache that frees one chunk per ask covers a 4-chunk grow in four asks (10G asked / 4G given on the line),
-a cache that runs dry mid-grow is asked ONE more time at the floor and refuses without mapping, and relief
-bytes a `make()` can never use stop at `kVmmReliefRounds`.
+`26666fe8d` (core/vmm_exit.hpp: atexit handler armed at the first VMM api() use; from then on `release()` and
+`vmm_chunk_free()` make no driver call). No serve file changed then or now, so `serve/qfn_engine.py` stays as
+extracted - it was not touched and nothing needed re-extraction. Card test (SIGTERM after growth exits 0) is
+the manager's; a GPU-less box cannot raise a HIP runtime.
 
-## Finding A run 1 - what ends a read as "length" with 0 tokens, said silently (`22d3cf546`)
+## MANAGER UPDATE 1 (the give range fixed at setup overlaps the per-request loan; unit test: a fake cache with a loan resized after setup, a give must not touch `[p.first, slots)`) - cause disproved by UPDATE 2; its TEST and its CHECK ship
 
-Stated straight first: run 1's engine log is not in the card's evidence file (the file holds the core, run
-2's engine lines and the server output), and this box has no GPU, so I cannot name THE line that ended run 1.
-What I did instead: every way the engine can reach DONE with nothing said, checked against the card's
-signature - and every one of them that exists is now closed.
+UPDATE 2 showed the give as written neither unmaps nor moves into an active loan (room_p + kNotResident). But
+the test the update asked for exists (`slot_give_guard_test`: "THE ACTIVE LOAN, including re-sized AFTER
+setup"), and the check it encodes is now LIVE on every handout while the guard is armed - a give, move, unmap,
+remap or relayout that reaches `[p.first_now, slots)` prints the loan's owner and aborts, whether or not the
+r9/r10 clamps are what keeps them apart today.
 
-* RULED OUT: the r8 refusals. They all carry "(out of memory)", hit the `vram_short` soft-fail, and end
-  `DONE ... vram` - the client raises `EngineOutOfVram` and the server prints "(error, cancel=False)" plus
-  "the engine reported an error" (the evidence file's own line 96 shows that pair). Run 1 said "(length,
-  cancel=False)" with no such line, so its DONE word was CLEAN: the read "succeeded" and nothing produced.
-* CLOSED (1): the read's piece loop ignored `Prefill::stopped_at()`. `stop_at_chunk` (the BYIELD / pending
-  VLEND hook) makes `sp.run` return TRUE after stopping at a chunk - and the loop advanced `q = qe` over the
-  cells it never read, then reported the piece read. A stopped piece now returns "stopped, not failed" with
-  the stop cell ABSOLUTE (the driver's `q0 + stopped_at()` recomputation is only right while ONE `sp.run`
-  covers the segment - with pieces it would resume at the wrong cell and re-read).
-* CLOSED (2): the PIPED-CONCURRENT reader ran bare `sp.run(ids+q0, b0-q0)` - r8's backed cut, back-ahead fits
-  and read clock were non-concurrent-only, so on that path only prefill's refusal gate stood between a long
-  read and an unmapped cell. It now runs the SAME piece loop (own error string, `read_stop` out).
-* CLOSED (3): the silent zero itself. A request that reaches DONE having produced nothing, not cancelled,
-  not yielded, finish still "length", now says so on stderr with the numbers that name the culprit:
-  "the request ends with no tokens and no reason: the read reached X of N cells, the decode P, max_new M,
-  the staging holds S cells, the conversation is backed to B[, the pipelined decode ran]". Next card run
-  reads a reason instead of a silence - a staging cap, a reach check and a backed end are all in the line.
-* CLOSED (4): `follow_units_cells` under-reported the pooled rows by `idx_block - 1` cells - it answered
-  `(U-2) * idx_block` where the grow's need `cells / idx_block + 2` inverts exactly to `(U-1) * idx_block -
-  1` - enough for the piece loop to refuse cells the request-start fit had just backed (a spurious
-  "no VRAM is left to back the read's context" on a card that had them).
+## MANAGER UPDATE 2 / DO THIS FIRST - the guard: shipped, kept, off by default (`01c43ade7`, `12390e6d2`, `f87b4f143`)
 
-## Finding B - the exit order: no HIP call after the runtime is gone (`26666fe8d`)
+* `engines/qfn/include/strata/core/slot_give_guard.hpp` (new, pure - unit-testable like `vmm_grow.hpp`):
+  `slot_give_guard_line` answers, for one op (path + what + slot range + chunk range), (a) is any of it inside
+  an ACTIVE loan `[first_now, slots)` of a part on that cache, and (b) is any slot/chunk of it inside the
+  region the OTHER give-way handed out (regions are the give-ways' live `[lo, top)` bands, slots AND chunks);
+  a crossing is ONE line naming the path, the slots/chunks and who owns them; `slot_give_guard` prints it to
+  stderr and `abort()`s - the core dump's last word. Loan before region (the active read's memory is named
+  first). Same-path ops never cross their own region; ranges that touch but do not overlap are clean; an op
+  that cannot name its slots is not accused of reaching into a loan (chunk checks still apply - that is the
+  free-to-driver case).
+* Wired in `generate.cpp` at EVERY handout the card lists, each hook gated on `slot_give_guard_on()` (off: one
+  test of a static bool - no driver call, no allocation, no log; the off path is what it was):
+  kvg_ensure's per-slot give, expert move-into, and chunk unmap; kvg_trim's take-back `map_range` and its
+  spare free-to-driver; gv `give()`'s per-slot give, move-into and chunk unmap (the VRAM relief and
+  `free_to_driver` run through it); `take_back()`'s budget remap; `free_to_driver`'s release (it knows chunks,
+  not slots - the named range is the top `n` chunks of the card's given band); and `lend()`'s loan relayout
+  (its own loan is what is being laid out, so (a) checks the OTHER parts on that cache, (b) both give-ways'
+  regions). Live providers: `guard_loans` reads every `PfPart::first_now` at call time (the loan is re-sized
+  per request), `guard_regions` reads `kvg.lo/top` and every `gv[k].lo/top`. Arming prints one line.
+* `slot_give_guard_test` (CMake, beside the other P124e modules): 23 checks - both card scenarios (the loan
+  re-sized after setup; two give-ways counting down from one line, the second's give crossing the first),
+  loan-before-region, own-region clean, per-cache separation, chunk-only ops, touching ranges, the printed
+  line, and off-is-free.
+* `docs/SETTINGS.md`: the `SAGUARO_DEBUG_SLOT_GUARD` line.
 
-The core says it: `exit(0) -> __run_exit_handlers -> ~vector<unique_ptr<ScoresPool>> -> VmmRange::release()
--> call through a null pointer in libamdhip64`. The static pool vectors (layer.cpp's follow pools, block-score
-scratch, slot pools, rope tables) are built at load, so their atexit hooks register BEFORE the HIP runtime's
-own teardown and run AFTER it. New pure header `core/vmm_exit.hpp`: the first VMM `api()` use - long after
-the runtime initialised - arms an atexit handler (LIFO: it runs FIRST), and from then on `VmmRange::release()`
-drops its bookkeeping and `vmm_chunk_free()` returns with NO driver call; the ranges are the kernel's to
-reclaim at exit. Both guarded branches (CUDA's `cu*` path takes the same static-destructor hit), and the
-fallback no-VMM branch needs nothing. The host pools' destructor makes no HIP call and the budget's chunk
-list is plain handles, so the flag covers every static owner the card named. `vmm_grow_test` +2 checks (the
-flag is false while the engine runs; arming twice registers once; marked = the runtime is gone), 56 total.
-The card's "SIGTERM after growth exits 0" is a GPU-rig test; what this box proves is that the exact function
-in the core's frame #3 now returns without touching the runtime once the exit handler has run.
+## "Build ONLY the QFN engine (tools/qfn/build.sh <new dir>, AVX floor)" - done; tests run one at a time
 
-## Tests and build
+`QFN_GGML_DIR=scratch/ggml-pinned bash tools/qfn/build.sh scratch/build-p124e-r12` (fresh dir; the script's
+own AVX floor + sm_75 options) -> **180/180 clean, `saguaro-qfn` links**; `generate.cpp` compiles with only the
+pre-existing `w` warning (same line the r10 log shows). Run ALONE, one at a time: `slot_give_guard_test` 23,
+`read_backing_test` 82, `kv_host_growth_test` 22, `vmm_grow_test` 56 -> all pass.
 
-`scratch/build-p124e-r10` (fresh; `-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=75` +
-`STRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_CONVERSATION_TESTS=ON -DSTRATA_GGML_DIR=scratch/ggml-pinned
--DSTRATA_MMQ_TQ_OVERLAY=OFF -DSTRATA_PLE_FIXTURE_DIR=engines/qfn/bench/micro` - the cache's options
-byte-match the card-verification r9 build's), full build clean, engine links. Run ALONE, one at a time:
-`read_backing_test` 82, `kv_host_growth_test` 22, `vmm_grow_test` 56 -> all pass; `serve/test_vram_refusal.py`
-4/4 (the r6/r7 ERR-wording contract still holds - no serve file changed, so no re-extraction needed).
+## What this box cannot prove, said straight
+
+The crossing itself is a GPU fact: without a card nothing here can show whether kvg and gv really cross on
+mortar's rig, which op crosses first, or that the guard's abort fires - the 40K repro at `--max-context
+1048576` with `SAGUARO_DEBUG_SLOT_GUARD=1` is what names the culprit (one line, one core). With the env unset
+the engine behaves as before (every hook is the flag test; the pure check is proven by its own module). Once
+the card's line names the path, the fix is one targeted change - the guard stays in (off) to keep it honest.
