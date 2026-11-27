@@ -10726,6 +10726,13 @@ int main(int argc, char** argv) {
                     snaps[0] = std::move(cp);
                     snap_next = 1 % n_snaps;
                     snap_copy(snaps[0], false);
+                } else if (r_best < (int) hist.size()) {
+                    // P125l: the cache holds a read stopped between its chunk passes (its conversation ends at a
+                    // snapshot with no logits - no turn finished past r_best, so no later turn above): a DIFFERENT
+                    // conversation arrived. It parks the kept read with everything it read (park_active takes the
+                    // full visits' rows too) and starts clean - rolling back over the kept read's rows is what
+                    // lost a paused read's 32,768 tokens and made its resume re-read the prompt from 0.
+                    park_active(), reset();
                 }
             }
             // (drafting for this request: spec=1 asks for none; the prompt lookup's history its tokens; the Monitor's
@@ -10790,6 +10797,8 @@ int main(int argc, char** argv) {
             for (auto& v : g_cnt_hist) v = 0;
             for (auto& v : g_src_hist) v = 0;
             bool cancelled = false;
+            int read_pos = 0;   // (P125l: where a stopped read ended - the chunk boundary its passes had run to,
+            //  caught at the two g_cancel checks below; the stop keeps the conversation exactly there)
             g_lend.want = (int) ids.size();   // (KV lending: at the answer's first token)
             if (L < ids.size()) {
                 const int T_sup = g_dev[0].W.T_sup;
@@ -10814,8 +10823,8 @@ int main(int argc, char** argv) {
                         const int T_pass = big_begin(M, g_dev[0].W, dev_cache(0), (int) (s1 - s0), (int) s1, bs);
                         for (size_t p0 = s0; p0 < s1; p0 += T_pass) {
                             beat("a prompt pass (the layer-major path)");
-                            if (g_cancel) {   // (a prompt half run: back to a snapshot it kept)
-                                cancelled = true;
+                            if (g_cancel) {   // (a prompt half run: the passes so far are kept, P125l)
+                                cancelled = true, read_pos = (int) p0;
                                 break;
                             }
                             const int n = (int) std::min<size_t>(T_pass, s1 - p0);
@@ -10836,7 +10845,7 @@ int main(int argc, char** argv) {
                         for (size_t p0 = s0; p0 < s1; p0 += chunk) {
                             beat("a prompt pass");
                             if (g_cancel) {
-                                cancelled = true;
+                                cancelled = true, read_pos = (int) p0;
                                 break;
                             }
                             const int n = (int) std::min<size_t>(chunk, s1 - p0);
@@ -10868,20 +10877,44 @@ int main(int argc, char** argv) {
                 }
             }
             if (cancelled) {   // (back to the latest snapshot the request kept, else nothing is kept)
-                int best = -1;
-                for (int i = 0; i < n_snaps; ++i)
-                    if (snaps[i].pos >= 0 && snaps[i].pos <= (int) ids.size() && (best < 0 || snaps[i].pos > snaps[best].pos))
-                        best = i;
-                if (best >= 0 && snaps[best].pos > 0 && snaps[best].pos < (int) ids.size()) {
-                    const int sp = snaps[best].pos;
-                    snap_copy(snaps[best], false);
-                    for (auto& sn : snaps)
-                        if (sn.pos > sp) sn.pos = -1;
-                    hist.assign(ids.begin(), ids.begin() + sp);
-                    hist_sig.assign(sig.begin(), sig.begin() + sp);
+                // P125l: with conversation keeping the stopped read KEEPS what it read: the conversation stays at
+                // read_pos - every pass up to it ran, none half-run, their rows are still the cache's (nothing has
+                // run between the STOP and here) - and takes a snapshot there, the same save park_active takes at
+                // a conversation's end (the conv states and the sliding visits' windows; the full visits' rows
+                // need none, they rewrite cleanly). The request coming back for the rest matches its end exactly
+                // and its PP/DONE report cached = read_pos as the reused figure; a DIFFERENT conversation parks it
+                // whole (the r_best == 0 / r_best < hist.size() legs above) instead of reading over its rows.
+                // Without keeping (SAGUARO_IK2_KEEP=0, KV-streaming, KV-Q4: keep_n 0) the old shape below stands.
+                if (keep_n > 0 && read_pos > 0) {
+                    hist.assign(ids.begin(), ids.begin() + read_pos);
+                    hist_sig.assign(sig.begin(), sig.begin() + read_pos);
                     last.clear();
-                } else {
-                    reset();
+                    bool have = false;   // (a stop exactly at a segment's snapshot: that one is it)
+                    for (const auto& sn : snaps) have = have || sn.pos == read_pos;
+                    if (!have) {
+                        Snap& sn = snaps[snap_next];
+                        snap_next = (snap_next + 1) % n_snaps;
+                        sn.pos = read_pos, sn.slot = 0;
+                        sn.last.clear();
+                        snap_copy(sn, true);
+                    }
+                } else {   // (no keeping: the shape before - back to the latest snapshot at or below the prompt)
+                    int best = -1;
+                    for (int i = 0; i < n_snaps; ++i)
+                        if (snaps[i].pos >= 0 && snaps[i].pos <= (int) ids.size() &&
+                            (best < 0 || snaps[i].pos > snaps[best].pos))
+                            best = i;
+                    if (best >= 0 && snaps[best].pos > 0 && snaps[best].pos < (int) ids.size()) {
+                        const int sp = snaps[best].pos;
+                        snap_copy(snaps[best], false);
+                        for (auto& sn : snaps)
+                            if (sn.pos > sp) sn.pos = -1;
+                        hist.assign(ids.begin(), ids.begin() + sp);
+                        hist_sig.assign(sig.begin(), sig.begin() + sp);
+                        last.clear();
+                    } else {
+                        reset();
+                    }
                 }
                 if (serve_maya) std::printf("DONE 0 %zu %.1f 0 cancel 0 0 %d 0 0\n", ids.size(), (now() - t0) * 1e3, cached);
                 else std::printf("@END cancelled %zu %d %.3f %.3f\n", ids.size(), cached, now() - t0, 0.0);
