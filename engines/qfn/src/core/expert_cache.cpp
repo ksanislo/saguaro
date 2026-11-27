@@ -512,8 +512,9 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int6
         auto r = std::make_unique<VmmRange>();
         if (!r->reserve(want) || !r->map_range(0, r->chunks(), [] { return (VmmChunk) 0; })) {
             char buf[256];
-            std::snprintf(buf, sizeof buf, "ExpertCache: mapping %.2f GiB of VRAM failed: out of memory",
-                          (double) want / 1073741824.0);
+            // P124e (round 6, manager card): the driver's words, never a bare "out of memory" / "no error"
+            std::snprintf(buf, sizeof buf, "ExpertCache: mapping %.2f GiB of VRAM failed: %s",
+                          (double) want / 1073741824.0, vmm_last_error());
             err = buf;
             return false;
         }

@@ -13919,7 +13919,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             size_t gi = 0;
             const bool mapped = r.map_range(c0, cend, [&]() -> strata::core::VmmChunk { return gi < got.size() ? got[gi++] : 0; });
             for (; gi < got.size(); ++gi) strata::core::qsa_slot_budget_give(v.dev, got[gi]);   // (not used)
-            if (!mapped) std::fprintf(stderr, "saguaro: elastic slots: CUDA%d's expert cache could not map its chunks back\n", v.dev);
+            if (!mapped) std::fprintf(stderr, "saguaro: elastic slots: CUDA%d's expert cache could not map its chunks "
+                                              "back: %s\n", v.dev, strata::core::vmm_last_error());   // round 6: named
             const int64_t lo0 = v.lo;
             while (v.lo < v.top) {   // a slot whose chunks are all mapped again holds an expert again
                 const int64_t a = (int64_t) (xc.slot_offset(v.lo) / G), b = (int64_t) ((xc.slot_offset(v.lo + 1) + G - 1) / G);
