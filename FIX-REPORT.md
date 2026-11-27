@@ -1,123 +1,118 @@
-# FIX-REPORT - REVIEW-RESULT findings, one commit each (round 5: `67e1244e6..ec68da4a8`)
+# FIX-REPORT - REVIEW-RESULT findings, one commit each (round 6: `d94e12c4b..374bac012`)
 
-The manager's card test (mortar, RX 9070 XT, 2026-11-26 17:38-17:42, run against `67e1244e6`, `REVIEW-RESULT.md`
-committed with this report) is the whole finding this round: the HOST side still passes (1.30 GiB pinned K/V at
-262144 and 1048576, expert RAM tier 68.00 GiB at both) but the VRAM side fails - 8.67 GiB in use before the expert
-cache at 262144 against 12.08 GiB at 1048576 ("~3.4 GiB still allocated by --max-context ... and no log line names
-it"), and the cache fell to 1925 slots at 262144 against round 3's 2256 ("the new VRAM path costs ~1 GiB even at
-the default context"). The card's three numbered parts map to the three sections below; the code changes are
-`9f61edc6a` (step 1) and `ec68da4a8` (step 2), the new build dir is `scratch/build-p124e-r5` (CUDA sm_75, ggml from
-`scratch/ggml-pinned`), and nothing here is GPU-testable on this box - the proof stays `scratch/card-test-elastic-kv.sh`
-(updated this round) on mortar.
+The manager's card test (mortar, RX 9070 XT, 2026-11-26 20:11-20:33, run against `d94e12c4b`, `REVIEW-RESULT.md`
+committed with this report) is the whole finding this round: LOAD and SPEED pass and stay untouched; GROWTH fails -
+one 546,145-token conversation on the 1048576 config grew its host copy correctly through 44 steps to "546148 cells
+now (4.91 GiB pinned for K/V in all)" and then died with `the context's device state could not be mapped on CUDA0:
+no error` followed by `ERR no RAM is left to pin this request's context (546145 tokens)` - a VRAM failure reported as
+"no error" and answered with a RAM message while 13 GiB sat free. The card's three numbered parts map to the three
+sections below (`a83743418`, `59c4c6688`, `f8f6ff2c0`; the nit `374bac012`); the new build dir is
+`scratch/build-p124e-r6` (CUDA sm_75, ggml from `scratch/ggml-pinned`), the acceptance stays
+`scratch/card-test-elastic-kv.sh` (criterion F added this round), and nothing here is GPU-testable on this box.
 
-## Step 1 - the load-time accounting lines, and the one-line engagement verdict (`9f61edc6a`)
+**What the code actually did.** Two defects, both in the round-4 VRAM half (`follow_room` / `follow_map_locked`):
 
-* `include/strata/core/devnotes.hpp`, `src/core/devnotes.cpp` (new, linked into `strata_engine`): a `DeviceNote`
-  wraps one device allocation and records the card's **free-memory delta** across it, under a name; names
-  aggregate (bytes, charge, count).  The delta is the point: an address reservation can ask GiBs and cost 0 while
-  its backing costs GiBs, and only the delta tells those apart - which is exactly the HIP question the card
-  cannot answer without the lines.  Accounted sites: the solo session's carve, each stage's, each batch slot's
-  (`generate.cpp`); the native head and the logits buffer (`generate.cpp`, `native_head.cpp`); the MTP drafter's
-  dense weights, its 512 expert blobs, its K/V state (`mtp.cpp`); the DFlash2 pack (`dflash2.cpp`); and the round-4
-  pools in `layer.cpp` - the follow pools' **addresses for --max-context** and their **start step (backed)** as
-  separate lines, the block-score scratch (addresses + start), the grown RoPE table (addresses + the trained
-  positions), and the SAGUARO_YARN_ELASTIC table's addresses.
-* The dump runs immediately before the expert cache sizes itself (`generate.cpp`, after
-  `mem_mark("the weights, the session and the drafter")`, before the sizing's first `device_free_bytes()`):
-  `saguaro generate: VRAM in use before the expert cache: X GiB of Y (Z free): the allocations, named` then one
-  `VRAM: <name>: A GiB asked, B GiB in use (N allocations)` line per name at or above the card's 64 MiB.  Sum the
-  lines against the header and the unnamed remainder is visible too.
-* One line, always printed at the same load (`generate.cpp`), naming the verdict and the reason:
-  `VRAM follows use: ENGAGED on CUDA0 (<vmm_reason>, ...)` / `FELL BACK on CUDA0 (<why the give cannot run>):
-  backing ... whole for --max-context N` / `OFF on CUDA0 (<condition that stopped the rule>)`.  The reason comes
-  from `strata::core::vmm_reason()` (`vmm.cpp`, all three build branches: which driver entry point / device
-  attribute / granularity query said what, or `SAGUARO_HIP_VMM=0`), and from `qsa_vram_follow_why()`
-  (`layer.cpp`) for the rule's own conditions (`--serve`/`SAGUARO_KV_VRAM_ELASTIC`/streaming/host rule/VMM).
-  Round 4's ENGAGED line kept its "holds N MiB at load" number inside the new wording.
+1. *The probe lied.* `follow_room` probed the room one chunk at a time - `cuMemCreate`, then `cuMemRelease`, then
+   the next - so it proved only that ONE chunk fits at a time. With the card nearly full (weights + graphs + the
+   7.3 GiB expert cache) it returned true for GiBs the card did not have, **never asked the relief** (a single
+   chunk always fit, and the relief was only ever consulted on a per-chunk refusal), and `follow_map_locked` then
+   failed mid-`map_range` - which is the card's "could not be mapped". The cache gave way only in the rope grow's
+   loop (`qsa_rope_grow` keeps its chunks); the follow pools and the scratch probed-and-freed.
+2. *The error was unread.* The driver API (`cuMemCreate`/`cuMemMap`/...) never sets `cudaGetLastError()`, so
+   `cudaGetErrorString(cudaGetLastError())` printed "no error" over a genuine out-of-memory. And the caller -
+   `solo_host_fit_r` failing, which covers BOTH halves since round 4 - answered with the RAM text, because the
+   half that failed was never consulted: `qsa_dev_pin_failed()` was defined in round 4 and read nowhere.
 
-## Step 2 - the ~3.4 GiB and the ~1 GiB: found, fixed (`ec68da4a8`)
+## Finding 1 - the mapping failure reports its real cause (`a83743418`)
 
-**Read the code path the accounting names.** The path is round 4's own fallback at `generate.cpp:7113-7146`:
-"the context's device state cannot grow (the expert cache gives no room: **the experts are not all in the RAM
-arena**): backing it whole for --max-context now".  And the card's rig can *never* have the RAM arena:
-`--resident-budget-gib` - the option that gives the card its 68 GiB expert RAM tier, the reason the host side now
-passes - **implies `--mmap-experts`** (`generate.cpp:3232`, it has since the option existed), so the expert source
-is `FileExpertSource`, `srcp != &arena_src`, and round 4's give decision (`srcp == &arena_src` at :7114 and again
-inside `give_on` at :13687) made the follow rule **fall back on MORTAR - the acceptance rig - every single run**.
-The fallback backs the context state whole:
+* `vmm.cpp` / `vmm.hpp`: every failing driver call records itself first - `cuMemAddressReserve`, `cuMemCreate`,
+  `cuMemMap`, `cuMemSetAccess` (HIP branch: `hipMemAddressReserve`/`hipMemCreate`/`hipMemMap`/`hipMemSetAccess`,
+  which already logged and now record too) - into a thread-local `vmm_last_error()`: the call, the driver's own
+  string (`cuGetErrorString`, resolved optionally at startup; `CUresult %d` without it) and the bytes. That is
+  what the failure line prints instead of `cudaGetLastError()`, so "no error" is gone by construction; a build
+  with no VMM says so.
+* `include/strata/core/vmm_grow.hpp` (new, pure): `vmm_grow_failure_text()` composes the line the card asked for -
+  which step failed (`mapped` / `grown`), the driver call and its code, how much was asked (MiB and chunks), how
+  much VRAM is free right now (the caller's `cudaMemGetInfo`), and whether the expert cache was asked to give way
+  and what it gave ("was asked to give way of 776 MiB and gave 512 MiB" / "was never asked (the driver's free
+  memory was not short)"). Pure, so the test reads it; it never contains "no error" and never the word RAM.
+* `layer.cpp`: `report_vmm_grow_failure()` (the free-memory read + the line) is printed by the follow map's refusal
+  (replacing the "no error" line), by the scratch's map refusal (silent before) and by both room-short paths
+  (`follow_room` refusing said NOTHING at all before); `follow_room` now also records what the relief was asked
+  and what it returned, for the line.
+* Never a RAM message for a VRAM failure - `qsa_dev_pin_failed()` decides the wording at every site the grow can
+  fail: the solo admit answers `ERR no VRAM is left for this request's context (N tokens): the card's expert cache
+  gave all it can` (that ERR text already existed for the budget half; the RAM/VRAM choice is new); a batch slot's
+  admit error and its `BDONE` say `no VRAM is left ...` / finish `vram`; the decode's pin ends `finish=vram`; and
+  `engines/qfn/serve/server.py`'s `engine_refusal` maps the `no VRAM is left` prefix to `EngineOutOfVram` (retry
+  once, else 503 - the same handling as a DONE/BDONE `vram`), never to `EngineOutOfRam`/`RAM_SHORT`.
+  `serve/qfn_engine.py` re-extracted with `tools/saguaro/extract_qfn_engine.py` (never hand-edited).
 
-* the ~3.4 GiB that scaled with --max-context is exactly that: the backed-whole follow arrays' delta
-  262144 -> 1048576 (indexer keys 96 chunks per state x 12 states ~ +1152 MiB per holder, x3 holders, plus the
-  scratch and the page tables, less the grown RoPE which backs only the trained positions) - the same ~3.4 GiB
-  the card measured, in the same range the round-4 table predicted; the fallback line printed the *reason* but no
-  bytes, which is why "no log line names it" - step 1's table and the FELL BACK line name it now.
-* the ~1 GiB 262144 lost against round 3 is the same fallback's doing: round 4's state arrays move from one
-  carved `cudaMalloc` (round 3) to whole-context VMM backing (chunk-rounded hipMemCreate/hipMemMap ranges) on top
-  of the reservations - the accounting table will print the per-rig bytes on the next run; after this fix the
-  fallback does not run in that configuration at all, so 262144 pays only the start step and should beat
-  round 3's carve (round 4's rule frees ~336 MiB per holder that round 3 carved - pooled keys and scratch -
-  ~ +350 expert slots).
+## Finding 2 - the growth works: the cache gives way BEFORE the map (`59c4c6688`)
 
-**The fix:** the give path never needed the RAM arena.  `give()` (`generate.cpp`) evicts the expert cache's
-*coldest* residents - it marks them `kNotResident` in the host and device residency tables before unmapping their
-chunks, so subsequent reads of an evicted expert take the ordinary "not in the VRAM cache" path, answered by the
-same `ExpertSource` interface (`blob_stable`, `prefetch` are virtual; the mapped file tier answers from its
-mapping / resident complement exactly as the arena does, and it is precisely the mode where the file already
-answers cache misses).  Both gates now accept **any expert source** (`srcp != nullptr`); the guards that genuinely
-stop a give stay (`--adapt-async`, `--prefill-head-alias`, `--peer-device`, `--vram-elastic`, helper caches on
-other GPUs, "no residency table", "a cache is not in VMM"), and a rig that still cannot give keeps round 4's
-behaviour - back whole, FELL BACK line with the reason, today's numbers, byte for byte.
+`vmm_grow_room()` (vmm_grow.hpp, the card's order, pure) - and `follow_room` is now just it plus the device
+context: **take every chunk the grow needs from the driver and HOLD them**; the first refusal asks the card's
+relief ONCE for the whole remaining shortfall (`(need - made) * G`, the expert cache's coldest residents first,
+down to its floor - the plan's take-from-experts in VRAM); only with every chunk in hand is the map tried, and
+`follow_map_locked` / `scores_grow_locked` map from `got` instead of taking fresh ones. So for the card's 546K
+conversation: the free VRAM runs out after a few chunks, `vram_relief` → `free_to_driver(quiet)` → `give()`
+evicts the coldest experts and frees their chunks down toward `give_floor`, and the map never starts before that
+room is real - which it must be, since QFN's VRAM K/V is a 32K-cell window (the arrays that scale with the
+context are the page table, the pooled indexer rows and the scratch: GiBs, not the K/V's tens of GiB - 7.3 GiB of
+cache can free far more than 546K cells of index state costs). A conversation that TRULY cannot fit - the cache
+gave to its floor and the driver still refuses - fails at the room step with the line above, and the request ends
+`no VRAM is left` (503), never mid-map with a half-mapped state. The load's start step (`qsa_follow_start`, the
+pool builder) and the fallback's whole-context backing (`qsa_follow_back_whole`, `qsa_scores_back_whole`) keep
+mapping the driver's fresh chunks - no relief is installed at the load, and the fallback's numbers stay byte for
+byte (criterion D untouched). The lock rule stands: the room is taken OUTSIDE `g_slot_mu`/`g_scores_mu` (the
+relief takes the budget's lock), the map re-takes it; chunks the map never consumed go back to the driver.
+`qsa_follow_grow_at` still runs measure - room (+relief) - map as three lock-scoped steps (round 4's rule).
 
-**If HIP lacks what the elastic VRAM path needs** - the card will now say it itself, and here is the reading:
-the fallback above is the mechanism the code proves fires (the arena gate makes it certain), so it is what got
-fixed.  The one competing candidate for the ~1 GiB, that HIP charges VRAM for a *virtual-address reservation*
-(`hipMemAddressReserve`), cannot be shown without the card - so step 1's table measures it directly: the follow
-pools' addresses line prints its bytes asked (262144: ~408 MiB per holder, 1048576: ~1560 MiB + the rope
-reservations) beside its free-memory delta.  If that delta is ~0 the addresses are free (NVIDIA behaviour) and
-the fix above lands both acceptance clauses; if the delta scales with --max-context, ROCm is committing VRAM for
-reservations and the remaining way is the card's other option - plain allocation for the start step with growth
-by re-allocation outside the hot path (which forfeits the pointer stability the captured graphs need, so it is
-deliberately not implemented before the evidence is in).  The ENGAGED line's `vmm_reason()` string covers the
-third possibility (the VMM check itself failing on the card) with the attribute-level reason.
+## Finding 3 - the tests (`f8f6ff2c0`)
 
-## Step 3 - the acceptance (Ken), and what mortar must now show
+* `src/core/vmm_grow_test.cpp` (new ctest module, header-only/CPU like `kv_host_growth_test`): a fake allocator
+  records the event order, and the card's order is asserted - with a short card, `give:` happens before `map:`
+  (give-way-before-map), the relief is asked EXACTLY once and for exactly the shortfall (`(need - made) * G`),
+  every chunk is held when the map starts, a room that never arrives maps NOTHING (no half-grown state),
+  `may_relief=false` (the load's start step) never asks, and a card with the room never asks - the experts keep
+  their room until a conversation needs it. The error-text half asserts the line carries the driver call and its
+  code, "776 MiB asked (388 chunks of 2 MiB)", "2.00 of 15.00 GiB free on the card" and the cache clause, and that
+  it never reads "no error" and never says RAM - with a recorded driver code and without one. 28 checks.
+* `serve/test_vram_refusal.py` (runs against the DEPLOYED `serve/qfn_engine.py`): "no VRAM is left..." →
+  `EngineOutOfVram` and not `EngineOutOfRam`, its text never says "no RAM"; "no RAM is left..." unchanged; an
+  ordinary ERR stays the request's. The same VRAM case was added to the QFN-side `test_vram_finish.py` - that
+  module cannot be imported in this checkout for a pre-existing reason unrelated to this round
+  (`engines/qfn/serve/server.py`'s `from serve import turbo_live` names the root package's module, so neither
+  sys.path order can satisfy it), which is why the runnable version lives at the root, next to the other
+  qfn_engine tests.
+* `scratch/card-test-elastic-kv.sh` (gitignored, the manager's copy): criterion F - the grow run IS the 546K
+  conversation (`GROW_TO` now defaults to 546145), and it must reach a DONE at 546145 with the ~10K needle
+  answered; the report blocks now grep the give-way line, the new failure lines and any "no error" (its presence
+  is the finding).
 
-With the rule engaged: at both contexts every holder's device context state holds the start step (32768 cells)
-plus the trained RoPE rows, so "VRAM in use before the expert cache", the expert-cache slots and the 30K read are
-the same at 262144 and 1048576; at 262144 the freed carve means the cache should hold MORE slots than round 3's
-2256, not fewer.  Nothing here is GPU-testable on this box (no card): `scratch/card-test-elastic-kv.sh` now greps
-the accounting table and the engagement line into its report blocks and gained criterion E: both loads must say
-ENGAGED (or the line is the finding), the table's start-step line must be equal at both contexts, the addresses
-line's "in use" delta too - and if that delta instead scales, the report's fallback sentence above is the next
-step.  Criterion D keeps its meaning, restated: with `SAGUARO_KV_HOST_ELASTIC=0` the engagement line must read
-OFF with the reason and the carve lines must show the old whole-context numbers.
+## The nits
 
-## The nits (cheap, taken)
-
-* the give/take lines now say the chunks go "to the slots **or the context state**", and on a follow rig without
-  elastic slots the give-on line reads "the context's elastic device state on CUDA%d: ... when a conversation
-  grows past the start step" instead of claiming "elastic slots ... when its budget runs short" (the r4 report
-  itself flagged this wording); the give-off line adds "(the context's device state cannot grow from the cache's
-  room)" when the follow rule was the customer.  (`ec68da4a8`)
-* `vmm.hpp`'s header comment said "Not under HIP." while `vmm.cpp` has implemented the HIP branch since upstream -
-  it now says what is actually true and points at `vmm_reason()`.  (`9f61edc6a`)
-* Not taken: KMEM/HMEM stay `--batch`-budget-gated, and follow-trim still frees chunks to the driver rather than
-  back into the cache - both are round 4's known, stated gaps; neither touches this card's numbers.
+* Taken (`59c4c6688`, `374bac012`): the two map failures that quoted nothing - `qsa_slots_grow`'s "mapping N
+  chunks failed" and the take-back's "could not map its chunks back" - and `ExpertCache`'s load-map line, which
+  claimed "out of memory" whatever the driver said, now quote `vmm_last_error()`.
+* Not taken: the rope grow (`qsa_rope_grow`) keeps its own per-chunk relief loop - it already holds its chunks
+  (it cannot lie the way the probe did), and rewriting it now would move the RoPE path the round-5 card has not
+  faulted; KMEM/HMEM stay --batch-budget-gated (round 4's stated gap, untouched here).
 
 ## Verification
 
-* `cmake -S engines/qfn -B scratch/build-p124e-r5 -G Ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+* `cmake -S engines/qfn -B scratch/build-p124e-r6 -G Ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
   -DCMAKE_CUDA_ARCHITECTURES=75 -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_CONVERSATION_TESTS=ON
-  -DSTRATA_MMQ_TQ_OVERLAY=OFF -DSTRATA_GGML_DIR=$PWD/scratch/ggml-pinned`; `ninja -C scratch/build-p124e-r5` ->
-  440/440, `saguaro-qfn` links.  Warnings in the touched files are the pre-existing ones only (`layer.cpp`'s
-  dense-line `-Wmisleading-indentation` set and `n_kv`/`hcd` unused vars, `generate.cpp`'s unused `w`,
-  `dflash2.cu`'s old `#550-D/#128-D`); nothing new from `devnotes.cpp`, `vmm.cpp` or the edited lines.
-* `ctest --test-dir scratch/build-p124e-r5 -R '^kv_host_growth_test$'` run ALONE (the only module the plan names)
-  -> 100% passed; the binary says "kv_host_growth_test: 22 checks OK".  No sizing helper changed this round.
-* No GPU here: the accounting deltas, the ENGAGED verdict and the give-on-file-tier behaviour are code-true only
-  - mortar's card test is the acceptance.  The OFF path is unchanged byte for byte: every new line is printed,
-  no allocation moves when `qsa_vram_follow_wanted()`/`vram_follow_active()` say no, and the fallback branch
-  still backs whole exactly as round 4 left it.
-* `serve/qfn_engine.py` / `engines/qfn/serve/server.py` are still absent from `git diff --name-only 88809c4e..HEAD`
-  (this round touched no engine flag, so no `tools/saguaro/extract_qfn_engine.py` re-run).  `scratch/` stays
-  gitignored; the new build dir and its logs are uncommitted.
+  -DSTRATA_MMQ_TQ_OVERLAY=OFF -DSTRATA_GGML_DIR=$PWD/scratch/ggml-pinned`; `ninja -C scratch/build-p124e-r6` ->
+  442/442, `saguaro-qfn` links. The only warnings in the touched files are the pre-existing ones the round-5
+  report lists (layer.cpp's indentation/unused-var set, generate.cpp's `w`); nothing new from
+  `vmm.cpp`/`vmm_grow.hpp`/`vmm_grow_test.cpp`/`expert_cache.cpp`. No GPU was touched (`sm_75` objects only).
+* `ctest --test-dir scratch/build-p124e-r6 -R '^kv_host_growth_test$'` run ALONE (the module the plan names) ->
+  passed, "22 checks OK" - its sizing helpers did not change; `ctest ... -R '^vmm_grow_test$'` run ALONE (the
+  module this round's card names) -> passed, "28 checks OK";
+  `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_vram_refusal` -> 3/3 OK. One at a time, nothing else
+  run.
+* No GPU here, so the card keeps the proof: `scratch/card-test-elastic-kv.sh` criterion F on mortar is the
+  acceptance of finding 2 (546K answers, needle found, cache gave way, no "no error", and - if it ever fails
+  again - a line that says which driver call refused, for how much, with how much free, and what the cache gave).
+  `serve/qfn_engine.py`'s diff is only the `engine_refusal`/`VRAM_SHORT` change, re-extracted, never hand-edited.
