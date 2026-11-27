@@ -1764,6 +1764,19 @@ class StrataEngine:
                  "stage_ms": stage_ms, "rt": rt, "rate": None, "slot": slot, "rid": rid, "t": time.time()}
         pi, slash, pn = kv.get("pass", "").partition("/")
         entry["pass"] = [int(pi), int(pn)] if pi.isdigit() and slash and pn.isdigit() else None
+        # P124v2 (PLAN-p124v2-read-rate-true): chunk=<tokens of the unit these passes count> and
+        # pos0=<its first token position>.  done= is whole units; the server's readout shares the unit
+        # in flight (chunk x pass_i/pass_n) when done stands exactly at pos0 - reused (a split read's
+        # cross-card figure already holds its share: pos0 - reused < done, nothing is added).  Absent
+        # fields: no share, the server keeps the old figure.
+        try:
+            entry["chunk"] = max(0, int(float(kv.get("chunk") or 0)))
+        except ValueError:
+            entry["chunk"] = 0
+        try:
+            entry["pos0"] = int(float(kv["pos0"])) if "pos0" in kv else None
+        except ValueError:
+            entry["pos0"] = None
         if prev:
             dd, dm = done - prev["done"], rt - prev["rt"]
             entry["rate"] = dd / (dm / 1000.0) if dd > 0 and dm > 0 else prev.get("rate")

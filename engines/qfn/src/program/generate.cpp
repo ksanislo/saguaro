@@ -11299,10 +11299,13 @@ vs.d_skip_usage = gs.d_skip_usage;
         // second: the server's live read rate follows the read at its own cadence, without a client-side window
         // hiding a stall), printed from the host points between layer passes / pipe pieces / KV staging passes:
         //   RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it>
+        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it> pos0=<unit's first token> chunk=<unit's tokens>
         // stage: its K/V prefix is coming in from RAM; read: its new tokens are being read.  ms is this read's
         // own running time (the read clock above: not the waits between pieces) and stage_ms the part of it spent
-        // staging: ms - stage_ms is its own elapsed READ time.  Output only - every existing line stays exactly
+        // staging: ms - stage_ms is its own elapsed READ time.  P124v2: pos0/chunk= name the unit the passes
+        // count (a chunk, or a piece of a pipelined read): done= is whole units, and the server's readout
+        // shares the unit in flight (chunk x pass_i/pass_n) when done stands at pos0 - reused.
+        // Output only - every existing line stays exactly
         // as it was, and rid=0 lines (the batch path's) carry an appended slot=<b>.
         std::mutex rhb_mu;
         Clock::time_point rhb_t{};
@@ -11314,23 +11317,26 @@ vs.d_skip_usage = gs.d_skip_usage;
         // at `new` when the read ends.  One card: exactly the figure its own host points report (what it printed).
         strata::program::ReadProgress solo_prog;
         auto rhb_print = [&](long long rid, const char* stage, long long done, long long newn, long long reused,
-                             long long pass_i, long long pass_n, double ms, double stage_ms) {
+                             long long pass_i, long long pass_n, double ms, double stage_ms,
+                             long long pos0, long long chunk) {
             std::lock_guard<std::mutex> lk(rhb_mu);
             const auto now = Clock::now();
             if (rhb_rid == rid && std::chrono::duration<double, std::milli>(now - rhb_t).count() < 230.0) return;
             rhb_rid = rid;
             rhb_t = now;
-            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f\n",
-                        rid, stage, done, newn, reused, pass_i, pass_n, ms, stage_ms);
+            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f"
+                        " pos0=%lld chunk=%lld\n",
+                        rid, stage, done, newn, reused, pass_i, pass_n, ms, stage_ms, pos0, chunk);
             std::fflush(stdout);
         };
-        auto rhb_solo = [&](const char* stage, int64_t card, int64_t pos0, long long pass_i, long long pass_n) {
+        auto rhb_solo = [&](const char* stage, int64_t card, int64_t pos0, long long pass_i, long long pass_n,
+                            long long chunk) {
             if (pp_rid == 0 || pp_total <= pp_from) return;   // nothing of this request is being read (a warm run)
             pp_host_point(stage[0] == 's');   // P124v: this pass's time into the read's staging / read clocks
             solo_prog.report(card, pos0, pass_i, pass_n);     // this card's host point, into the read's figure
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
                       (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
-                      pp_stage_ms());
+                      pp_stage_ms(), pos0, chunk);
         };
         // the host point between the pieces of a pipelined read: the piece ended, everything below `pos` has
         // passed every card - the read's figure takes it as its fully-read point (U5b)
@@ -11340,7 +11346,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             solo_prog.report_full(pos);
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
                       (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
-                      pp_stage_ms());
+                      pp_stage_ms(), pos, 0);   // (chunk 0: done= just moved piece by piece; no unit in flight here)
         };
         // #471: the position the prompt pass has read up to (a chunk's or a window's end): what a request cancelled
         // mid-read reports as read, instead of the whole prompt
@@ -11693,8 +11699,8 @@ vs.d_skip_usage = gs.d_skip_usage;
         // The batch slot reads replace these for the time they hold the path (see the admission's swap below).
         // U5b: the card is its first layer (`lb`, unique across a split's stages); the read's shared figure
         // (solo_prog) is what the line's done= shows - every card reports, one figure prints.
-        sp.on_layer_pass = [&](int64_t pass, int64_t passes, bool staged, int64_t lb, int64_t pos0) {
-            rhb_solo(staged ? "stage" : "read", lb, pos0, (long long) pass, (long long) passes);
+        sp.on_layer_pass = [&](int64_t pass, int64_t passes, bool staged, int64_t lb, int64_t pos0, int64_t chunk) {
+            rhb_solo(staged ? "stage" : "read", lb, pos0, (long long) pass, (long long) passes, (long long) chunk);
         };
         for (auto& st : stages)
             st->sp.on_layer_pass = sp.on_layer_pass;
@@ -16620,13 +16626,17 @@ vs.d_skip_usage = gs.d_skip_usage;
         // itself at most one line per ~0.23 s (a steady four or so a second) from host points between the layer
         // passes of its pieces:
         //   RHB rid=0 stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it> slot=<b>
+        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it> pos0=<unit's first token> chunk=<unit's
+        //       tokens> slot=<b>
         // rid=0 (as in the protocol note): the slot tells which read it is, like its BRP / BRA lines. done and
         // new count from where THIS read started (never its reused / parked prefix); ms is this read's own time
         // over its runs so far (the legs add up like the BRP lines' read_ms; a read held at a piece boundary
         // prints no lines and adds no time while held) and stage_ms the part of it spent staging its K/V in
         // from RAM: ms - stage_ms is its own elapsed READ time (a restored prefix staged first must not dilute
         // the read's rate to single digits - the server's figure divides by the read's time, staging left out).
+        // P124v2: pos0/chunk= name the unit (chunk, or a piece of a pipelined read) these passes count;
+        // done= is whole units, and the server shares the one in flight (chunk x pass_i/pass_n) when done
+        // stands at pos0 - reused.
         // U5b (PLAN-u5b-split-progress): done is this read's shared figure (its AdmJob's ReadProgress): every
         // card's host point feeds its own card, one figure prints - never decreasing, ending at `new` (the BRP
         // points report the chunks that passed every card); two reads at once keep separate figures by their slot.
@@ -16645,7 +16655,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             return (double) j.stage_us.load(std::memory_order_relaxed) / 1000.0;
         };
         auto rhb_slot = [&](AdmJob& j, int b, int64_t n, Clock::time_point t_read, int64_t card, int64_t pos0,
-                            long long pass_i, long long pass_n, bool staged) {
+                            long long pass_i, long long pass_n, bool staged, int64_t chunk) {
             adm_host_point(j, staged);   // P124v: this pass's time into the read's staging / read clocks
             j.prog.report(card, pos0, pass_i, pass_n);   // this card's host point, into the read's figure
             std::lock_guard<std::mutex> lk(rhb_mu);   // (every stage's thread reports: two pieces of one read at a time)
@@ -16654,11 +16664,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::chrono::duration<double, std::milli>(now - j.rhb_t).count() < 230.0) return;
             j.rhb_t = now;
             std::printf(
-                "RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f slot=%d\n",
+                "RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f"
+                " pos0=%lld chunk=%lld slot=%d\n",
                 staged ? "stage" : "read", (long long) j.prog.done(),
                         (long long) std::max<int64_t>(0, n - j.resume), (long long) j.resume, pass_i, pass_n,
                         j.read_ms + std::chrono::duration<double, std::milli>(now - t_read).count(),
-                        adm_stage_ms(j), b);
+                        adm_stage_ms(j), (long long) pos0, (long long) chunk, b);
             std::fflush(stdout);
         };
         // SAGUARO_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 12, two per bucket): a batch slot's conversation keeps grid checkpoints
@@ -16976,8 +16987,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             for (size_t k = 0; k < n_st; ++k) {
                 old_layer_pass[k] = std::move(stage_prefill(k).on_layer_pass);
                 stage_prefill(k).on_layer_pass = [&, b](int64_t pass, int64_t passes, bool staged, int64_t lb,
-                                                        int64_t pos0) {
-                    rhb_slot(j, b, n, t_read, lb, pos0, (long long) pass, (long long) passes, staged);
+                                                        int64_t pos0, int64_t chunk) {
+                    rhb_slot(j, b, n, t_read, lb, pos0, (long long) pass, (long long) passes, staged, chunk);
                 };
             }
             const int64_t at0 = j.at;
@@ -17747,8 +17758,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 // U5b: `lb` names the card (this one callback runs on every stage's thread); done= is the read's
                 // shared figure (jp->prog), fed by every card, printed by whichever point opens the 230 ms gate.
                 pj->on_layer_pass = [&, jp, b, n](int64_t pass, int64_t passes, bool staged, int64_t lb,
-                                                  int64_t pos0) {
-                    rhb_slot(*jp, b, n, jp->t_read, lb, pos0, (long long) pass, (long long) passes, staged);
+                                                  int64_t pos0, int64_t chunk) {
+                    rhb_slot(*jp, b, n, jp->t_read, lb, pos0, (long long) pass, (long long) passes, staged, chunk);
                 };
                 if (j.msg_at > j.resume && z == j.msg_at && (int64_t) jp->mparts.size() == (int64_t) n_st)
                     for (size_t k = 0; k < n_st; ++k)   // stage k's part of the message checkpoint, as it reaches it

@@ -294,26 +294,31 @@ class MangonelTrueReadout(Base):
     PASSES = 78                 # layer passes per chunk (the RHB pass=i/n field; any fixed count works)
 
     def lines(self):
-        """The read's RHB beats + its chunk-end BRP steps + the closing BRA, on the engine's own clock:
-        done = whole chunks done (what the recorded engine's U5b figure gave - the chunk in flight is NOT
-        in it), pass= counts its layer passes, chunk= is that chunk's size."""
+        """The read's RHB beats, its chunk-end BRP steps at the chunk's own end time, and the closing
+        BRA, all in engine-clock order: done = whole chunks done (what the recorded engine's U5b figure
+        gave - the chunk in flight is NOT in it), pass= counts its layer passes, pos0/chunk= name the
+        chunk in flight."""
         beats = int(self.MS / self.BEAT_MS)
-        nchunks = (self.NEW + self.CHUNK - 1) // self.CHUNK
+        sizes = [min(self.CHUNK, self.NEW - self.CHUNK * c) for c in range((self.NEW + self.CHUNK - 1) // self.CHUNK)]
+        ends, cum = [], 0
+        for s in sizes:
+            cum += s
+            ends.append(cum / self.RATE * 1000.0)
+        nxt = 0
         for k in range(1, beats + 1):
             ms = k * self.BEAT_MS
+            while nxt < len(ends) and ends[nxt] < ms:      # (the chunk ended before this beat: its step first)
+                pos_e = self.CHUNK * (nxt + 1) if nxt + 1 < len(sizes) else self.NEW
+                yield (f"BRP 7 {int(pos_e)} {self.NEW} {ends[nxt]:.0f} {self.RATE:.1f} new_read={int(pos_e)} "
+                       f"read_ms={ends[nxt]:.0f} stage_ms=0")
+                nxt += 1
             pos = self.RATE * ms / 1000.0
-            c = int(pos // self.CHUNK)                    # whole chunks done
-            frac = (pos - c * self.CHUNK) / min(self.CHUNK, self.NEW - c * self.CHUNK)
-            p = min(self.PASSES, int(frac * self.PASSES))
-            c = min(c, nchunks - 1)
-            p = max(p, 1)                                 # the beat lands mid-chunk: at least one pass done
+            c = min(int(pos // self.CHUNK), len(sizes) - 1)
+            frac = (pos - self.CHUNK * c) / sizes[c] if pos >= self.CHUNK * c else 0.0
+            p = max(1, min(self.PASSES, int(frac * self.PASSES)))
             yield (f"RHB rid=0 stage=read done={self.CHUNK * c} new={self.NEW} reused=0 "
-                   f"pass={p}/{self.PASSES} ms={ms} stage_ms=0 chunk={min(self.CHUNK, self.NEW - self.CHUNK * c)} "
-                   f"slot=7")
-        for c in range(1, nchunks + 1):
-            pos = min(self.CHUNK * c, self.NEW)
-            ms = pos / self.RATE * 1000.0
-            yield f"BRP 7 {pos} {self.NEW} {ms:.0f} {self.RATE:.1f} new_read={pos} read_ms={ms:.0f} stage_ms=0"
+                   f"pass={p}/{self.PASSES} ms={ms} stage_ms=0 pos0={self.CHUNK * c} "
+                   f"chunk={sizes[c]} slot=7")
         yield f"BRA 7 1 prompt={self.NEW} reused=0 read_ms={self.MS}.0 stage_ms=0"
 
     def test_the_read_readout_averages_the_engine_s_own_figure(self):
@@ -324,12 +329,14 @@ class MangonelTrueReadout(Base):
         shown = []
         for line in self.lines():
             eng.feed(7, line)
-            self.assertIsNone(eng.step(it))
-            self.tick(self.BEAT_MS / 1000.0)
-            v = self.row()["prefill_tok_s"]
+            if not line.startswith("BRA"):
+                self.assertIsNone(eng.step(it))
             if line.startswith("RHB "):                   # (a): never blank or zero once the read beats
+                v = self.row()["prefill_tok_s"]
                 self.assertIsNotNone(v, f"{line[:24]}: no rate after the read's first RHB")
                 self.assertGreater(v, 0, f"{line[:24]}: 0 while the read runs")
+            if line.startswith("RHB "):                   # (the chunk-end steps land in the same window)
+                self.tick(self.BEAT_MS / 1000.0)
             if line.startswith("RHB ") and not eng.hooked[7].read_engine:
                 shown.append(self.live())
         # (b): the readout's time-average over the read = its integral / the read's time = the tokens read /
