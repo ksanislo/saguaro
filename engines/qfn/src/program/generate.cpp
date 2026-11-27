@@ -6425,9 +6425,10 @@ int main(int argc, char** argv) {
     // the margin is untouched, one that does not is cut to it, said.  SAGUARO_RESIDENT_BUDGET_CAP=0 keeps the
     // asked budget as it is (rule (a)'s knob, review N2 - (b) has SAGUARO_VRAM_RESERVE_FLOOR=0 and (c)
     // SAGUARO_PARK_SWAP_MIB=0; rule (d) has no operator knob, its switch is the recovered note itself): an
-    // operator who measured the box wins.
+    // operator who measured the box wins.  Parsed strictly (re-review L2): only exactly "0" turns the cap
+    // off - atoi read "off", "no" and every typo as 0 and silenced the rule that exists to save the box.
     static const bool resident_cap_off = [] { const char* v = std::getenv("SAGUARO_RESIDENT_BUDGET_CAP");
-                                              return v != nullptr && std::atoi(v) == 0; }();
+                                              return v != nullptr && std::string(v) == "0"; }();
     if (o.resident_budget > 0 && !resident_cap_off) {
         const uint64_t host_total = strata::platform::total_physical_memory();
         const uint64_t kv_pool = strata::core::qsa_kv_bytes_per_cell(g) *
