@@ -141,7 +141,10 @@ public:
         pinned_ = 0;
     }
 
-    // The whole arena, mapping and all: after release() (or alone - release is part of it).
+    // The whole arena, mapping and all.  This does NOT release first - unregistering is the Pinner's business
+    // and close() takes none: a caller that still holds pins must call release(p) before close() (or before this
+    // object dies), or those granules stay registered on a range that is about to be unmapped.  The engine's
+    // kv_stream_free() does exactly that; a ~GranuleArena over a still-pinned arena leaks the registrations.
     void close() {
         std::lock_guard<std::mutex> lk(mu_);
         if (base_ == nullptr) return;
