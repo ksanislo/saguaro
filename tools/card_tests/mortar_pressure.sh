@@ -89,7 +89,12 @@ args = list(cfg.get("args") or [])
 if "--session-dir" in args:
     args[args.index("--session-dir") + 1] = sys.argv[3]
 else:
-    args += ["--session-dir", sys.argv[3]]
+    _env = cfg.setdefault("env", {})            # (GLM/DS4/ik2 name it in the env: *_SLOT_DIR)
+    _slot = [k for k in _env if k.endswith("_SLOT_DIR")]
+    for _k in _slot:
+        _env[_k] = sys.argv[3]
+    if not _slot:
+        args += ["--session-dir", sys.argv[3]]
 cfg["args"] = args
 cfg.pop("api_key", None)   # (a test copy: no key, the readiness poll and the requests send none)
 cfg["log"] = sys.argv[4]   # the engine's stderr lands in the out folder, not in the install's own log

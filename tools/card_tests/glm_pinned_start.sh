@@ -105,7 +105,12 @@ else:
 if "--session-dir" in args:
     args[args.index("--session-dir") + 1] = sess
 else:
-    args += ["--session-dir", sess]
+    _env = cfg.setdefault("env", {})            # (GLM/DS4/ik2 name it in the env: *_SLOT_DIR)
+    _slot = [k for k in _env if k.endswith("_SLOT_DIR")]
+    for _k in _slot:
+        _env[_k] = sess
+    if not _slot:
+        args += ["--session-dir", sess]
 cfg["args"] = args
 cfg.pop("api_key", None)                    # (a test copy: no key, the readiness poll and the requests send none)
 cfg["log"] = log                            # the engine's stderr: the pinned-cache line is read from here
