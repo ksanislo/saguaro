@@ -1,6 +1,7 @@
 
 // src/core/layer.cpp - the GDN layer, composed.  See the header for the operation order and its traps.
 #include "strata/core/capture_lock.hpp"
+#include "strata/core/devnotes.hpp"
 #include "strata/core/kv_host_growth.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/on_device.hpp"
@@ -1742,6 +1743,20 @@ bool qsa_vram_follow_wanted() {
 #endif
 }
 void qsa_vram_follow_off() { g_follow_live.store(false); }   // (the pools stay as they are: what is backed stays backed)
+const char* qsa_vram_follow_why() {
+    // P124e (round 5, manager card): the same conditions qsa_vram_follow_wanted checks, in words, first refusal first.
+#ifndef _WIN32
+    if (!g_follow_live.load())
+        return "the load decided the card's expert cache cannot give room (the context state was backed whole)";
+    if (!g_vram_follow) return "SAGUARO_KV_VRAM_ELASTIC=0, or not --serve";
+    if (g_kv_resident <= 0) return "no KV streaming (--kv-resident keeps everything in VRAM)";
+    if (!host_elastic_on()) return "the host copies are not elastic (SAGUARO_KV_HOST_ELASTIC=0, or the card cannot use a registered page's address)";
+    if (!strata::core::vmm_available()) return strata::core::vmm_reason();
+    return nullptr;
+#else
+    return "Windows (the rule is POSIX-only, like the host half)";
+#endif
+}
 bool qsa_vram_follow_active() {
     if (!g_follow_live.load()) return false;
     std::lock_guard<std::mutex> lk(g_slot_mu);
@@ -1882,6 +1897,9 @@ int64_t scores_need_locked(const ScoresPool& sp, int64_t cells) {
 // -1: not made (the caller carves the scratch whole, as it always did).
 int32_t qsa_scores_make(int64_t cells) {
     auto sp = std::make_unique<ScoresPool>();
+    // P124e (round 5, manager card): addresses for --max-context plus the start step - accounted.
+    const strata::core::DeviceNote scores_note("the block-score scratch (addresses for --max-context and the start step)",
+                                               (uint64_t) cells * 4ull);
     if (!sp->range.reserve((uint64_t) cells * (uint64_t) sp->unit) ||
         !follow_room(sp->range.device(), scores_need_locked(*sp, follow_start_cells()), sp->range.granularity(),
                      false) ||
@@ -2463,7 +2481,12 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
                                               : strata::core::SlotArray::kSlotFillPending,
                                   p.slots});
         }
-        if (!fpool->range.reserve(strata::core::slot_layout(fpool->arr, fG))) {
+        // P124e (round 5, manager card): accounted, so the load says what the addresses are and whether the card
+        // charged anything for them (the delta, beside the bytes asked).
+        const uint64_t follow_va = strata::core::slot_layout(fpool->arr, fG);
+        const strata::core::DeviceNote follow_va_note("the streamed states' context device addresses (follow pools, --max-context)",
+                                                      follow_va);
+        if (!fpool->range.reserve(follow_va)) {
             std::fprintf(stderr, "saguaro: reserving a state's context device addresses failed\n");
             return 0;
         }
@@ -2501,6 +2524,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         r->max_cells = max_cells;
         r->sc = strata::kernels::rope_scaling();
         const uint64_t bytes = (uint64_t) max_cells * (s.n_rot / 2) * 4;
+        // P124e (round 5, manager card): the grown table's addresses and its first 262144 positions, accounted.
+        const strata::core::DeviceNote rope_note("the grown RoPE table (addresses; the trained positions backed)", bytes * 2);
         if (!r->cos.reserve(bytes) || !r->sin.reserve(bytes) ||
             !rope_map(*r, kRopeBase - kRopeMargin, [] { return (strata::core::VmmChunk) 0; })) {
             std::fprintf(stderr, "saguaro: SAGUARO_ROPE_GROW: the RoPE table's addresses or first positions failed\n");
@@ -2606,6 +2631,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
                 r->max_cells = max_cells;
                 r->sc = g_rope_yarn;
                 const uint64_t bytes = (uint64_t) max_cells * (s.n_rot / 2) * 4;
+                // P124e (round 5, manager card): its addresses are --max-context-sized too - accounted, no backing yet.
+                const strata::core::DeviceNote yarn_note("the YaRN level's RoPE table (addresses for --max-context)", bytes * 2);
                 if (!r->cos.reserve(bytes) || !r->sin.reserve(bytes)) {
                     std::fprintf(stderr, "saguaro: SAGUARO_YARN_ELASTIC: the YaRN table's addresses failed\n");
                     return 0;
@@ -2647,7 +2674,11 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         std::lock_guard<std::mutex> lk(g_slot_mu);
         st.follow_elastic = (int32_t) g_slot_pools.size();
         g_slot_pools.push_back(std::move(fpool));
-        if (!follow_map_locked(*g_slot_pools[(size_t) st.follow_elastic], follow_start_cells())) {
+        SlotPool& fp = *g_slot_pools[(size_t) st.follow_elastic];
+        // P124e (round 5, manager card): what the START STEP really costs - the load's accounting table says it.
+        const uint64_t start_bytes = (uint64_t) follow_need_locked(fp, follow_start_cells()) * fp.range.granularity();
+        const strata::core::DeviceNote start_note("the streamed states' context device state: the start step (backed)", start_bytes);
+        if (!follow_map_locked(fp, follow_start_cells())) {
             std::fprintf(stderr, "saguaro: KV streaming: backing a state's first context cells failed\n");
             return 0;
         }

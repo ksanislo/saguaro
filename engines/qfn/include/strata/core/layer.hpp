@@ -364,6 +364,9 @@ bool qsa_vram_follow_wanted();
 void qsa_vram_follow_off();
 /// At least one follow pool exists (the cache must be in VMM, the relief hook must be installed).
 bool qsa_vram_follow_active();
+/// P124e (round 5, manager card): why the rule does NOT run - the load's one line says ENGAGED or fell back with
+/// this (nullptr when the rule wants to run: the decision then is the give path's, made in generate.cpp).
+const char* qsa_vram_follow_why();
 /// A state whose pool is a follow pool (its drafter's state follows when its session's primary does).
 bool qsa_state_follow(const QsaState& st);
 /// How far a streamed state's page table may be written now (P124e: a follow pool's is filled chunk by chunk;

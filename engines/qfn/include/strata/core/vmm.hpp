@@ -2,7 +2,9 @@
 // CUDA virtual memory (the elastic K/V, --kv-grow; the elastic --batch slot sessions): an address range reserved once, whose physical memory is mapped and
 // unmapped in chunks of the device's granularity (2 MiB).  The K/V pools grow with the context by taking chunks the
 // expert cache gives up, and neither moves: every captured graph and stored pointer stays valid.  The driver calls
-// are reached through the runtime's entry-point query, so nothing links the driver library.  Not under HIP.
+// are reached through the runtime's entry-point query, so nothing links the driver library.  Under HIP (ROCm 6+) the
+// same range runs on hipMemAddressReserve / hipMemCreate where the card reports it; vmm_reason() says which cards
+// do and which do not (P124e round 5: the load's one line says ENGAGED or fell back with this).
 
 #include <cstdint>
 #include <vector>
@@ -14,6 +16,10 @@ using VmmChunk = unsigned long long;
 
 /// Device `dev` (-1: the current one) supports it and the entry points resolved.
 bool vmm_available(int dev = -1);
+/// P124e (round 5, manager card): the load's one line says whether the elastic VRAM path is ENGAGED or fell back -
+/// this is its reason.  A static string: what vmm_available() found (the check runs once per device, and the
+/// failure that stands is the one kept): "available ..." when it does, otherwise why it does not.
+const char* vmm_reason(int dev = -1);
 /// That device's chunk size (0 when not available).
 uint64_t vmm_granularity(int dev = -1);
 /// A new physical chunk on device `dev` (-1: the current one; 0: out of memory), and its release.

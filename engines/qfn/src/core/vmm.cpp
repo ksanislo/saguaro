@@ -4,6 +4,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#include <cstdio>
 #include <mutex>
 
 namespace strata::core {
@@ -57,26 +58,40 @@ struct Dev {
     std::once_flag once;
     bool ok = false;
     uint64_t gran = 0;
+    char why[192] = "not queried";   // P124e round 5: what the lookup decided, for the load's one line
 };
-const Dev* dev_info(int dev) {
+Dev* dev_slot(int dev) {
     static Dev* d = new Dev[kMaxDev];
+    return &d[dev];
+}
+const Dev* dev_info(int dev) {
     if (dev < 0 && cudaGetDevice(&dev) != cudaSuccess) return nullptr;
     if (dev < 0 || dev >= kMaxDev) return nullptr;
-    Dev& x = d[dev];
+    Dev& x = *dev_slot(dev);
     std::call_once(x.once, [&x, dev] {
         const Api& a = api();
-        if (!a.ok) return;
-        int vmm = 0;
-        if (a.attr(&vmm, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, (CUdevice) dev) != CUDA_SUCCESS || !vmm)
+        if (!a.ok) {
+            std::snprintf(x.why, sizeof x.why, "the CUDA driver's virtual-memory entry points did not resolve");
             return;
+        }
+        int vmm = 0;
+        if (a.attr(&vmm, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, (CUdevice) dev) != CUDA_SUCCESS || !vmm) {
+            std::snprintf(x.why, sizeof x.why, "CUDA%d does not report virtual memory management support", dev);
+            return;
+        }
         CUmemAllocationProp prop{};
         prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
         prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
         prop.location.id = dev;
         size_t g = 0;
-        if (a.granularity(&g, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM) != CUDA_SUCCESS || g == 0) return;
+        if (a.granularity(&g, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM) != CUDA_SUCCESS || g == 0) {
+            std::snprintf(x.why, sizeof x.why, "the VMM chunk-granularity query failed on CUDA%d", dev);
+            return;
+        }
         x.gran = g;
         x.ok = true;
+        std::snprintf(x.why, sizeof x.why, "available on CUDA%d: cuMemAddressReserve/cuMemCreate, %llu KiB chunks",
+                      dev, (unsigned long long) (g >> 10));
     });
     return x.ok ? &x : nullptr;
 }
@@ -88,6 +103,13 @@ int current_dev() {
 }  // namespace
 
 bool vmm_available(int dev) { return dev_info(dev) != nullptr; }
+const char* vmm_reason(int dev) {
+    (void) dev_info(dev);   // (the lookup writes the why even when it fails; it is the one line's reason)
+    int d = dev;
+    if (d < 0) d = current_dev();
+    if (d < 0 || d >= kMaxDev) return "no current CUDA device";
+    return dev_slot(d)->why;
+}
 uint64_t vmm_granularity(int dev) {
     const Dev* d = dev_info(dev);
     return d ? d->gran : 0;
@@ -193,6 +215,7 @@ struct Api {
     bool ok = false;
     uint64_t gran = 0;
     int dev = -1;
+    char why[192] = "not queried";   // P124e round 5: what the check decided, for the load's one line
 };
 void fail(const char* what, hipError_t e) {
     static int n = 0;
@@ -212,29 +235,44 @@ const Api& api() {
     static std::once_flag once;
     std::call_once(once, [] {
         const char* off = std::getenv("SAGUARO_HIP_VMM");
-        if (off != nullptr && off[0] == '0') return;
-        if (hipGetDevice(&a.dev) != hipSuccess) { (void) hipGetLastError(); return; }
-        int vmm = 0;
-        if (hipDeviceGetAttribute(&vmm, hipDeviceAttributeVirtualMemoryManagementSupported, a.dev) != hipSuccess || !vmm) {
+        if (off != nullptr && off[0] == '0') {
+            std::snprintf(a.why, sizeof a.why, "SAGUARO_HIP_VMM=0 turned the HIP virtual memory off");
+            return;
+        }
+        if (hipGetDevice(&a.dev) != hipSuccess) {
             (void) hipGetLastError();
+            std::snprintf(a.why, sizeof a.why, "HIP: no current device to ask about virtual memory");
+            return;
+        }
+        int vmm = 0;
+        const hipError_t ae = hipDeviceGetAttribute(&vmm, hipDeviceAttributeVirtualMemoryManagementSupported, a.dev);
+        if (ae != hipSuccess || !vmm) {
+            (void) hipGetLastError();
+            std::snprintf(a.why, sizeof a.why,
+                          "HIP: hipDeviceAttributeVirtualMemoryManagementSupported %s on this card",
+                          ae != hipSuccess ? "failed" : "says it does not do virtual memory");
             return;
         }
         const hipMemAllocationProp prop = alloc_prop(a.dev);
         size_t g = 0;
         if (hipMemGetAllocationGranularity(&g, &prop, hipMemAllocationGranularityMinimum) != hipSuccess || g == 0) {
             (void) hipGetLastError();
+            std::snprintf(a.why, sizeof a.why, "HIP: hipMemGetAllocationGranularity failed on this card");
             return;
         }
         // gfx1201 reports a 4 KiB minimum granularity; the elastic range works in 2 MiB chunks like CUDA's (any multiple of the minimum)
         const uint64_t want = 2ull << 20;
         a.gran = g >= want ? g : (want + g - 1) / g * g;
         a.ok = true;
+        std::snprintf(a.why, sizeof a.why, "available: hipMemAddressReserve/hipMemCreate, %llu MiB chunks",
+                      (unsigned long long) (a.gran >> 20));
     });
     return a;
 }
 }  // namespace
 
 bool vmm_available(int) { return api().ok; }
+const char* vmm_reason(int) { return api().why; }
 uint64_t vmm_granularity(int) { return api().ok ? api().gran : 0; }
 
 VmmChunk vmm_chunk_new(int) {
@@ -325,6 +363,7 @@ VmmChunk VmmRange::unmap(int64_t i) {
 
 namespace strata::core {
 bool vmm_available(int) { return false; }
+const char* vmm_reason(int) { return "this build has no virtual memory (Metal, gfx906 or ROCm older than 6)"; }
 uint64_t vmm_granularity(int) { return 0; }
 VmmChunk vmm_chunk_new(int) { return 0; }
 void vmm_chunk_free(VmmChunk) {}

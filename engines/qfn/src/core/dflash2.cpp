@@ -1,5 +1,6 @@
 // src/core/dflash2.cpp - see include/strata/core/dflash2.hpp.
 #include "strata/core/dflash2.hpp"
+#include "strata/core/devnotes.hpp"
 
 #include "strata/core/native_head.hpp"
 #include "strata/core/on_device.hpp"
@@ -168,7 +169,12 @@ bool Dflash2Drafter::load(const std::string& path, int device, std::string& err)
         err = "dflash2: the pack's shape is not the Flash-Next drafter this engine was written for";
         return false;
     }
-    if (cudaMalloc((void**) &blob_, total) != cudaSuccess) { err = "dflash2: the pack does not fit in VRAM (" + std::to_string(total >> 20) + " MiB)"; return false; }
+    cudaError_t blob_alloc;
+    {   // P124e (round 5, manager card): the load's VRAM accounting says the drafter's pack by name
+        const strata::core::DeviceNote blob_note("the DFlash2 drafter's pack", total);
+        blob_alloc = cudaMalloc((void**) &blob_, total);
+    }
+    if (blob_alloc != cudaSuccess) { err = "dflash2: the pack does not fit in VRAM (" + std::to_string(total >> 20) + " MiB)"; return false; }
     vram_ += total;
     uint64_t max_bytes = 0;
     for (const Tensor& t : tensors_) max_bytes = std::max(max_bytes, t.bytes);

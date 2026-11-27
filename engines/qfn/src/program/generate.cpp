@@ -26,6 +26,8 @@
 #include "strata/core/batch_telemetry.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/device.hpp"
+#include "strata/core/devnotes.hpp"
+#include "strata/core/vmm.hpp"
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/conversation_snapshot.hpp"
@@ -5737,7 +5739,15 @@ int main(int argc, char** argv) {
         // ... and their VRAM pools and pooled keys grow too, under the elastic slots (they draw on the same budget)
         const bool vram_main = o.serve && o.batch > 0 && elastic_slots_mode() == 2 && host_vram_main_env();
         strata::core::qsa_set_vram_elastic_main(vram_main && strata::core::vmm_available(primary_device));
-        if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K, 0, hi0)) != cudaSuccess) {
+        // P124e (round 5, manager card): every load-time device allocation of the conversation holders is accounted
+        // by name (the load's table before the expert cache sizes itself prints them with the delta the card charged).
+        const uint64_t solo_carve = strata::core::session_bytes(g, o.max_context, K, 0, hi0);
+        cudaError_t solo_alloc;
+        {
+            const strata::core::DeviceNote dn("the solo session's device state (one carve: ring, state, tables)", solo_carve);
+            solo_alloc = cudaMalloc(&sbuf, solo_carve);
+        }
+        if (solo_alloc != cudaSuccess) {
             std::fprintf(stderr, "saguaro generate: session state allocation failed\n");
             return 1;
         }
@@ -5784,7 +5794,13 @@ int main(int argc, char** argv) {
         strata::core::qsa_set_vram_elastic_main(o.serve && o.batch > 0 && elastic_slots_mode() == 2 && host_vram_main_env() &&
                                                 strata::core::vmm_available(st.dev));
         void* sbuf_s = nullptr;
-        if (cudaMalloc(&sbuf_s, strata::core::session_bytes(g, o.max_context, K, st.lb, st.le)) != cudaSuccess ||
+        const uint64_t stage_carve = strata::core::session_bytes(g, o.max_context, K, st.lb, st.le);
+        cudaError_t stage_alloc;
+        {   // P124e (round 5, manager card): accounted by name (the tight scope: the init's pools note themselves)
+            const strata::core::DeviceNote dn("a stage session's device state (one carve)", stage_carve);
+            stage_alloc = cudaMalloc(&sbuf_s, stage_carve);
+        }
+        if (stage_alloc != cudaSuccess ||
             strata::core::session_init(g, o.max_context, K, sbuf_s, st.ss, st.lb, st.le) == 0) {
             std::fprintf(stderr, "saguaro generate: layer split, CUDA%d: the session state failed\n", st.dev);
             return 1;
@@ -5957,7 +5973,12 @@ int main(int argc, char** argv) {
             for (int b = 0; b < fit; ++b) {
                 auto u = std::make_unique<strata::core::SessionState>();
                 void* buf = nullptr;
-                if (cudaMalloc(&buf, bytes) != cudaSuccess ||
+                cudaError_t slot_alloc;
+                {   // P124e (round 5, manager card): accounted by name, merged across the slots
+                    const strata::core::DeviceNote dn("each --batch slot's session state (one carve, merged over the slots)", bytes);
+                    slot_alloc = cudaMalloc(&buf, bytes);
+                }
+                if (slot_alloc != cudaSuccess ||
                     strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi, slot_kind, rope) == 0) {
                     (void) cudaGetLastError();
                     if (buf != nullptr) (void) cudaFree(buf);
@@ -6317,7 +6338,12 @@ int main(int argc, char** argv) {
     std::vector<float> logits((size_t) n_vocab);
     mem_mark("the native head");
     float* d_logits = nullptr;
-    if (cudaMalloc(&d_logits, (size_t) n_vocab * 4) != cudaSuccess) {
+    cudaError_t logits_alloc;
+    {   // P124e (round 5, manager card): accounted by name
+        const strata::core::DeviceNote dn("the logits buffer (n_vocab fp32)", (uint64_t) n_vocab * 4);
+        logits_alloc = cudaMalloc(&d_logits, (size_t) n_vocab * 4);
+    }
+    if (logits_alloc != cudaSuccess) {
         (void) cudaGetLastError();
         std::fprintf(stderr, "saguaro generate: the logits buffer failed%s\n", vram_free_note().c_str());
         return 1;
@@ -6794,6 +6820,25 @@ int main(int argc, char** argv) {
     // sees the memory this process actually has left rather than the card's idle figure - and refuses with both
     // numbers if the slots do not fit, instead of handing back a cache smaller than it was asked for.
     mem_mark("the weights, the session and the drafter");
+    // P124e (round 5, manager card): the load-time VRAM accounting the card asked for - every named device allocation
+    // since startup, with what the card actually CHARGED for it (the free-memory delta: addresses can cost nothing
+    // while their backing costs GiB), printed before the expert cache sizes itself from that same free figure.
+    {
+        size_t nb_free = 0, nb_total = 0;
+        if (cudaMemGetInfo(&nb_free, &nb_total) != cudaSuccess) { (void) cudaGetLastError(); nb_total = 0; }
+        if (nb_total > 0)
+            std::fprintf(stderr, "saguaro generate: VRAM in use before the expert cache: %.2f GiB of %.2f (%.2f GiB free): the allocations, named\n",
+                         (double) (nb_total - nb_free) / 1073741824.0, (double) nb_total / 1073741824.0,
+                         (double) nb_free / 1073741824.0);
+        for (const strata::core::DeviceNoteRec& r : strata::core::device_notes_taken()) {
+            const uint64_t used = r.used > 0 ? (uint64_t) r.used : 0;
+            if (r.bytes < (64ull << 20) && used < (64ull << 20) && r.bytes == 0) continue;   // the card: >= 64 MiB
+            if (r.bytes >= (64ull << 20) || used >= (64ull << 20))
+                std::fprintf(stderr, "saguaro generate:   VRAM: %s: %.2f GiB asked, %.2f GiB in use%s (%d allocation%s)\n",
+                             r.what.c_str(), (double) r.bytes / 1073741824.0, (double) used / 1073741824.0,
+                             (r.used < 0 ? " (the card GAVE back)" : ""), r.n, r.n == 1 ? "" : "s");
+        }
+    }
     strata::core::ExpertCache xcache;
     // THE HEAD BEFORE THE CACHE: the native head and the logits are allocated above, before the expert arena (#620)
     const bool auto_cache = o.expert_cache < 0;
@@ -7076,9 +7121,9 @@ int main(int argc, char** argv) {
                         : o.peer_device >= 0 ? "--peer-device is on"
                         : o.vram_elastic ? "--vram-elastic owns the cache's segments"
                                          : "a helper cache is on another GPU";
-        std::fprintf(stderr, "saguaro generate: the context's device state cannot grow (the expert cache gives no "
-                             "room: %s): backing it whole for --max-context %lld now, as before P124e\n", why,
-                     (long long) o.max_context);
+        std::fprintf(stderr, "saguaro generate: VRAM follows use: FELL BACK on CUDA%d (%s): the expert cache gives no "
+                             "room, backing the context's device state whole for --max-context %lld now, as before P124e\n",
+                     primary_device, why, (long long) o.max_context);
         auto back_whole = [&](strata::core::SessionState& u, int dev) {
             const strata::core::OnDevice on(dev);
             if (!strata::core::qsa_scores_back_whole(u.scores_elastic, o.max_context)) return false;
@@ -7101,11 +7146,21 @@ int main(int argc, char** argv) {
         strata::core::qsa_vram_follow_off();
     } else if (vram_follow_on) {
         strata::core::ExpertCache::set_vmm(true);   // the caches (this card and the stages') give chunks through it
-        std::fprintf(stderr, "saguaro generate: KV streaming: the sessions' context device state (page tables, the "
-                             "indexer's keys, the selection scratch, the RoPE tables) holds %llu MiB at load and "
-                             "grows with each conversation past --max-context's start\n",
+        std::fprintf(stderr, "saguaro generate: VRAM follows use: ENGAGED on CUDA%d (%s): the sessions' context device "
+                             "state (page tables, the indexer's keys, the selection scratch, the RoPE tables) holds "
+                             "%llu MiB at load and grows with each conversation past --max-context's start\n",
+                     primary_device, strata::core::vmm_reason(primary_device),
                      (unsigned long long)
                          ((strata::core::qsa_follow_backed_bytes() + strata::core::qsa_scores_backed_bytes(ss.scores_elastic)) >> 20));
+    } else {
+        // P124e (round 5, manager card): the ONE line saying whether the elastic VRAM path is engaged or fell back
+        // is said even when the rule never reached the decision above - with the condition that stopped it.
+        const char* why = strata::core::qsa_vram_follow_wanted()
+                              ? "no streamed session state exists to follow (nothing was made elastic at build time)"
+                              : strata::core::qsa_vram_follow_why();
+        std::fprintf(stderr, "saguaro generate: VRAM follows use: OFF on CUDA%d (%s): the sessions' context device "
+                             "state is carved whole for --max-context %lld, as before P124e\n",
+                     primary_device, why, (long long) o.max_context);
     }
     // #533: --vram-elastic: the cache in physical segments (the VRAM command resizes it between requests).  One GPU,
     // no helper caches, serve mode: anything else keeps the one cudaMalloc, said once.
