@@ -10817,6 +10817,10 @@ int main(int argc, char** argv) {
             bool cancelled = false;
             int read_pos = 0;   // (P125l: where a stopped read ended - the chunk boundary its passes had run to,
             //  caught at the two g_cancel checks below; the stop keeps the conversation exactly there)
+            // (with the drafter only under SAGUARO_IK2_DRAFT_SNAP=1: after a restore its windowed layers' rings may
+            //  hold rows of the dropped continuation - the drafts' context only, never an answer's; the gate arms
+            //  the p_ms snapshot below and - P125l review nit - the stopped read's keep snapshot alike)
+            static const bool draft_snap = getenv("SAGUARO_IK2_DRAFT_SNAP") && std::atoi(getenv("SAGUARO_IK2_DRAFT_SNAP"));
             g_lend.want = (int) ids.size();   // (KV lending: at the answer's first token)
             if (L < ids.size()) {
                 const int T_sup = g_dev[0].W.T_sup;
@@ -10824,9 +10828,6 @@ int main(int argc, char** argv) {
                 // where the prompt's last message starts (past what is kept, with a turn before it): a snapshot
                 // there, so that message edited or asked again reads only itself (SAGUARO_IK2_SNAP_MSG=0: none)
                 size_t p_ms = 0;
-                // (with the drafter only under SAGUARO_IK2_DRAFT_SNAP=1: after a restore its windowed layers' rings may
-                //  hold rows of the dropped continuation - the drafts' context only, never an answer's)
-                static const bool draft_snap = getenv("SAGUARO_IK2_DRAFT_SNAP") && std::atoi(getenv("SAGUARO_IK2_DRAFT_SNAP"));
                 if (keep_n > 0 && !(getenv("SAGUARO_IK2_SNAP_MSG") && !std::atoi(getenv("SAGUARO_IK2_SNAP_MSG"))) &&
                     (!drafter || draft_snap))
                     for (size_t i = ids.size(); i-- > L + 1;)
@@ -10902,9 +10903,12 @@ int main(int argc, char** argv) {
                 // need none, they rewrite cleanly). The request coming back for the rest matches its end exactly
                 // and its PP/DONE report cached = read_pos as the reused figure; a DIFFERENT conversation parks it
                 // whole (the r_best == 0 leg and, on this read_kept shape, the leg above) instead of reading over
-                // its rows. Without keeping (SAGUARO_IK2_KEEP=0, KV-streaming, KV-Q4: keep_n 0) the old shape
-                // below stands.
-                if (keep_n > 0 && read_pos > 0) {
+                // its rows. Without keeping (SAGUARO_IK2_KEEP=0, KV-streaming, KV-Q4: keep_n 0; or a drafter
+                // without SAGUARO_IK2_DRAFT_SNAP) the old shape below stands.
+                if (keep_n > 0 && read_pos > 0 && (!drafter || draft_snap)) {   // (with a drafter and no
+                    //  SAGUARO_IK2_DRAFT_SNAP the keep's snapshot would carry the same dropped-continuation risk
+                    //  the p_ms gate above documents: the old rollback shape below stands instead - REPORT's
+                    //  "no drafter (or SAGUARO_IK2_DRAFT_SNAP=1)" conditioned the keep on it all along)
                     read_kept = true;   // (the cache now ends exactly at this cut - the one shape the
                     //  different-conversation leg above parks instead of rolling back over)
                     hist.assign(ids.begin(), ids.begin() + read_pos);
