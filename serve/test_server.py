@@ -3474,5 +3474,92 @@ class Ds4OneGpuSwitchNote(unittest.TestCase):
         self.assertIsNone(note({**self.CFG, "exe": "/x/maya-mm3"}, env))             # another model
 
 
+class QfnBoundedShutdown(unittest.TestCase):
+    """P125d: the QFN driver's end (serve/qfn_engine.py) is bounded, escalates straight and logs every wait:
+    SAGUARO_SHUTDOWN_S (default 15) is the QUIT grace, and an engine that ignores QUIT - and SIGTERM, as the QFN
+    engine does under --serve by design - is SIGKILLed at once, never given a terminate that could not succeed.
+    Fake engines only (subprocesses), like the QFN tree's own close() tests."""
+
+    IGNORING = ("import signal, sys, time\n"
+                "if hasattr(signal, 'SIGTERM'): signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "print('READY 4096 stop', flush=True)\n"
+                "for line in sys.stdin:\n"
+                "    pass\n"                       # never answers QUIT: reads until EOF, then sleeps
+                "time.sleep(600)\n")
+    QUITTING = ("import sys\n"
+                "print('READY 4096 stop', flush=True)\n"
+                "for line in sys.stdin:\n"
+                "    if line.strip() == 'QUIT': sys.exit(0)\n")
+
+    def engine(self, script):
+        import subprocess
+        from serve import qfn_engine as QE
+        engine = QE.StrataEngine("missing-executable", [], lazy=True)
+        engine.proc = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        engine.proc.stdout.readline()             # READY: the fake engine is up
+        self.addCleanup(lambda: engine.proc.kill() if engine.proc is not None and engine.proc.poll() is None else None)
+        return engine
+
+    def test_shutdown_budget_s(self):
+        from serve import qfn_engine as QE
+        for env, want in (({}, 15.0), ({"SAGUARO_SHUTDOWN_S": "7.5"}, 7.5), ({"SAGUARO_SHUTDOWN_S": "0"}, 0.0),
+                          ({"SAGUARO_SHUTDOWN_S": ""}, 15.0), ({"SAGUARO_SHUTDOWN_S": "soon"}, 15.0),
+                          ({"SAGUARO_SHUTDOWN_S": "-3"}, 0.0)):
+            with unittest.mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(QE.shutdown_budget_s(), want, env)
+
+    def test_an_engine_ignoring_quit_and_sigterm_is_killed_after_the_grace(self):
+        import signal as signal_mod
+        from serve import qfn_engine as QE
+        buf = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, {"SAGUARO_SHUTDOWN_S": "1"}), \
+                unittest.mock.patch.object(sys, "stdout", buf):
+            engine = self.engine(self.IGNORING)
+            victim = engine.proc
+            t0 = time.monotonic()
+            engine.close()
+        self.assertLess(time.monotonic() - t0, 8.0, "close() waited on something that cannot end it")
+        self.assertIsNotNone(victim.poll(), "the engine is still running after close()")
+        self.assertIsNone(engine.proc)
+        out = buf.getvalue()
+        self.assertIn("STOP + QUIT, 1 s of grace", out)
+        self.assertIn("it ignores SIGTERM: killing", out)
+        self.assertIn("killed and reaped", out)
+        if os.name == "posix":
+            self.assertEqual(victim.returncode, -signal_mod.SIGKILL, "only the kill ended it")
+
+    def test_an_engine_that_honours_quit_ends_without_a_kill(self):
+        from serve import qfn_engine as QE
+        buf = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, {}, clear=True), unittest.mock.patch.object(sys, "stdout", buf):
+            engine = self.engine(self.QUITTING)
+            victim = engine.proc
+            t0 = time.monotonic()
+            engine.close()
+        self.assertEqual(victim.poll(), 0, "the fake exited 0 on QUIT")
+        self.assertLess(time.monotonic() - t0, 5.0)
+        out = buf.getvalue()
+        self.assertIn("the engine ended on QUIT", out)
+        self.assertNotIn("killing", out)
+
+    def test_the_escalation_never_terminates(self):
+        # a mock proc: QUIT times out -> SIGKILL at once (the QFN engine SIG_IGNs SIGTERM: terminate was the wait
+        # that could not succeed)
+        import subprocess as sp
+        from serve import qfn_engine as QE
+        engine = QE.StrataEngine("missing-executable", [], lazy=True)
+        proc = unittest.mock.Mock()
+        proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
+        proc.poll.side_effect = [None, 0]
+        proc.wait.side_effect = [sp.TimeoutExpired("engine", 15), 0]
+        engine.proc = proc
+        with unittest.mock.patch.object(sys, "stdout", io.StringIO()):
+            engine.close()
+        proc.terminate.assert_not_called()
+        proc.kill.assert_called_once()
+        self.assertIsNone(engine.proc)
+
+
 if __name__ == "__main__":
     unittest.main()

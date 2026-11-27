@@ -158,8 +158,9 @@ class HardFallback(unittest.TestCase):
         engine.proc.stdout.readline()
         victim = engine.proc
         t0 = time.monotonic()
-        with mock.patch.object(server, "ENGINE_QUIT_WAIT_S", 1), mock.patch.object(server, "ENGINE_TERM_WAIT_S", 1), \
-                mock.patch.object(server, "ENGINE_KILL_WAIT_S", 10):
+        # P125d: no terminate step - the QUIT grace (SAGUARO_SHUTDOWN_S, here capped by ENGINE_QUIT_WAIT_S) runs out
+        # and the kill follows at once; SIGTERM ignored would have cost its wait for nothing
+        with mock.patch.object(server, "ENGINE_QUIT_WAIT_S", 1), mock.patch.object(server, "ENGINE_KILL_WAIT_S", 10):
             engine.close()
         self.assertLess(time.monotonic() - t0, 12)
         self.assertIsNotNone(victim.poll(), "the engine is still running after close()")

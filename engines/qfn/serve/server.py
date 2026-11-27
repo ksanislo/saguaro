@@ -107,8 +107,20 @@ def popen(what: str, args: list, role: str = "engine", **kw):
         raise
 
 
-# How long close() gives the engine at each step of ending it (seconds). Module values so that a test can shorten them.
-ENGINE_QUIT_WAIT_S, ENGINE_TERM_WAIT_S, ENGINE_KILL_WAIT_S = 20, 5, 20
+# How long close() gives the engine at each step of ending it (seconds). Module values so that a test can shorten
+# them.  There is no terminate step: the QFN engine ignores SIGTERM under --serve by design (it installs SIG_IGN -
+# engine_args), so terminate was always a wait that could not succeed (P125a: its 5 s were wasted every time).
+ENGINE_QUIT_WAIT_S, ENGINE_KILL_WAIT_S = 20, 20
+
+
+def shutdown_budget_s() -> float:
+    """SAGUARO_SHUTDOWN_S (default 15): the seconds the whole server-side shutdown gives the engine to end on its
+    own - the QUIT grace; past it close() goes straight to SIGKILL.  0 ends the engine at once.  Bad values fall
+    back to the default; ENGINE_KILL_WAIT_S still bounds the wait for the kill to be reaped."""
+    try:
+        return max(0.0, float(os.environ.get("SAGUARO_SHUTDOWN_S", "") or 15.0))
+    except ValueError:
+        return 15.0
 
 
 def rttime_limit_note() -> str:
@@ -476,8 +488,8 @@ class SessionRefused(ValueError):
 
 
 class EngineStuck(RuntimeError):
-    """The engine process did not end after QUIT, terminate and kill: the server keeps it (and says so) rather than
-    reporting its GPU and RAM as given back."""
+    """The engine process did not end after QUIT and kill: the server keeps it (and says so) rather than reporting
+    its GPU and RAM as given back."""
 
 
 class GpuBusy(RuntimeError):
@@ -3142,29 +3154,44 @@ class StrataEngine:
             raise out_of_step(line)
 
     def close(self):
-        """End the engine process: STOP + QUIT first (the engine frees its memory itself - unpinning tens of GB can take
-        a while; ENGINE_QUIT_WAIT_S), then terminate (ENGINE_TERM_WAIT_S), then kill (ENGINE_KILL_WAIT_S).  Raises
-        EngineStuck when it still runs after all three."""
+        """End the engine process: STOP + QUIT first (the engine frees its memory itself - unpinning tens of GB can
+        take a while), waited for up to SAGUARO_SHUTDOWN_S (15 s, P125d) and no more than ENGINE_QUIT_WAIT_S; when
+        that runs out, SIGKILL, waited for up to ENGINE_KILL_WAIT_S.  No terminate step: the engine ignores SIGTERM
+        under --serve by design, so it was a wait that could not succeed.  Raises EngineStuck when it still runs
+        after the kill.  Each wait prints one line when it starts and one when the engine ended or the wait ran out:
+        a slow exit says where it was (P125a's 6-minute shutdown was silent)."""
         if self.proc is None:
             return
+        t0 = time.monotonic()
+        grace = min(float(ENGINE_QUIT_WAIT_S), shutdown_budget_s())
         try:
             if self.proc.poll() is None:
                 try:
                     # STOP first: a request still running ends at its next step instead of being waited for (the
                     # engine reads stdin on its own thread; QUIT behind a long answer would sit in its queue)
+                    print(f"[strata] stopping the engine: STOP + QUIT, {grace:.0f} s of grace "
+                          f"(SAGUARO_SHUTDOWN_S)", flush=True)
                     self.proc.stdin.write("STOP\nQUIT\n")
                     self.proc.stdin.flush()
                     self.proc.stdin.close()  # Windows' detached stdin reader must see EOF before shutdown
-                    self.proc.wait(timeout=ENGINE_QUIT_WAIT_S)
+                    self.proc.wait(timeout=grace)
+                    print(f"[strata] the engine ended on QUIT after {time.monotonic() - t0:.1f} s", flush=True)
                 except (OSError, ValueError, subprocess.TimeoutExpired):
-                    self.proc.terminate()
-                    self.proc.wait(timeout=ENGINE_TERM_WAIT_S)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            try:
-                self.proc.wait(timeout=ENGINE_KILL_WAIT_S)
-            except subprocess.TimeoutExpired:
-                raise EngineStuck("Strata is still releasing GPU/RAM; retry unloading after it exits") from None
+                    # terminate would be a no-op (the engine SIG_IGNs SIGTERM in --serve, engine_args) - go straight
+                    # to what works
+                    print(f"[strata] QUIT did not end the engine after {time.monotonic() - t0:.1f} s; it ignores "
+                          f"SIGTERM: killing, waiting up to {ENGINE_KILL_WAIT_S:.0f} s for it to be reaped",
+                          flush=True)
+                    self.proc.kill()
+                    try:
+                        self.proc.wait(timeout=ENGINE_KILL_WAIT_S)
+                        print(f"[strata] the engine was killed and reaped after {time.monotonic() - t0:.1f} s",
+                              flush=True)
+                    except subprocess.TimeoutExpired:
+                        print(f"[strata] the engine still runs {ENGINE_KILL_WAIT_S:.0f} s after SIGKILL: it is still "
+                              f"releasing GPU/RAM (EngineStuck)", flush=True)
+                        raise EngineStuck("Strata is still releasing GPU/RAM; retry unloading after it exits") \
+                            from None
         except OSError:
             pass
         finally:

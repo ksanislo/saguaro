@@ -229,6 +229,40 @@ void SessionDir::flush() {
     flushing_ = stop_;
 }
 
+bool SessionDir::flush_until(std::chrono::steady_clock::time_point deadline, const char* what) {
+    std::unique_lock<std::mutex> lk(mu_);
+    const auto queued = [&] { return jobs_.size() + turn_jobs_.size() + (writing_ != nullptr ? 1 : 0); };
+    if (what != nullptr)
+        say(std::string("flushing ") + std::to_string(queued()) + " session write(s) at " + what);
+    const auto t0 = std::chrono::steady_clock::now();
+    flushing_ = true;
+    cv_.notify_all();
+    const auto done = [&] { return jobs_.empty() && writing_ == nullptr && turn_jobs_.empty() && !turn_busy_; };
+    bool ok = done();
+    if (!ok) {
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left > std::chrono::steady_clock::duration::zero()) ok = cv_.wait_for(lk, left, done);
+    }
+    flushing_ = stop_;
+    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (what != nullptr)
+        say(ok ? "flush done after " + std::to_string((long long) (s * 1000.0)) + " ms"
+               : "flush TIMED OUT after " + std::to_string((long long) s) + " s: " + std::to_string(queued()) +
+                     " write(s) still queued");
+    return ok;
+}
+
+void SessionDir::drop_queued() {
+    std::lock_guard<std::mutex> lk(mu_);
+    const size_t n = jobs_.size() + turn_jobs_.size();
+    jobs_.clear();
+    for (SessionTurnJob& j : turn_jobs_) j.track->broken = true;   // its turn did not land: the next one goes whole
+    turn_jobs_.clear();
+    if (writing_ != nullptr) write_cancel_.store(writing_, std::memory_order_relaxed);   // stops at its next block
+    cv_.notify_all();
+    say("dropped " + std::to_string(n) + " queued write(s) at exit: what is on disk is what the last turn left");
+}
+
 size_t SessionDir::files() const {
     std::lock_guard<std::mutex> lk(mu_);
     return entries_.size();

@@ -817,6 +817,8 @@ struct Options {
     std::string session_dir;            // --session-dir: parked conversations persisted, one file each (session_dir.hpp)
     int64_t session_dir_files = 64, session_dir_gib = 64, session_dir_days = 7;
     double session_dir_delay_s = -1.0;   // not given: 2 s with appending session files, else 30
+    double session_dir_exit_s = 10.0;    // --session-dir-exit-s: the whole exit-time save gets this long (P125d);
+                                         // past it the rest is skipped: the conversations stay saved from their last turn
     bool conversation_cache_pool = false;   // --conversation-cache-mib auto / SAGUARO_PARK_MIB=auto: the shared pool
     int64_t session_dir_preload_mib = 0;   // 0: lazy - a file is read only when a request continues it
     int conversation_cache_slots = 4;
@@ -1004,7 +1006,10 @@ void usage() {
                  "                       after the start, newest first, up to MIB (default 0 = lazy only).\n"
                  "                       The least recently used files (written or resumed) go first when the folder\n"
                  "                       is over --session-dir-gib G (64) or --session-dir-files N (64); a file unused\n"
-                 "                       for --session-dir-days D (7) goes in any case.\n"
+                  "                       for --session-dir-days D (7) goes in any case.  The exit-time save gets\n"
+                  "                       --session-dir-exit-s S (10): past it the rest is skipped and the queued\n"
+                  "                       writes dropped - what is on disk stays what the last turn left, and the\n"
+                  "                       exit is never blocked by the save.\n"
                  "  --conversation-cache-slots N  --serve: at most N parked conversations (default 4)\n"
                  "  --conversation-cache-min-free-mib N  --serve: RAM floor (under MemAvailable, the cgroup limits and\n"
                  "                       --memory-limit-mib) when parking, saving or restoring a session (default 2560)\n"
@@ -3122,6 +3127,7 @@ int main(int argc, char** argv) {
         else if (a == "--session-dir-gib") o.session_dir_gib = std::max(1LL, std::atoll(next("--session-dir-gib")));
         else if (a == "--session-dir-days") o.session_dir_days = std::max(1LL, std::atoll(next("--session-dir-days")));
         else if (a == "--session-dir-delay") o.session_dir_delay_s = std::max(0.0, std::atof(next("--session-dir-delay")));
+        else if (a == "--session-dir-exit-s") o.session_dir_exit_s = std::max(0.0, std::atof(next("--session-dir-exit-s")));
         else if (a == "--session-dir-preload") o.session_dir_preload_mib = std::max(0LL, std::atoll(next("--session-dir-preload")));
         else if (a == "--prompt-cache-every") o.prompt_cache_every = std::max(0LL, std::atoll(next("--prompt-cache-every")));
         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
@@ -23331,12 +23337,30 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
         }
         if (sdir) {   // --session-dir: the active conversation too, then everything queued, before the engine ends
+            // P125d: a GiB conversation parked into swapped-out RAM copies at well under 1 MiB/s (#2049/#2065/#1971) -
+            // the whole exit save gets --session-dir-exit-s (10 s).  Past it the rest is skipped: what is on disk
+            // stays what the last turn left, and the exit is never blocked by the save (the P125a box spent minutes here)
+            const auto t_save = std::chrono::steady_clock::now();
+            const auto exit_deadline = t_save + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(o.session_dir_exit_s));
+            std::fprintf(stderr, "saguaro serve: session dir: saving the live conversation and %zu slot(s) at exit "
+                                 "(up to %.0f s)\n", bs.size(), o.session_dir_exit_s);
             sdir->begin_exit();
+            bool out_of_time = false;
             park_current(0);
-            for (int b = 0; b < (int) bs.size(); ++b) persist_slot(b, false, {}, true, "the engine ends");   // after it: they supersede it
-            sdir->flush();
-            std::fprintf(stderr, "saguaro serve: session dir: %zu file(s), %llu MiB on disk at exit\n", sdir->files(),
-                         (unsigned long long) (sdir->bytes() >> 20));
+            for (int b = 0; b < (int) bs.size() && !out_of_time; ++b) {
+                if (std::chrono::steady_clock::now() >= exit_deadline) out_of_time = true;   // no slot save started after it
+                else persist_slot(b, false, {}, true, "the engine ends");   // after it: they supersede it
+            }
+            if (!out_of_time && !sdir->flush_until(exit_deadline, "exit")) out_of_time = true;
+            if (out_of_time) {   // queued writes stop at their next block; the exit waits for none of them
+                sdir->drop_queued();
+                std::fprintf(stderr, "saguaro serve: session save skipped at exit after %.1f s "
+                                     "(--session-dir-exit-s): the conversations stay saved from their last turn\n",
+                             std::chrono::duration<double>(std::chrono::steady_clock::now() - t_save).count());
+            } else
+                std::fprintf(stderr, "saguaro serve: session dir: %zu file(s), %llu MiB on disk at exit\n",
+                             sdir->files(), (unsigned long long) (sdir->bytes() >> 20));
         }
         save_profile("exit");   // #477: QUIT, or the server closed stdin
 #if defined(STRATA_GPU_METAL)
