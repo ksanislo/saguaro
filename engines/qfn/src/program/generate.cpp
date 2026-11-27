@@ -10438,6 +10438,19 @@ vs.d_skip_usage = gs.d_skip_usage;
         bool live_ok = false;
         // the prompt length of the request that left `live` (-1: unknown), for conv_cache::own_rewind
         int64_t live_prompt_n = -1;
+        // P125j: the live conversation's read is PAUSED between two layers of the chunk from token `pos`:
+        // layers < `layer` read its tokens (their K/V cells, GDN/conv state and indexer tails hold them
+        // in the session), layers >= `layer` have not, and `live` runs THROUGH the chunk (its tokens count
+        // as reused; the next request of the same prompt goes on at `layer` or re-reads the chunk - the
+        // same result).  The rows themselves live in the prompt path (Prefill) while the conversation is
+        // live; a park moves them into the parked image and a restore brings them back.  Dropping one is
+        // always safe: the read falls back to P124b's landing or a plain re-read.
+        struct ReadPause {
+            int64_t pos = -1, layer = -1, tokens = 0;
+            std::vector<int32_t> ids;
+        };
+        ReadPause read_pause;
+        auto drop_read_pause = [&] { read_pause = ReadPause{}; sp.clear_pause(); };
         // #879: a window met non-finite logits: the next request drops every cached state first and reads from token 0
         bool nan_flush = false;
         // #3465: the non-finite logits came in a window that reads the PROMPT's tail (the last few tokens, read through
@@ -10720,6 +10733,9 @@ vs.d_skip_usage = gs.d_skip_usage;
         static const bool turn_save_verify = [] { const char* v = std::getenv("SAGUARO_TURN_SAVE_VERIFY"); return v != nullptr && std::atoi(v) != 0; }();
         auto turn_capture = [&](const ParkFrom& f, TurnHold& h, const std::string& label) -> bool {
             if (!sdir || !turn_save_on || f.ids.empty()) return false;
+            // P125j: a conversation whose read is paused between two layers has session cells only half
+            // written past the pause; a file for it could not hold the saved rows, so it is never saved.
+            if (f.slot < 0 && read_pause.pos >= 0) return false;
             const auto t0 = Clock::now();
             std::string e;
             try {
@@ -10824,7 +10840,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
         };
         auto spill_current = [&]() {
-            if (!sdir || !live_ok || live.empty() || spill_skip_rewind) return;
+            // P125j: never spill a conversation whose read is paused between two layers: its file could
+            // not carry the saved rows, and the half-written cells must not look complete on a reload.
+            if (!sdir || !live_ok || live.empty() || spill_skip_rewind || read_pause.pos >= 0) return;
             spill_from(ParkFrom{live, live_imgs, checks, cvec_cached, -1});
         };
         auto park_body = [&](const ParkFrom& f, size_t held) -> bool {
@@ -10955,6 +10973,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             // estimate must stay uncapped: it counts the retained buffers'
             // capacity and directories, and put() charges that same true size -
             // a capped figure would under-evict and overfill the budget.
+            // P125j: a paused read's rows are RAM this park holds too (they go into the image below);
+            // without them a park that only fits without them would push the cache over its budget.
+            if (f.slot < 0 && read_pause.pos >= 0) estimate += sp.pause_rows_bytes();
             if (!conversations.make_room(estimate, held)) {
                 std::fprintf(stderr, "saguaro serve: conversation cache: skip parking (snapshot %zu MiB exceeds available budget)\n",
                              estimate >> 20);
@@ -11061,9 +11082,30 @@ vs.d_skip_usage = gs.d_skip_usage;
                     spill();
                     return true;
                 }
+                // P125j: a read paused between two layers parks WITH its conversation: the chunk's record
+                // and its rows go into the parked image (counted in its bytes, admitted above) and come
+                // back with it.  Such an image is never written to the session dir.
+                bool parked_paused = false;
+                if (f.slot < 0 && read_pause.pos >= 0) {
+                    std::vector<float> pause_rows;
+                    sp.take_pause_rows(pause_rows);
+                    if (!pause_rows.empty()) {
+                        image.pause_pos = read_pause.pos;
+                        image.pause_layer = read_pause.layer;
+                        image.pause_tokens = read_pause.tokens;
+                        image.pause_ids = read_pause.ids;
+                        image.pause_rows = std::move(pause_rows);
+                        parked_paused = true;
+                        std::fprintf(stderr, "saguaro serve: conversation cache: the parked conversation keeps a "
+                                             "prompt read paused at token %lld, layer %lld (%zu MiB of chunk rows)%s\n",
+                                     (long long) read_pause.pos, (long long) read_pause.layer,
+                                     image.pause_rows.size() * sizeof(float) >> 20, who.c_str());
+                    }
+                    drop_read_pause();   // (the live conversation is ending here either way)
+                }
                 const size_t snapshot_bytes = image.bytes();
                 const bool stored = conversations.put(std::move(image), held, park_clock());
-                if (stored && sdir) sdir->write(conversations.newest());   // written behind, after its delay
+                if (stored && sdir && !parked_paused) sdir->write(conversations.newest());   // written behind, after its delay
                 if (stored) (f.slot < 0 ? turn_main : turn_slot[(size_t) f.slot]).reset();   // (its file moves on without the track)
                 const double park_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 if (stored) {   // the server's log: a conversation going out, to RAM
@@ -12646,6 +12688,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             return true;
         };
         sp.should_stop = [&] { return stop_req.load(); };
+        // P125j: the same STOP, taken at the chunk's NEXT LAYER BOUNDARY too instead of only before a
+        // chunk: a read a priority cut catches mid-chunk ends within one layer pass, keeping its chunk's
+        // rows with the conversation (Prefill::run_impl; SAGUARO_LAYER_PAUSE=0 restores the old wait).
+        sp.stop_between_layers = [&] { return stop_req.load(); };
         // 149-prefetch SAGUARO_RAM_ADAPT2: the prompt's routing seeds the RAM policy with a limited weight
         // (SAGUARO_RAM_ADAPT_PROMPT_W, default 0.25: an expert every prompt token routes to counts like ~5 decode routings),
         // fading by 5% a decode window; the decode's own counts and the GPU tier are untouched
@@ -19478,6 +19524,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             nf_hit = false;
             read_vram = false;
+            // P125j: where THIS request's prompt read stopped between two layers of a chunk (the leg's
+            // chunk index, its absolute token, its layer, its token count) and the DONE suffix saying it.
+            int64_t lp_pos = -1, lp_layer = -1, lp_tokens = 0, lp_chunk = -1;
+            std::string lp_note;
             // #879: an earlier window met non-finite logits.  The poison sits in a conversation's K/V and recurrent
             // state, so nothing that may hold it is continued: the live session, every checkpoint, every parked
             // conversation and every idle batch slot go, and this prompt is read from token 0 (resume == 0 below)
@@ -19489,6 +19539,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 }
                 const size_t n_checks = checks.size();
                 live_ok = false;
+                drop_read_pause();   // P125j: the paused read went with the dropped conversation
                 checks.clear();
                 tail_ckpt_len = -1;
                 const size_t n_parked = conversations.clear();
@@ -20028,6 +20079,17 @@ vs.d_skip_usage = gs.d_skip_usage;
                     if (!strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear();
                 }
                 adopt_msg_tail(checks);   // (one parked with a message checkpoint)
+                // P125j: a parked conversation can come back WITH a read paused between two layers of a
+                // chunk: the record becomes the live conversation's again and the saved rows go back into
+                // the prompt path, so the next request of that prompt goes on at the saved layer.
+                if (incoming->paused()) {
+                    read_pause.pos = incoming->pause_pos;
+                    read_pause.layer = incoming->pause_layer;
+                    read_pause.tokens = incoming->pause_tokens;
+                    read_pause.ids = incoming->pause_ids;
+                    sp.give_pause(read_pause.pos, read_pause.layer, read_pause.tokens,
+                                  std::move(incoming->pause_rows));
+                }
                 cvec_cached = incoming->cvec;
                 resume = incoming_tokens;
                 from_live = incoming_live;
@@ -20066,6 +20128,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (want_cvec != cvec_cached) {
                 live_ok = false;
+                drop_read_pause();   // P125j: the session is about to change under the paused read
                 checks.clear();
                 cvec_cached = want_cvec;
             }
@@ -20190,7 +20253,28 @@ vs.d_skip_usage = gs.d_skip_usage;
             tr("request", n, geni ? 1 : 0);
             req_times = ReqTimes{};
             if (use_mtp) mtp.set_prompt_len(n);
-            const int64_t read_from = reread_to > 0 ? 0 : resume;
+            // P125j: does this request go on with a read paused between two layers of a chunk?  Only the
+            // exact continuation can: same conversation ending exactly at the paused chunk's end, and the
+            // chunk's tokens are the request's own.  The session then starts the read INSIDE that chunk
+            // (read_from = its first token) at the saved layer, while the reused figures still cover the
+            // whole chunk (its lower layers were read: reused + read = the prompt, nothing read twice).
+            // Anything else has zeroed or restored the session or taken another conversation - the pause
+            // goes with what dropped it, and the read continues from the checkpoint / token 0 as usual.
+            int64_t lp_from = -1;
+            if (read_pause.pos >= 0) {
+                const bool go_on = reread_to <= 0 && req_imgs.empty() &&
+                                   resume == (int64_t)live.size() &&
+                                   resume == read_pause.pos + read_pause.tokens &&
+                                   read_pause.pos + read_pause.tokens <= n &&
+                                   std::equal(read_pause.ids.begin(), read_pause.ids.end(),
+                                              ids.begin() + read_pause.pos,
+                                              [](int32_t a, int64_t b) { return (int64_t) a == b; }) &&
+                                   sp.paused_tokens() == read_pause.tokens &&
+                                   sp.paused_chunk() == read_pause.pos;
+                if (go_on) lp_from = read_pause.pos;
+                else drop_read_pause();
+            }
+            const int64_t read_from = lp_from >= 0 ? lp_from : (reread_to > 0 ? 0 : resume);
             conversations.limit_reuse(read_from);
             turn_main.begin(read_from);
             pp_total = n;
@@ -20497,6 +20581,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                     pp_run_begin();   // (this request's own read clock: the pieces between two runs - the slots'
                     const bool ok = sp.run(ids.data() + q, r - q, q, e);
                     pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
+                    if (!ok && sp.paused_chunk() >= 0) {   // P125j: the read stopped between two layers
+                        lp_pos = sp.paused_chunk();        //   (absolute token of the paused chunk's start)
+                        lp_layer = sp.paused_layer();
+                        lp_tokens = sp.paused_tokens();
+                        lp_chunk = (lp_pos - q) / std::max<int64_t>(sp.chunk(), 1);
+                    }
                     return ok;
                 };
                 // (a layer split reads its stages as a pipeline over one run's chunks: beside slots a chunk at a time, with
@@ -22729,6 +22819,31 @@ vs.d_skip_usage = gs.d_skip_usage;
                 live_ok = o.prompt_cache > 0 && (req_ckpt || req_cont);   // ckpt=0: nothing to continue or park (#830)
                 if (nf_hit) live_ok = false;   // #879 (the next request's start drops the rest)
                 live_prompt_n = live_ok ? n : -1;
+                drop_read_pause();   // P125j: the read went on to its end; any paused chunk is complete
+            } else if (!nf_hit && !read_vram && lp_pos >= 0 && req_imgs.empty() && o.prompt_cache > 0 &&
+                       (req_ckpt || req_cont) && lp_pos + lp_tokens <= (int64_t) cur.size()) {
+                // P125j: the read stopped between two LAYERS of the chunk from token lp_pos: the layers
+                // below lp_layer read that chunk (its K/V cells, GDN/conv state and indexer tails hold
+                // its tokens in the session) and the layers from lp_layer on did not.  The conversation
+                // stays live THROUGH the paused chunk - its tokens count as reused, the rows stay with
+                // the conversation (in the prompt path while it is live, in its parked image after a
+                // switch), and the next request of the same prompt goes on at lp_layer.
+                live.assign(cur.begin(), cur.begin() + lp_pos + lp_tokens);
+                live_imgs = imgs_below(req_imgs, lp_pos + lp_tokens);
+                live_ok = true;
+                live_prompt_n = n;
+                read_pause.pos = lp_pos;
+                read_pause.layer = lp_layer;
+                read_pause.tokens = lp_tokens;
+                read_pause.ids.assign(cur.begin() + lp_pos, cur.begin() + lp_pos + lp_tokens);
+                lp_note = " paused_layer=" + std::to_string(lp_layer) +
+                          " paused_chunk=" + std::to_string(lp_chunk) +
+                          " paused_at=" + std::to_string(lp_pos);
+                std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: the read paused "
+                                     "at chunk %lld, layer %lld (of token %lld): %zu MiB of chunk rows stay with "
+                                     "it, %lld tokens live\n",
+                             (long long) lp_chunk, (long long) lp_layer, (long long) lp_pos,
+                             sp.pause_rows_bytes() >> 20, (long long) (lp_pos + lp_tokens));
             } else if (!nf_hit && !read_vram && pp_exact && pp_reached > 0 && o.prompt_cache > 0 && (req_ckpt || req_cont) &&
                        pp_reached <= (int64_t) cur.size()) {
                 // #1620: stopped between two windows (or before the first token was read): the session is exactly at
@@ -22737,6 +22852,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 live.assign(cur.begin(), cur.begin() + pp_reached);
                 live_imgs = imgs_below(req_imgs, pp_reached);
                 live_ok = true;
+                drop_read_pause();   // P125j: the session sits exactly at a boundary; no paused chunk
                 std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: %lld tokens live\n",
                              (long long) pp_reached);
             }
@@ -22773,6 +22889,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         live.assign(c.ids.begin(), c.ids.end());
                         live_imgs = c.imgs;
                         live_ok = true;
+                        drop_read_pause();   // P125j: back on a checkpoint of every layer; no paused chunk
                         std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: %lld tokens "
                                              "live (its checkpoint: the read stopped inside a part)\n",
                                      (long long) c.ids.size());
@@ -22782,6 +22899,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                 }
             }
+            // P125j: a cancelled read that did not keep its paused chunk (no pause, or the keep refused)
+            // leaves the saved rows with nothing to go on - the session was rolled back, zeroed, or the
+            // conversation parked without them. They drop; the next read re-runs the chunk if it must.
+            if (cancelled && read_pause.pos < 0) sp.clear_pause();
             static const bool state_hash = std::getenv("SAGUARO_STATE_HASH") != nullptr;
             if (state_hash && !cancelled && o.prompt_cache > 0) {   // every finished request, ckpt=0 too (parity gates)
                 // DEBUG: a fingerprint of every part of the session over the positions it holds ([0, L)), and
@@ -22918,15 +23039,17 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
+            // P125j: when this request's read stopped between two layers, say WHERE on the DONE line
+            // (layer l of chunk c, at token P) so the server's pause line can name it.
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s chunk=%lld "
-                        "experts_streamed=%lld\n",
+                        "experts_streamed=%lld%s\n",
                         (long long) produced_n,
                         (long long) n, prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) resume, (long long) req_hits, (long long) req_look,
                         (long long) (src.ram_reads() - ram0), (long long) (src.file_reads() - files0),
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
                         (long long) req_offload, chain_txt, (long long) req_chunk,
-                        (long long) (sp.chain_experts_streamed() - streamed0));
+                        (long long) (sp.chain_experts_streamed() - streamed0), lp_note.c_str());
             std::fflush(stdout);
             if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&

@@ -339,6 +339,32 @@ public:
 
     /// Checked before every chunk: true stops the prompt early (`run` returns false with err "cancelled").
     std::function<bool()> should_stop;
+    /// P125j: a STOP taken BETWEEN the layers of a chunk, not only before one. Checked at the end of every
+    /// layer pass of a SOLO run (no queued job, no batched chunk, no layer split, no picture rows) while
+    /// SAGUARO_LAYER_PAUSE is on: true finishes the current layer, saves the chunk's residual rows
+    /// (tokens x hc*n_embd FP32) on the host and ends the run with err "layer paused" - the conversation
+    /// keeps the read (generate.cpp's pause keep) and the next run of the same tokens goes on at the saved
+    /// layer (the K/V of the layers below it for this chunk is already written). Unset, or the variable
+    /// 0: the plain between-chunk stop, byte-identical to before.
+    std::function<bool()> stop_between_layers;
+    /// SAGUARO_LAYER_PAUSE (default on): whether `run` honours a layer pause at all - OFF, the check, the
+    /// row copies and the resume all stay untouched and the read behaves exactly as before P125j.
+    static bool layer_pause_wanted();
+    /// Where the last `run` (or one a park handed back) paused between two layers: the paused chunk's
+    /// first token as an ABSOLUTE position, the first layer it did not read, and the chunk's token count;
+    /// -1 / -1 / 0 when it did not pause.
+    int64_t paused_chunk() const;
+    int64_t paused_layer() const;
+    int64_t paused_tokens() const;
+    /// The paused chunk's saved rows, moved out to park them with the conversation (P125j: a parked read
+    /// keeps its in-flight chunk), given back on restore (`pos0`: the paused chunk's absolute first
+    /// token), or dropped. Dropping is always safe: the chunk is then read again whole (the same result,
+    /// the layer skip lost).
+    void take_pause_rows(std::vector<float>& rows);
+    /// The saved rows' size in bytes (0 with no pause): the park's budget adds it to its estimate.
+    size_t pause_rows_bytes() const;
+    void give_pause(int64_t pos0, int64_t layer, int64_t tokens, std::vector<float>&& rows);
+    void clear_pause();
     /// The first stage only, checked before every chunk but the first: true ends the run there as if the prompt
     /// ended there.  `run` returns true once every stage has read the tokens before that chunk, and `stopped_at()`
     /// says how many of the run's tokens that is (-1 when the run read them all).  A read beside the batch slots
@@ -419,6 +445,13 @@ private:
     bool drain_pipeline(std::string& err);
 
     int64_t stage_lb_ = 0, stage_le_ = -1;
+    /// P125j: the chunk a run stopped between two layers of (or the one a park handed back): its absolute
+    /// first token, the first layer not read for it, its token count, and its residual rows on the host.
+    struct SavedPause {
+        int64_t pos0 = -1, layer = -1, tokens = 0;
+        std::vector<float> rows;
+    };
+    SavedPause pause_;
     std::vector<int> tap_layers_;
     int64_t tap_first_ = 0, tap_cap_ = 0;
     float* tap_dev_ = nullptr;

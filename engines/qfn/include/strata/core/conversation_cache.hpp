@@ -177,6 +177,16 @@ struct SavedConversation {
     std::vector<ConversationCheckpoint> checkpoints;
     std::vector<ConversationKv> kv; // main layers followed by the draft layer
     bool cvec = true;
+    // P125j: parked while its prompt read was PAUSED between two layers of a chunk: that chunk's first
+    // token (absolute), the first layer it did not read, its token count and ids, and its residual rows
+    // (pause_tokens rows of hc*n_embd FP32: the hidden states after the last layer it read), which
+    // restore back into the prompt path.  A conversation without one parks and restores exactly as
+    // before; one carrying a pause is never written to the session dir (the file could not hold it), so
+    // a disk-restored conversation never looks complete while its K/V is only half-written.
+    int64_t pause_pos = -1, pause_layer = -1, pause_tokens = 0;
+    std::vector<int32_t> pause_ids;
+    std::vector<float> pause_rows;
+    bool paused() const { return pause_pos >= 0 && !pause_rows.empty(); }
     // with a layer split, the later stages' own images, one per stage, in stage order
     std::vector<SavedConversation> stage_images;
 
@@ -188,7 +198,8 @@ struct SavedConversation {
 
     size_t bytes() const {
         size_t n = live.bytes() + checkpoints.capacity() * sizeof(ConversationCheckpoint) +
-                   kv.capacity() * sizeof(ConversationKv);
+                   kv.capacity() * sizeof(ConversationKv) +
+                   pause_ids.capacity() * sizeof(int32_t) + pause_rows.capacity() * sizeof(float);   // P125j
         for (const auto& s : stage_images) n += s.bytes();
         for (const auto& c : checkpoints) n += c.bytes();
         for (const auto& k : kv) n += k.bytes();
