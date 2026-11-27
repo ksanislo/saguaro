@@ -178,6 +178,10 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(vmm_grow_test src/core/vmm_grow_test.cpp)
   target_include_directories(vmm_grow_test PRIVATE include)
   add_test(NAME vmm_grow_test COMMAND vmm_grow_test)
+  # P124e (round 8): the staging size and the read's backing order on an elastic conversation (header-only, CPU)
+  add_executable(read_backing_test src/core/read_backing_test.cpp)
+  target_include_directories(read_backing_test PRIVATE include)
+  add_test(NAME read_backing_test COMMAND read_backing_test)
   # ... carried out on a real conversation cache and session folder
   add_executable(park_release_test src/core/park_release_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
                  src/core/conversation_file.cpp)
