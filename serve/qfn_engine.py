@@ -175,10 +175,12 @@ VRAM_SHORT = ("no VRAM is left for the context of this conversation (the engine 
               "all it can first): fewer long conversations at once, or a shorter one")
 def engine_refusal(message: str) -> ValueError:
     """The engine's ERR / BRE text as the exception the request ends with: no RAM / no VRAM is the server's (503), not
-    the request's.  P124e round 6: a VRAM refusal says "no VRAM is left" and ends as no-VRAM, never as no-RAM."""
+    the request's.  P124e round 6: a VRAM refusal says "no VRAM is left" and ends as no-VRAM, never as no-RAM.
+    P124e round 7: so does "no VRAM for the YaRN RoPE rows" / "no VRAM for its YaRN RoPE rows" (the level switch) -
+    it is the same card, the same retry-when-the-cache-settles remedy."""
     if message.startswith("no RAM is left"):
         return EngineOutOfRam(f"{RAM_SHORT} - {message}")
-    if message.startswith("no VRAM is left"):
+    if message.startswith("no VRAM is left") or message.startswith("no VRAM for"):
         return EngineOutOfVram(f"{VRAM_SHORT} - {message}")
     return ValueError(message)
 

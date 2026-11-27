@@ -16,6 +16,14 @@ class RefusalWording(unittest.TestCase):
         self.assertIn("no VRAM is left", str(e))
         self.assertNotIn("no RAM is left", str(e))
 
+    def test_yarn_rows_refusal_is_no_vram_too(self):
+        # P124e round 7 (manager card): the YaRN switch's ERR is a VRAM refusal like every other grow's.
+        for msg in ("no VRAM for the YaRN RoPE rows", "no VRAM for its YaRN RoPE rows"):
+            e = engine_refusal(msg)
+            self.assertIsInstance(e, EngineOutOfVram)
+            self.assertNotIsInstance(e, EngineOutOfRam)
+            self.assertNotIn("no RAM is left", str(e))
+
     def test_ram_refusal_unchanged(self):
         e = engine_refusal("no RAM is left to pin 300000 cells of context in slot 2")
         self.assertIsInstance(e, EngineOutOfRam)
