@@ -14099,7 +14099,17 @@ vs.d_skip_usage = gs.d_skip_usage;
             strata::core::qsa_slot_budget_chunks(eslot_dev(k), &fr, nullptr);
             const int64_t spare = std::max<int64_t>(fr - slots_low_water(k), 0);
             if (spare < n && may_give && give_on && gv[k].lo > give_floor) give(k, n - spare);
-            return strata::core::qsa_slot_budget_release(eslot_dev(k), give_on ? n : std::min(n, spare));
+            const int64_t freed = strata::core::qsa_slot_budget_release(eslot_dev(k), give_on ? n : std::min(n, spare));
+            // P124e round 9 (manager card): a grow that retries right after this relief must find the released
+            // chunks back in the driver's free pool.  Physical memory a chunk release lets go of is reclaimed
+            // when the card's work has drained, so a create issued in the same breath can still read the card
+            // as full (run 2: the cache was "asked to give 70 MiB and gave 70 MiB" and hipMemCreate failed
+            // with 0.13 of 15.92 GiB free).  The sync drains that reclamation before the grow's retry.
+            if (freed > 0) {
+                const strata::core::OnDevice on(eslot_dev(k));
+                strata::core::device_sync();
+            }
+            return freed;
         };
         // SAGUARO_VRAM_FLOOR_MIB (default 160 with --batch; 0: off): the VRAM a card keeps free for what is allocated
         // outside the expert cache and the slot budget (the solo windows' graphs, the drafter's prompt records, cuBLAS

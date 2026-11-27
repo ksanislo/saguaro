@@ -6,9 +6,12 @@
 // The order: the chunks a grow needs are TAKEN from the driver and HELD before any mapping is tried.  Probing
 // one chunk at a time (make, free, make, ...) proved only that ONE chunk fits at a time: with the card nearly
 // full it promised GiBs it did not have, never asked the card's relief (the expert cache giving way, coldest
-// first) for room, and the map then failed mid-run.  Now the first refusal asks the relief ONCE for the whole
+// first) for room, and the map then failed mid-run.  Now the first refusal asks the relief for the whole
 // remaining shortfall - so the cache has given way BEFORE the mapping is tried - and the map only starts with
-// every chunk in hand.  A conversation that truly cannot fit fails before the map, with its room said out.
+// every chunk in hand.  Round 9 (manager card): a card that gave 70 MiB and still refused, with ~7 GiB of
+// experts left on it, had more to give - so when the retry still fails while the relief keeps handing back
+// bytes, the grow ASKS AGAIN, until the ask fits or the relief answers 0 (its cache at the floor).  A
+// conversation that truly cannot fit fails before the map, with its room said out.
 //
 // The wording: a driver-API refusal leaves cudaGetLastError() clean, so the old failure line read "no error"
 // and the caller answered a VRAM shortage with the RAM message.  vmm_grow_failure_text() says what the driver
@@ -34,11 +37,19 @@ struct VmmRoomStat {
     uint64_t relief_got = 0;   // bytes the relief handed back (its given chunks), 0 when it gave nothing
 };
 
-/// Take `need` chunks of `gran` bytes BEFORE any mapping, holding every one in `got`.  The first refusal asks
-/// the relief once (when `may_relief`) for the whole remaining shortfall - `give_way(bytes)` answers the bytes
-/// it handed back - and retries; a second refusal does not pester it.  false: the room never arrived; `got`
-/// holds the chunks made anyway (the caller frees them) and `st` says what was asked and given, for
-/// vmm_grow_failure_text().  `make()` must return 0 when the driver has nothing (that is the signal).
+/// The most a grow's relief may ask the same card in one room-taking: what the cache frees between two tries is
+/// what the retry costs, and a relief that hands back bytes a make() can never use stops on this count, not
+/// before.  (Round 9, manager card: the refusal that ended the 546145-token request asked the cache ONCE, took
+/// the 70 MiB it gave and gave up with ~7 GiB of experts still on the card.)
+inline constexpr int kVmmReliefRounds = 24;
+
+/// Take `need` chunks of `gran` bytes BEFORE any mapping, holding every one in `got`.  A refusal asks the relief
+/// (when `may_relief`) for the whole remaining shortfall - `give_way(bytes)` answers the bytes it handed back -
+/// and retries; when the retry STILL fails and the relief gave something, it is ASKED AGAIN: the cache frees in
+/// stages (down to its floor), and a card that gave 70 MiB and refused has more to give.  Only a relief that
+/// answers 0 - nothing left to free, the cache at its floor - or `kVmmReliefRounds` rounds stop it.  false: the
+/// room never arrived; `got` holds the chunks made anyway (the caller frees them) and `st` says what was asked
+/// and given IN TOTAL, for vmm_grow_failure_text().  `make()` must return 0 when the driver has nothing.
 template <class Make, class GiveWay>
 inline bool vmm_grow_room(int64_t need, uint64_t gran, Make make, GiveWay give_way, bool may_relief,
                           std::vector<GrowChunk>& got, VmmRoomStat& st) {
@@ -47,9 +58,12 @@ inline bool vmm_grow_room(int64_t need, uint64_t gran, Make make, GiveWay give_w
                                                 //  asked for nothing when a pool had covered part of the need)
     for (int64_t i = 0; i < need; ++i) {
         GrowChunk h = make();
-        if (h == 0 && may_relief && st.relief_ask == 0) {   // (once: ask for EVERYTHING still missing, not a chunk)
-            st.relief_ask = (uint64_t) (need - i) * gran;   // (i = chunks this call made: the shortfall, whole)
-            st.relief_got = give_way(st.relief_ask);
+        for (int round = 0; h == 0 && may_relief && round < kVmmReliefRounds; ++round) {
+            const uint64_t ask = (uint64_t) (need - i) * gran;   // (i = chunks this call made: the shortfall, whole)
+            const uint64_t gave = give_way(ask);
+            st.relief_ask += ask;
+            st.relief_got += gave;
+            if (gave == 0) break;   // (the cache is at its floor and its budget has no spare: asking again gets 0)
             h = make();
         }
         if (h == 0) return false;
@@ -63,8 +77,8 @@ inline bool vmm_grow_room(int64_t need, uint64_t gran, Make make, GiveWay give_w
 /// RoPE table and the YaRN rows - the two context arrays the budget had been the ONLY source of, so a card whose
 /// budget ran dry failed the grow without ever asking the expert cache to give way).  `budget(want, got)` appends
 /// what the pool holds (up to `want`) and returns how many it took; the SHORTFALL then runs exactly
-/// vmm_grow_room's order: hold every chunk, the first refusal asks the relief once for the whole shortfall, and
-/// the map starts after the cache has given way.  false: the room never arrived - `got` holds the pool's chunks
+/// vmm_grow_room's order: hold every chunk, a refusal asks the relief for the whole shortfall (and again until
+/// the cache is at its floor), and the map starts after the cache has given way.  false: the room never arrived
 /// at its front (`*from_pool` says how many, the caller gives those back to the pool and frees the rest).
 template <class Budget, class Make, class GiveWay>
 inline bool vmm_grow_room_pooled(int64_t need, uint64_t gran, Budget budget, Make make, GiveWay give_way,

@@ -1,8 +1,14 @@
 // P124e (round 6, manager card): the ORDER of a device-state grow (include/strata/core/vmm_grow.hpp) - the chunks
 // are taken and HELD before the mapping is tried, the first refusal asks the card's relief (the expert cache
-// giving way) once for the WHOLE remaining shortfall, and the map never starts without the room; and the WORDING
+// giving way) for the WHOLE remaining shortfall, and the map never starts without the room; and the WORDING
 // - the failure line names the driver's error, the bytes asked, the card's free memory and what the cache gave,
 // never "no error" and never a RAM message for a VRAM failure.  A fake allocator - no GPU, no allocation.
+//
+// P124e (round 9, manager card): the asking does not stop at the FIRST answer.  The 546145-token request failed
+// with ~7 GiB of experts still resident because the grow asked once, took the 70 MiB handed back and gave up -
+// the cache goes floor by SLOT, so one ask frees less than the shortfall.  The grow now keeps asking while the
+// relief hands back bytes (each ask for everything still missing) and refuses only when the relief answers 0 -
+// its cache at the floor - or the round cap runs out on bytes that never become chunks.
 //
 // P124e (round 7, manager card): the give-way order of EVERY growth allocation.  The context arrays that grow on
 // use take their room through one of the two helpers tested here, and both run the same order:
@@ -39,9 +45,11 @@ constexpr uint64_t G = 2ull << 20;   // the VMM chunk (2 MiB)
 struct Fake {
     int64_t free_ = 0, relief_ = 0, budget_ = 0;
     bool may_relief = true;
+    int64_t relief_step = 0;   // > 0: the cache frees at most this many chunks per ask (it goes floor by SLOT)
+    bool poisoned = false;     // make() answers 0 even with chunks to give (relief bytes that never become chunks)
     std::vector<std::string> events;
     GrowChunk make() {
-        if (free_ > 0) { --free_; events.push_back("make"); return (GrowChunk) (0x1000ull + events.size()); }
+        if (!poisoned && free_ > 0) { --free_; events.push_back("make"); return (GrowChunk) (0x1000ull + events.size()); }
         return 0;
     }
     int64_t budget(int64_t want, std::vector<GrowChunk>& out) {   // qsa_slot_budget_take's shape
@@ -52,7 +60,8 @@ struct Fake {
     }
     uint64_t give_way(uint64_t bytes) {   // the relief hands over whole chunks of what its cache can free
         events.push_back("give:" + std::to_string(bytes));
-        const uint64_t gave = std::min<uint64_t>((uint64_t) relief_ * G, bytes / G * G + (bytes % G != 0 ? G : 0));
+        const int64_t can = relief_step > 0 ? std::min(relief_, relief_step) : relief_;
+        const uint64_t gave = std::min<uint64_t>((uint64_t) can * G, bytes / G * G + (bytes % G != 0 ? G : 0));
         relief_ -= (int64_t) (gave / G);
         free_ += (int64_t) (gave / G);
         return gave;
@@ -118,6 +127,8 @@ int main() {
         check(f.count("make") == 5, "the chunks come one by one, from the driver");
     }
     // TRULY no room (the cache gave what it could): the grow fails BEFORE the map - no half-mapped state.
+    // Round 9: the shortfall outlasted what one ask frees, so the grow asked AGAIN (4G, then 2G still missing)
+    // and stopped only when the cache answered 0.
     {
         Fake f;
         f.free_ = 1;
@@ -126,9 +137,49 @@ int main() {
         VmmRoomStat st;
         check(!grow(f, 5, got, st), "a conversation that cannot fit fails");
         check(!f.ran("map:5") && f.index("map") < 0, "the map is NEVER tried without the room");
-        check(f.count("give") == 1 && st.relief_ask == 4 * G && st.relief_got == 2 * G,
-              "asked once for the whole shortfall, got what the cache had");
+        check(f.count("give") == 2 && st.relief_ask == 6 * G && st.relief_got == 2 * G,
+              "asked for the whole shortfall, asked again for what stayed missing, totals for the failure line");
         check((int64_t) got.size() == st.made, "the chunks made anyway are the caller's to free");
+    }
+    // ROUND 9 (manager card): the cache frees IN STAGES (a slot at a time, down to its floor).  Run 2's card
+    // gave 48-72 MiB a round with ~7 GiB still resident - one ask cannot cover a 70 MiB shortfall, so the
+    // grow keeps asking while bytes keep coming, and the ask FITS.
+    {
+        Fake f;
+        f.relief_ = 4;
+        f.relief_step = 1;
+        std::vector<GrowChunk> got;
+        VmmRoomStat st;
+        check(grow(f, 4, got, st), "the relief that frees in stages is asked until the ask fits");
+        check(got.size() == 4 && st.made == 4 && f.ran("map:4"), "every chunk is held when the map starts");
+        check(f.count("give") == 4, "one ask per chunk the cache freed: four asks for four chunks");
+        check(st.relief_ask == 10 * G && st.relief_got == 4 * G,
+              "each ask names the WHOLE shortfall still missing (4+3+2+1); the totals are the failure line's");
+    }
+    // the stages run dry mid-grow: the ask answered 0 IS the floor - asked once more, then the grow refuses,
+    // and it never pesters a floor twice.
+    {
+        Fake f;
+        f.relief_ = 2;
+        f.relief_step = 1;
+        std::vector<GrowChunk> got;
+        VmmRoomStat st;
+        check(!grow(f, 4, got, st), "a cache that runs dry mid-grow still fails");
+        check(f.count("give") == 3, "two gives and ONE ask answered 0: the floor is asked once, then it stops");
+        check(st.relief_ask == 9 * G && st.relief_got == 2 * G, "the totals say what was asked and freed");
+        check(f.index("map") < 0, "and the map is never tried");
+    }
+    // bytes the driver never hands out again (a relief that frees what make() cannot use): the asking stops at
+    // the round cap, not on hope.
+    {
+        Fake f;
+        f.free_ = 100;
+        f.relief_ = 100;
+        f.poisoned = true;
+        std::vector<GrowChunk> got;
+        VmmRoomStat st;
+        check(!grow(f, 2, got, st), "relief bytes that never become chunks cannot spin a grow forever");
+        check(f.count("give") == kVmmReliefRounds, "the asking stops at kVmmReliefRounds");
     }
     // may_relief = false (the load's start step: no relief installed yet): a refusal fails without asking.
     {
