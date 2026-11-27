@@ -6876,7 +6876,10 @@ int main(int argc, char** argv) {
         // this floor, unlike #496's, does not step back for `--vram-reserve-mib` below it.  Its own knob
         // (re-review M1): SAGUARO_VRAM_RESERVE_FLOOR=0 skips the floor and keeps the reserve as it was given
         // (or the default), for an operator who stays on auto sizing but measured a smaller reserve to fit.
-        // The cache size changes no output bit.
+        // What it promises is what the CACHE is sized against here: on a card too full for even the smallest
+        // working cache at the floored reserve, #496's lowering below may still take the reserve toward
+        // kSmallReserveMib - said in its own line, never silently (re-review L1).  The cache size changes no
+        // output bit.
         {
             const char* floor_env = std::getenv("SAGUARO_VRAM_RESERVE_FLOOR");
             const bool floor_on = floor_env == nullptr || std::string(floor_env) != "0";
@@ -6908,7 +6911,8 @@ int main(int argc, char** argv) {
                                      "card, not the %d MiB %s: the window captures and the drafter's heads take about half "
                                      "of it after the cache, and below the 512 MiB paging line the driver pages GPU memory "
                                      "to a full host RAM and windows never finish (#2065, P124x); --expert-cache N sizes "
-                                     "the cache by hand, SAGUARO_VRAM_RESERVE_FLOOR=0 keeps the reserve as asked\n",
+                                     "the cache by hand, SAGUARO_VRAM_RESERVE_FLOOR=0 keeps the reserve as asked, and a "
+                                     "card too full for any working cache at it may still see the #496 line lower it\n",
                              floored, asked, o.vram_reserve_given ? "it was asked for" : "it is the default");
                 o.vram_reserve_mib = floored;
             }

@@ -171,8 +171,13 @@ sizes for that shape already. Unlike #496's lowering, this floor does not step b
 `--vram-reserve-mib 700`-style given figures below it - the given 700 is what ended the engine - and it
 applies inside `--expert-cache auto` only: `--expert-cache N` still sizes the cache by hand, and
 `SAGUARO_VRAM_RESERVE_FLOOR=0` is the floor's own knob for an operator who stays on auto sizing but
-measured a smaller reserve to fit (re-review M1 - inside auto the floor had no escape before it). The
-cache size changes no output bit.
+measured a smaller reserve to fit (re-review M1 - inside auto the floor had no escape before it). What
+the floor sizes is the **cache**: on a card too full for even the smallest working cache at the floored
+reserve, #496's lowering can still take the reserve back toward its 300 MiB floor - its own line says so
+when it runs, so the start-up note never undoes itself silently (re-review L1; the alternative - exempt
+15 GiB+ cards from the lowering - was declined as an untestable behaviour change that would leave the
+prompt path allocating its own buffers over the reserve on exactly such over-full cards). The cache size
+changes no output bit.
 
 ### 2c. Swap use voids the parks' own-RAM credit (release before the storm deepens) - c54ba610d, 3b4cae905
 
