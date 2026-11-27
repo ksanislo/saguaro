@@ -112,11 +112,13 @@ compares piecewise against whole reads bit for bit.
   on this box): a test copy of the card's DeepSeek config on :8092 with its own session/slot dirs, its own engine
   log and no api key; a fresh ~30K control read sets the cut timing; a second fresh ~30K read is cut mid-way by a
   client disconnect (the server drains to the engine's "stopped while reading" line); the same request asked again
-   must show the engine's own `prompt N tokens = K reused` with 0 < K < N on its DONE → PASS (a cut that fell before
-   the first keep point keeps nothing - honest reused=0 - and is retried at the later cuts of FRACS, default
-   .50 .65 .80 of the control read).
-* Commits: steps 2+3 (keep + READY), a step-2 wording nit, step 4 (tests + card script), and this REPORT
-  (force-added: `REPORT-*.md` is ignored in this worktree, as P124h did). Step 1 changed no files.
+   must show the engine's own `prompt N tokens = K reused` on its stderr request-summary line (`src/ds4/ds4_main.cpp`
+   `:2076`, `:2404`; the same `from` rides the DONE's reused field, on stdout into the server log) with 0 < K < N →
+   PASS (a cut that fell before the first keep point keeps nothing - honest reused=0 - and is retried at the later
+   cuts of FRACS, default .50 .65 .80 of the control read).
+ * Commits: steps 2+3 (keep + READY), a step-2 wording nit, step 4 (tests + card script), and this REPORT (added
+   plainly - `.gitignore` has no `REPORT-*` pattern; the force-add was for the card script under the ignored
+   `scratch/`, and `REVIEW-RESULT.md` is what the main checkout's `.git/info/exclude` hides). Step 1 changed no files.
 
 ## 5. Open questions
 
