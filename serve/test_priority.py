@@ -271,11 +271,11 @@ class Ik2Read(ReadEngine):
 
 
 class Ik2LostRead(Ik2Read):
-    """The card test's engine, as measured (REVIEW-RESULT / scratch/card-r1-engine.txt): a cut read rolls back to
-    the latest snapshot the conversation kept, and a FIRST prompt has none before its last user message's start
-    - which for a card-shaped prompt sits below the engine's arming bar (ik2_main.cu:10807) - so the stopped read
-    resets to 0 and the resume reads the prompt again from 0. Its PP line still reports its reuse: 0. (The keep
-    that fixes the engine is Ik2Read's shape.)"""
+    """The card test's engine, as measured by the card host's lost_read run (the run behind FIX-REPORT.md's
+    fix 1): a cut read rolls back to the latest snapshot the conversation kept, and a FIRST prompt has none
+    before its last user message's start - which for a card-shaped prompt sits below the engine's arming bar
+    (ik2_main.cu:10807) - so the stopped read resets to 0 and the resume reads the prompt again from 0. Its PP
+    line still reports its reuse: 0. (The keep that fixes the engine is Ik2Read's shape.)"""
     keeps_cut = False
 
 
@@ -894,7 +894,7 @@ class ReadsPreempt(Env):
         self.assertEqual(set(reads), {1})                  # every chunk, once: the pause threw nothing away
 
     def test_an_ik2_lost_read_reports_zero_never_a_claim(self):
-        # REVIEW-RESULT fix 3: the server logs "continues" only when the engine reports kept tokens. The card's
+        # FIX-REPORT fix 3: the server logs "continues" only when the engine reports kept tokens. The card's
         # engine shape (Ik2LostRead): the resume re-reads from 0 and its PP reuse figure is 0 - the line must
         # carry that 0 and never claim the read continues (the numberless wording is for engines that report no
         # figure at all; a reported 0 is a lost read, said as one - the P124b rule)

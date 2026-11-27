@@ -105,8 +105,9 @@ hy4 one): an engine whose INFO line says `engine_kind=ik2` is now given
 existing `Service._sliced` read preemption (serve/server.py:5844-5858) cuts a LOW ik2 prompt
 read with a plain STOP tick at a `PP` line whenever `step_aside` says so, and the resumed call
 re-sends the same prompt - the engine re-finds its resume point at its kept snapshot itself.
-No engine change (this box has no card; the engine is used exactly as it is, "with what the
-engine has").
+Step 2 changed no engine (this box has no card; it used the engine exactly as it is, "with what
+the engine has"); the review fix did - section 2's keep is an engine change, built and card-tested
+on the card host.
 
 What this means per mode, with what the engine really keeps:
 
