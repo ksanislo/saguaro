@@ -4547,10 +4547,11 @@ class Service:
 
     def _read_counted(self, stat) -> int:
         """The prompt tokens this request's reads have counted (closed intervals plus an open one's steps) - what
-        the Monitor's figures and the tests read back."""
+        the Monitor's figures and the tests read back.  int(): the -> int annotation stands even if a booking
+        ever hands a fractional step (the RHB share at _note_hb is already booked whole)."""
         n = sum(r[3] or 0 for r in self.reads if r[0] is stat and r[2] is not None)
         r = getattr(stat, "read_cur", None)
-        return n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0)
+        return int(n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0))
 
     def _read_start(self, stat):
         """(a driver's hook) the engine took this request - a QFN admission after its wait for a slot says so too:
