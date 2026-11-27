@@ -142,8 +142,12 @@ uint64_t session_host_trim(SessionState& s, int64_t cells);
 /// The solo session's VRAM pools and pooled keys (qsa_set_vram_elastic_main) backed for `cells` from its device's
 /// slot budget (false: the budget is short - the expert cache gives, then again), and the chunks that needs.  Never
 /// trimmed: the VRAM ring's residency map may name any of its slots.
-bool session_vram_fit(SessionState& s, int64_t cells);
-int64_t session_vram_need(const SessionState& s, int64_t cells);
+/// P124e (round 7, manager card): the conversation's RoPE rows (plain and YaRN) are backed for `rope_cells`
+/// instead - the positions its conversation has REACHED (worst-case fits must not pin the whole table at a
+/// YaRN switch; the rows past the positions in use arrive chunk by chunk from the fits as it grows).
+/// `rope_cells` <= 0: the same as `cells`.
+bool session_vram_fit(SessionState& s, int64_t cells, int64_t rope_cells = -1);
+int64_t session_vram_need(const SessionState& s, int64_t cells, int64_t rope_cells = -1);
 /// Before the memory `session_init` carved is freed: forgets what points into it from outside the session (the
 /// rope kernels' registered angle table, #280), so a later session never rotates by freed memory.
 void session_release(SessionState& s);

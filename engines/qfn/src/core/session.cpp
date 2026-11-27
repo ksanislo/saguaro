@@ -294,17 +294,25 @@ std::vector<const QsaState*> session_states(const SessionState& s) {
 }
 }  // namespace
 
-bool session_vram_fit(SessionState& s, int64_t cells) {
+bool session_vram_fit(SessionState& s, int64_t cells, int64_t rope_cells) {
     const std::vector<const QsaState*> sts = session_states(s);
     cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
-    return (sts.empty() || (qsa_rope_grow(*sts[0], cells) && (!s.rope_level || qsa_rope_yarn_fit(*sts[0], cells)))) &&
+    // P124e (round 7, manager card): the RoPE rows are sized by the positions in use, not by this fit's
+    // worst-case end: a 546K request whose max_new runs to the end of a 1M context must not back the whole
+    // table at the YaRN switch (0.75 GiB at load's accounting) - the rows past `rope_cells` arrive as the
+    // conversation reaches them, chunk by chunk, from the fits that track its position.
+    rope_cells = rope_cells <= 0 ? cells : std::min(std::max(rope_cells, (int64_t) 1), cells);
+    return (sts.empty() || (qsa_rope_grow(*sts[0], rope_cells) &&
+                            (!s.rope_level || qsa_rope_yarn_fit(*sts[0], rope_cells)))) &&
            qsa_slots_grow(sts, cells);
 }
 
-int64_t session_vram_need(const SessionState& s, int64_t cells) {
+int64_t session_vram_need(const SessionState& s, int64_t cells, int64_t rope_cells) {
     const std::vector<const QsaState*> sts = session_states(s);
     cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
-    return (sts.empty() ? 0 : qsa_rope_need(*sts[0], cells) + (s.rope_level ? qsa_rope_yarn_need(*sts[0], cells) : 0)) +
+    rope_cells = rope_cells <= 0 ? cells : std::min(std::max(rope_cells, (int64_t) 1), cells);
+    return (sts.empty() ? 0
+                        : qsa_rope_need(*sts[0], rope_cells) + (s.rope_level ? qsa_rope_yarn_need(*sts[0], rope_cells) : 0)) +
            qsa_slots_need(sts, cells);
 }
 

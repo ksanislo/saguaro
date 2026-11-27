@@ -6296,7 +6296,7 @@ int main(int argc, char** argv) {
     }
     // SAGUARO_KV_VRAM_ELASTIC: the solo session's VRAM pools and pooled keys for `cells` (every stage), the expert cache
     // giving the budget room when it is short; set where the elastic slots' give is (null: nothing to grow)
-    std::function<bool(int64_t)> solo_vram_fit;
+    std::function<bool(int64_t, int64_t)> solo_vram_fit;   // (cells, rope cells - the RoPE rows trail the positions in use)
     // no RAM left to pin a conversation's context: one idle conversation parked (its pinned copy given back), else the
     // RAM conversation cache's oldest dropped.  0: room was made, try again; 1: nothing left to give; 2: not now (a read
     // or windows in flight).  `keep`: the slot asking (-1: the solo session).  Set with the batch slots
@@ -14056,16 +14056,16 @@ vs.d_skip_usage = gs.d_skip_usage;
         // SAGUARO_KV_VRAM_ELASTIC: the solo session on stage k grows from that card's slot budget as the slots do (a solo
         // request runs with the slots' windows quiet, so the cache may give at once)
         if (eslots_on)
-            solo_vram_fit = [&](int64_t cells) -> bool {
+            solo_vram_fit = [&](int64_t cells, int64_t rope_cells) -> bool {
                 for (size_t k = 0; k < bslot_ss.size(); ++k) {
                     strata::core::SessionState& u = k == 0 ? ss : stages[k - 1]->ss;
                     const strata::core::OnDevice on_k(eslot_dev(k));
-                    if (strata::core::session_vram_fit(u, cells)) continue;
+                    if (strata::core::session_vram_fit(u, cells, rope_cells)) continue;
                     if (!give_on || gv[k].lo <= give_floor) return false;
                     int64_t fr = 0;
                     strata::core::qsa_slot_budget_chunks(eslot_dev(k), &fr, nullptr);
-                    give(k, std::max<int64_t>(strata::core::session_vram_need(u, cells) - fr, 16));
-                    if (!strata::core::session_vram_fit(u, cells)) return false;
+                    give(k, std::max<int64_t>(strata::core::session_vram_need(u, cells, rope_cells) - fr, 16));
+                    if (!strata::core::session_vram_fit(u, cells, rope_cells)) return false;
                 }
                 return true;
             };
@@ -19244,7 +19244,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                     if (stage_invalid) { refuse(err); continue; }
                     if (!solo_host_fit_r((int64_t) image.live.ids.size() + 256) ||   // SAGUARO_KV_HOST_ELASTIC: its cells pinned
-                        (solo_vram_fit && !solo_vram_fit((int64_t) image.live.ids.size() + 256))) {
+                        (solo_vram_fit && !solo_vram_fit((int64_t) image.live.ids.size() + 256, -1))) {
                         refuse("no memory (RAM or VRAM) is left for the saved conversation's context", strata::core::SessionError::memory);
                         continue;
                     }
@@ -19534,7 +19534,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::printf("ERR no RAM is left to pin this request's context (%lld tokens)\n", (long long) solo_pin);
                 continue;
             }
-            if (solo_vram_fit && !solo_vram_fit(std::min<int64_t>(o.max_context, n + max_new + 64))) {
+            // P124e (round 7, manager card): the K/V state is backed for the whole request (the plan: grow ahead of
+            // need, once, at the start of the read); the RoPE rows are NOT - they are backed for the positions in
+            // use plus the reply's ahead-step (the same rule and the same kSoloPinAhead the host copies use,
+            // `solo_pin`), so a max_new that runs to the end of a 1M context does not pin the whole RoPE table.
+            if (solo_vram_fit && !solo_vram_fit(std::min<int64_t>(o.max_context, n + max_new + 64), solo_pin)) {
                 std::printf("ERR no VRAM is left for this request's context (%lld tokens)\n", (long long) (n + max_new));
                 continue;
             }
@@ -20037,7 +20041,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 }
             }
             if (incoming && (!solo_host_fit_r((int64_t) incoming->live.ids.size() + 256) ||   // SAGUARO_KV_HOST_ELASTIC
-                             (solo_vram_fit && !solo_vram_fit((int64_t) incoming->live.ids.size() + 256)))) {
+                             (solo_vram_fit && !solo_vram_fit((int64_t) incoming->live.ids.size() + 256, -1)))) {
                 std::printf("ERR no memory (RAM or VRAM) is left for the parked conversation's context\n");
                 return 1;
             }
@@ -21205,10 +21209,15 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::fprintf(stderr, "saguaro serve: pin=%lld: the cache has no checkpoint there to pin (it resumed from "
                                  "%lld)\n", (long long) req_pin, (long long) read_from);
             }
-            // SAGUARO_YARN_ELASTIC: the YaRN rows for every cell this request can reach (as the plain ones were backed)
-            auto solo_yarn_rows = [&]() -> bool {
-                const int64_t cells = std::min<int64_t>(o.max_context, n + max_new + 64);
-                if (solo_vram_fit) return solo_vram_fit(cells);
+            // SAGUARO_YARN_ELASTIC: the YaRN rows for the positions this conversation has REACHED (`at`), plus the
+            // reply's ahead-step - P124e (round 7, manager card): NOT every cell the request can reach.  Backing
+            // 0 + max_new rows at the switch pinned the whole table (n + max_new + 64 is --max-context itself when
+            // max_new runs to the end of the context); the rows past `at` arrive chunk by chunk from the fits that
+            // track the conversation (the decode's 32K-ahead step, slot_fit's grow target) exactly as the host
+            // copies' do, and they take their room from the expert cache before they map (round 7 fix 1).
+            auto solo_yarn_rows = [&](int64_t at) -> bool {
+                const int64_t cells = std::min<int64_t>(o.max_context, std::min<int64_t>(n + max_new, at + kSoloPinAhead) + 64);
+                if (solo_vram_fit) return solo_vram_fit(cells, cells);
                 bool ok = true;
                 for (size_t k = 0; k <= stages.size(); ++k) {
                     const strata::core::SessionState& u = k == 0 ? ss : stages[k - 1]->ss;
@@ -21226,7 +21235,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     return false;
                 conversations.limit_reuse(0);
                 turn_main.reset();
-                if (!solo_yarn_rows()) { e = "no VRAM for the YaRN RoPE rows"; return false; }
+                if (!solo_yarn_rows(p)) { e = "no VRAM for the YaRN RoPE rows"; return false; }   // (p: the cells it has; the window lands inside the ahead-step)
                 return true;
             };
             if (yarn_rows) {   // SAGUARO_YARN_ELASTIC: the level this request reads on at
@@ -21251,7 +21260,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     for (auto* u : sx) u->rope_level = want ? 1 : 0;
                 }
                 if (ss.rope_level == 0) yarn_trim();
-                if (ss.rope_level == 1 && !solo_yarn_rows()) {
+                if (ss.rope_level == 1 && !solo_yarn_rows(n)) {   // (n: the prompt this read reaches)
                     std::printf("ERR no VRAM for the YaRN RoPE rows\n");
                     return 1;
                 }
