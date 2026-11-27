@@ -99,9 +99,17 @@ public:
     /// guarded, so this verifier refuses every later window either way.  Without it (a window that timed out on
     /// its own 20 s host wait, PLAN-p124x): a stream that DRAINED holds no spin kernel any more - the failed
     /// window's request still ends with the timeout error, but the handshake words go back to their no-window
-    /// values and the verifier takes the next window; a stream that did not drain poisons it, as before.
-    /// True when the streams finished.
-    bool release_gpu_waits(int timeout_ms, bool poison = true);
+    /// values and the verifier takes the next window; a stream that did not drain poisons it, as before, and a
+    /// split's verifier (a next stage, an incoming hand-off word) stays poisoned on a drained re-arm too.
+    /// True when the streams finished; `re_armed`, when given, says so only when the verifier will take another
+    /// window (drained, not poisoned, not a split) - P124x review F3: the engine's note must not let the server
+    /// read a still-closed verifier as recovered.
+    bool release_gpu_waits(int timeout_ms, bool poison = true, bool* re_armed = nullptr);
+
+    /// The #267 note after a window's OWN host wait timed out (P124x F3): release with the re-arm rule and word
+    /// it three ways - did not drain (fatal), drained and re-armed (the request ends, the engine goes on),
+    /// drained but still closed (a split: fatal, one failed request earlier than the stale-verifier shape).
+    std::string timed_out_note();
 
     /// `max_t` <= kVerifyMaxT.  `head` may be null (the canonical head is then run per token).
     bool init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
