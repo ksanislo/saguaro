@@ -86,7 +86,10 @@ needs: [docs/MODELS.md](docs/MODELS.md#how-the-quants-are-named).
 A quant trades size for how close it stays to the original model, and each one is measured by whoever made it:
 
 - **Qwen3.8-Flash-Next:** unsloth's UD-Q4_K_XL and Q8_0, the GSQ-RCO and Coder quants and CYBER-FROST are the community's own; their
-  model cards say how they were made. UD-Q4_K_XL is the default and Q8_0 the closest to the original.
+  model cards say how they were made. UD-Q4_K_XL is the default and Q8_0 the closest to the original. A ~250 GB
+  full-precision reference cannot run on these boxes, so each quant's number here is a task score on a fixed question
+  set: run [tools/quality_score.py](tools/quality_score.py) against each quant's server with the same set (your own
+  file - no copyrighted question text ships) and the scores come out with a 95 % confidence interval.
 - **GLM, DeepSeek and MiniMax Maya quants** are Project Maya's: their numbers are on each model's
   [card](https://huggingface.co/peasantsmith), the GLM ones in [MAYA-S](bench/results/MAYA-S.md),
   [MAYA-S24](bench/results/MAYA-S24.md), [MAYA-M](bench/results/MAYA-M.md) and [MAYA-L](bench/results/MAYA-L.md).
