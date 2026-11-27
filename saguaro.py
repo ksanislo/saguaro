@@ -805,10 +805,8 @@ def family_target(family: str) -> str:
 
 
 def qfn_exe() -> Path:
-    """saguaro-qfn in this backend's build folder (the top project builds engines/qfn as <build>/qfn); on a Mac
-    engines/qfn/metal's own project builds Strata's Metal engine there as `strata`."""
-    if BUILD.name == "build-metal":
-        return BUILD / "qfn" / "strata"
+    """saguaro-qfn in this backend's build folder (the top project builds engines/qfn as <build>/qfn; on a Mac
+    engines/qfn/metal's own project builds it there under the same name)."""
     return BUILD / "qfn" / ("saguaro-qfn.exe" if WIN else "saguaro-qfn")
 GLM_ARCHS = ("glm5-next", "glm5next")             # llama.cpp's spelling and unsloth's
 # the expert profile setup passes to every GLM config (tools/make_profile.py --glm):
@@ -2789,7 +2787,7 @@ def metal_cpp_step() -> Path:
 
 def compile_engine_metal_qfn(llama: Path, src: str, soft=False) -> dict | None:
     """Qwen3.8-Flash-Next's Metal engine: engines/qfn/metal's own CMake project (Strata's Metal kernels over QFN's
-    host code) in build-metal/qfn, the binary `strata`."""
+    host code) in build-metal/qfn, the program saguaro-qfn (its CMake target keeps Strata's name, strata)."""
     cmake = pick_cmake()
     if cmake is None:
         fail("CMake 3.24 or newer is needed", f"pip installs one into .venv: run {ME} --setup")
@@ -8753,7 +8751,7 @@ def set_up_qfn_metal(a, prev: dict, pc: dict) -> Path | None:
     m = qfn_entry(quant)
     stream = qfn_metal_streams(quant, ram)
     ok(f"model: {Q.shown('qfn', quant, m['download_gb'])} - Qwen's Qwen3.8-Flash-Next (Qwen Community License 1.0: "
-       "LICENSE.qwen-community-1.0) on Strata's Metal engine")
+       "LICENSE.qwen-community-1.0) on saguaro-qfn (Metal)")
     if stream:
         ok(f"the GPU's file ({QFN_METAL_GPU_FILE_GB[quant]:.0f} GB) and {QFN_METAL_OVERHEAD_GB:.0f} GB beside it do "
            f"not fit Metal's share of this Mac's {ram:.0f} GB: the experts stream from the SSD (the most-used stay in "
@@ -8792,8 +8790,9 @@ def set_up_qfn_metal(a, prev: dict, pc: dict) -> Path | None:
         shards = list(files)
     pack = work / "pack"
     if not ((pack / "native_experts.txt").exists() and (pack / "tokenizer" / "vocab.json").exists()):
-        S.run([sys.executable, str(ROOT / "engines" / "qfn" / "tools" / "iq_pack.py"), "--gguf", str(shards[0]),
-               "--out", str(pack), *(["--compat-bf16"] if quant.startswith("ud-") else [])])
+        run([sys.executable, str(ROOT / "engines" / "qfn" / "tools" / "iq_pack.py"), "--gguf", str(shards[0]),
+             "--out", str(pack), "--compat-bf16"],    # (as qfn_pack_step: the host's copies; the GPU reads the file)
+            env=dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py")))
     ok(f"model prepared: {pack}")
     if stream and ram < QFN_METAL_MTP_FROM_GB:
         out = shards[0].with_name(shards[0].name + ".experts")

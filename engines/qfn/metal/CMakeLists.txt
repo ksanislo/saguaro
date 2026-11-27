@@ -124,3 +124,5 @@ target_link_libraries(strata_metal_kernels PUBLIC strata_metal_host mtl_rt)
 
 add_executable(strata ${S}/program/generate.cpp)
 target_link_libraries(strata PRIVATE strata_metal_kernels strata_metal_host strata_metal_kernels)
+set_target_properties(strata PROPERTIES OUTPUT_NAME saguaro-qfn)   # Saguaro: the program's name, as the CUDA / HIP
+                                                                # build's (the target keeps Strata's)
