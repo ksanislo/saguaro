@@ -131,6 +131,58 @@ What this means per mode, with what the engine really keeps:
 Hy4 and MM3 are untouched (serve/server.py:1526-1530, :1560-1561 unchanged); no READY-word
 (`keepread`) claim was added to the engine.
 
-## 3-4. Tests and results
+## 3. Tests (serve/test_priority.py) and results
 
-*(appended as they land)*
+New fake ik2 driver `Ik2Read` (serve/test_priority.py) models saguaro-ik2 solo as the line
+driver sets it up (`READY ... stop`, no PAUSE, INFO `engine_kind=ik2`): a `PP` tick per chunk;
+a close (the driver's STOP) is seen only between chunk passes; the engine rolls the read back
+to the latest snapshot it kept (one every 2nd chunk here - the real engine's is the last user
+message's start), never below what the conversation already held; no reused figure over the
+pipe. New tests:
+
+- `ReadsPreempt.test_an_ik2_solo_read_steps_aside_for_a_normal_and_continues_at_its_snapshot`
+  - the low read pauses for a waiting NORMAL one, the normal answers first, the low answer
+  arrives whole; the resume starts at the snapshot (> 0, on a chunk boundary, not at 0),
+  the chunks the snapshot held were read exactly once, later ones at most twice; the pause
+  line names the prompt tokens, the continue line keeps its numberless wording.
+- `ReadsPreempt.test_a_high_request_goes_first_and_the_ik2_read_continues` - same race with a
+  HIGH request: its answer ends before the low read's, which continues from its snapshot.
+- `ReadsPreempt.test_an_ik2_read_cut_rolls_back_to_the_kept_snapshot` - the fake's engine
+  semantics without a race: cut after chunk 3 -> back to chunk 2's snapshot (not 0, nothing
+  half-read kept); the resume goes on from there; the snapshot's chunks read once, the dropped
+  chunk exactly twice.
+- `ReadsPreempt.test_an_ik2_request_that_never_waits_is_unchanged` - alone on an idle server:
+  one engine call, every chunk exactly once, no `priority:` line.
+- `ServicePreempts.test_a_low_ik2_answer_steps_aside_and_resumes_from_its_token` - the
+  between-tokens half (never gated on a flag, and what the card test mirrors): a low ik2
+  answer cuts at a token for a high one and resumes with prompt + written tokens.
+- `TheReadKeepDriver.test_the_ik2_driver_is_given_it_solo_but_not_parallel` replaces
+  `test_another_line_engine_is_not_given_it` (its old truth, audit 8.5, now lives in the
+  multi leg of the new test): the stub engine saying `engine_kind=ik2` gets
+  `keeps_stopped_read` on `READY ... stop` and does NOT on `READY ... stop multi=2`. An
+  unnamed, un-worded engine still gets nothing (`some-new-name`).
+
+Results (`/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_priority`):
+
+- before the change: 68 tests, 1 failure - only `test_another_line_engine_is_not_given_it`
+  (the ik2 solo leg), exactly the behavior the task changes.
+- after: **74 tests, OK** (93 s); the three race-carrying classes re-run 3x: 36 tests OK each
+  time. No ik2 driver's own test module exists (serve/test_inkling2_frontend.py is the chat
+  template's, not the driver's), so serve.test_priority is the whole run the plan names.
+- `py_compile serve/server.py` clean.
+
+## 4. Open questions / owed
+
+- The card test after (manager, mangonel inkling-pairs or mortar's Inkling config): a low
+  answer steps aside for a normal one and resumes with no re-read. Not run here (no card).
+- Whether --parallel Inkling reads should ever step aside needs an engine change (the
+  `STOP <rid>` reader path would have to keep the slot's kept prefix instead of
+  `slot_reset`, ik2_main.cu:10494-10499); out of scope, the driver deliberately does not cut
+  them.
+- The continue line for a resumed ik2 read stays numberless. The engine does print its
+  `cached` figure on PP lines, so a follow-up could surface it as the reused figure; left
+  alone (the P124b wording rule: never claim a figure the engine did not report as its
+  resume).
+- docs/SETTINGS.md's priority section still lists only QFN/GLM as the read-keeping engines
+  (it already skipped hy4/mm3/ds4 from P124i/P124j/P124u); left untouched per the plan, same
+  as those cards.
