@@ -357,7 +357,9 @@ public:
     int64_t paused_layer() const;
     int64_t paused_tokens() const;
     /// The paused chunk's index IN THE RUN that paused (its c0 / that run's chunk size - the figure the
-    /// server's "layer l of chunk c" line shows; -1 with no pause). 0 when the pause was not taken in a run.
+    /// server's "layer l of chunk c" line shows; -1 with no pause, and -1 for a pause a restore handed
+    /// back too: the run-relative label of the run that paused does not survive the park - the engine's
+    /// own DONE/keep line carries the label it captured while the pause was taken in a run).
     int64_t paused_chunk_index() const;
     /// The paused chunk's saved rows, moved out to park them with the conversation (P125j: a parked read
     /// keeps its in-flight chunk), given back on restore (`pos0`: the paused chunk's absolute first
