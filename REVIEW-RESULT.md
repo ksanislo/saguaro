@@ -1,18 +1,28 @@
-# MANAGER: FIX-FIRST round 11 (a) - the ROOT CAUSE only; (b) is done by the manager (db3373729)
-Round 10's slot guard named the crash on mortar (scratch/r10-guard-evidence.txt):
-  saguaro SLOT GUARD: gv CUDA0: moves a hotter expert into a slot: slot 2510 is inside the ACTIVE LOAN of
-  'CUDA0 prompt loan' (its buffers are laid out from slot 392 to 2510)
-(b) - DONE by the manager in db3373729: both give-ways (kvg ~8888, gv ~13928) take move targets only below the lowest
-active loan on that cache. Do NOT redo or revert it.
-(a) - YOUR TASK: why was an expert RECORDED in slot 2510 (host_res[i] == 2510) while that slot was inside the active
-loan? Laying a loan out is meant to take every resident inside it off host_res (generate.cpp ~16262-16268: the loop
-over the participant's layers, host_res[i] >= first -> p.lent, kNotResident). That matters beyond the crash: if
-host_res points an expert at a slot holding the read's buffers, decode/read could compute with GARBAGE weights for
-that expert (a silent quality bug, no crash). Find every path that writes host_res[i] = <slot> and check each against
-an active loan: adaptive swaps (apply_pending / swap landing - note the existing "a loan from slot %d met %lld adaptive
-swap(s) still pending ... into the loan's slots" line), prefetch (srcp->prefetch after a give), the refill after a
-read (refill_one), a loan grown or moved (first_now lowered) WITHOUT re-running the eviction loop, and the batch /
-solo / pipelined loan paths. FIX-REPORT: the exact writer (file:line) and the sequence that produced slot 2510.
-Fix it at the source (no expert may become resident in an active loan's slots; a loan that grows clears the newly
-lent slots first). Add a SAGUARO_DEBUG_SLOT_GUARD check at that writer too. Unit test where the code allows.
-Build ONLY QFN (tools/qfn/build.sh <new dir under scratch/>, QFN_GGML_DIR=/data/llm/strata-main/third_party/llama.cpp). No GPU runs.
+# MANAGER: FIX-FIRST round 12 (card, mortar, 2026-11-27 16:05-16:17 MST, commit db3373729) - FOUR steps, in order
+Where it stands: load + speed PASS (30K read 31.0 / 35.6 s at 262144 / 1048576); the 40K repro PASSES (needle found);
+the manager's db3373729 (a give's move never lands in an active loan) stopped the guard line ("0 hotter experts moved").
+The 546K read still crashed in iq_embed_rows - and serialised HIP (AMD_SERIALIZE_KERNEL=3, HIP_LAUNCH_BLOCKING=1,
+AMD_LOG_LEVEL=2) gave the REAL cause, not a memory corruption:
+  :1:program.cpp :622 : devProgram.load() failed ... HSA_STATUS_ERROR_OUT_OF_RESOURCES
+HIP loads a kernel's code object LAZILY at its first launch; iq_embed_rows first launches 546K into the read, when the
+card is full (a 2027-slot loan + the grown context) -> the load fails -> a null kernel -> the host SIGSEGV.
+With HIP_ENABLE_DEFERRED_LOADING=0 (eager) that is gone - but (a) eager costs ~0.7 GiB of VRAM (cache 2510 -> 2260
+slots) and (b) the read then STALLED: host idle 108 s on a GPU fence (dma_fence_default_wait, "the GPU rang 0"), 5.5 GiB
+RAM available, then the watchdog aborted (scratch/r11-eager-evidence.txt). Same class: the HIP runtime itself needs
+VRAM (code objects, kernel scratch/private segments allocated on demand) and the elastic give-way leaves it none.
+ALSO: this branch is missing ALL of dev (saguaro/qfn-first, 215 commits), incl. P124x's mortar memory rules (the
+VRAM reserve floor, give-back before swap). Every elastic card so far ran without them.
+Do, commit each:
+1. MERGE saguaro/qfn-first into this branch (a merge; resolve generate.cpp & co keeping both sides; P124x's reserve
+   rules must apply to every elastic growth path). FIX-REPORT: each conflict and the resolution. Run the QFN unit tests
+   both sides added (park_policy_test, kv_host_growth_test, vmm_grow_test, read_backing_test, the P124x tests).
+2. A RUNTIME RESERVE the elastic growth never takes (HIP and CUDA): enough for the runtime's own allocations (code
+   objects if lazy, kernel scratch); size it from what the card test shows, default a few hundred MiB, env override;
+   one stderr line at load naming it. Growth that would cut into it refuses cleanly (no-VRAM ERR), never hangs.
+3. Kernel loading: either load all kernels eagerly at engine start on HIP (set HIP_ENABLE_DEFERRED_LOADING=0 before
+   the runtime starts - and say what it costs in the load line), or keep lazy loading but warm every kernel the read /
+   decode use at load (one tiny launch each) - pick the cheaper in VRAM, say which and why in FIX-REPORT.
+4. (a) from the previous card, still open: why an expert was RECORDED in a slot inside an active loan (host_res ==
+   2510 inside 392..2510) - the writer, file:line; fix at the source. db3373729 stays.
+Build ONLY QFN (tools/qfn/build.sh <new dir under scratch/>, QFN_GGML_DIR=/data/llm/strata-main/third_party/llama.cpp). No GPU.
+Card after (manager): load/speed, 40K, 546K (needle found), guard on, no OUT_OF_RESOURCES / stall.
