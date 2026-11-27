@@ -27,8 +27,9 @@ fit, a HIGH one never.
   The driver flags: `can_pause` from READY's `pause` word, `keeps_stopped_read` from
   `pause` (not maya-metal, serve/server.py:1526), the INFO `engine_kind=` hy4 (:1560) and mm3
   (:1527), or the READY word `keepread` any engine may say itself (P124u, :1529).
-  The resumed read logs the engine's own reused figure when it reports one
-  (`engine.reused`, serve/server.py:5807-5815; the line drivers have none - numberless wording).
+   The resumed read logs the engine's own reused figure when it reports one
+   (`engine.reused`, serve/server.py:5807-5815; at step 1 the line drivers had none - numberless
+   wording. The review fix 3 changed this shared line for ALL drivers - see section 4).
 
 ### 1b. QFN
 
@@ -132,7 +133,10 @@ What this means per mode, with what the engine really keeps:
   `test_another_line_engine_is_not_given_it` recorded.
 
 Hy4 and MM3 are untouched (serve/server.py:1526-1530, :1560-1561 unchanged); no READY-word
-(`keepread`) claim was added to the engine.
+(`keepread`) claim was added to the engine. Their drivers only - the resumed-read LINE is shared,
+and the review fix 3 changed it for every driver: hy4's PP line (hy4_main.cpp:1089-1090) and mm3's
+solo one (mm3_main.cpp:715) carry the same reuse field, so their cut reads now print the engine's
+figure too, see section 4.
 
 ## 3. Tests (serve/test_priority.py) and results
 
@@ -196,7 +200,15 @@ Results (`/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_priority`):
   The driver keeps the engine's PP reuse field (`progress_reuse`, serve/server.py) apart from the
   no-field case (None), and the line carries the engine's own figure - 0 included, never the old
   claim (the P124b wording rule now extends to engines that report their figure on PP rather than
-  on a RESUME line).
+  on a RESUME line). This line is SHARED, not ik2's own: hy4 (hy4_main.cpp:1089-1090) and mm3 solo
+  (mm3_main.cpp:715) print the same field as their read's `from`, so their resumed-read line moves
+  from the numberless "continues" to the engine's figure too - more accurate, but the plan was
+  "give the ik2 driver the flag", said plainly here rather than claimed as "the line drivers have
+  none". GLM stays on the numberless wording only because its PP line really carries no 6th field -
+  GLM's source is not in this repo, so that is the comment at serve/server.py:5832's assurance, not
+  a checked one; and the numberless line now waits for the read's first report instead of the first
+  heartbeat - a timing change of an existing line, and the point of it (the card run's "continues"
+  over a reuse 0).
 - docs/SETTINGS.md's priority section still lists only QFN/GLM as the read-keeping engines
   (it already skipped hy4/mm3/ds4 from P124i/P124j/P124u); left untouched per the plan, same
   as those cards.
