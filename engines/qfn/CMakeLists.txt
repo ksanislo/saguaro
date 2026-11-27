@@ -174,6 +174,10 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(kv_host_growth_test src/core/kv_host_growth_test.cpp)
   target_include_directories(kv_host_growth_test PRIVATE include)
   add_test(NAME kv_host_growth_test COMMAND kv_host_growth_test)
+  # P124e (round 6): the device-state grow's order (give way before the map) and its failure line (header-only, CPU)
+  add_executable(vmm_grow_test src/core/vmm_grow_test.cpp)
+  target_include_directories(vmm_grow_test PRIVATE include)
+  add_test(NAME vmm_grow_test COMMAND vmm_grow_test)
   # ... carried out on a real conversation cache and session folder
   add_executable(park_release_test src/core/park_release_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
                  src/core/conversation_file.cpp)
