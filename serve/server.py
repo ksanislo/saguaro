@@ -4609,6 +4609,18 @@ class Service:
                 and pos0 - (hb.get("reused") or 0) == n:
             n = int(n + min(chunk, new - n) * min(1.0, max(0.0, pr[0] / pr[1])))
         if n > 0:
+            if n < stat.read_pos:
+                # P124v2 (review round 2): the booking is belted like the engine belts done= - a beat never
+                # books a step BACKWARDS.  On a split read the guard above holds for every card working the
+                # unit in flight while their pass= fractions differ: the lead card books done + chunk x share,
+                # the lagging card's next beat (or either card's once done moves off the boundary and the
+                # guard fails and only the shared done= books) would book below that - and a booked decrease
+                # is _note_read's engine-counter-went-backwards signal: close the interval, double the closed
+                # leg in _read_counted, re-baseline engine_t0 mid-read - the span collapse this plan is about.
+                # Real restarts stand: _rhb belts done per new/rid and starts that belt over on a new read, a
+                # retry's or slice's first PP / BRP steps book below read_pos through the unbelted _note_read
+                # path (its restart branch resets read_pos, releasing this belt), BRA's exact figures correct.
+                n = stat.read_pos
             rt = hb.get("rt")
             self._note_read(stat, n, None, False, False, rt if rt and rt > 0 else hb.get("ms"))
 
