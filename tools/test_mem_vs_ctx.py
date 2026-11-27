@@ -1,10 +1,14 @@
 """tools/test_mem_vs_ctx.py - P124n's memory-vs-context check, tested without a GPU: the /proc parsing on fixed
 inputs (a status file's VmLck/VmPin/VmRSS, the pid tree through a fake /proc whose comm carries spaces and
-parens, and the port's owner found through a fake /proc/net/tcp by socket inode), the GPU reader on canned
-nvidia-smi / rocm-smi output, the engine-log budget grep, the run config copy (own session dir and log, no
-api_key, --max-context set), the table, and the PASS/FAIL rule (less than max(2%, 256 MiB), the biggest
-difference named) on fixed figures - plus one real cycle against `python -m serve.server --engine mock`: the
-start waits for /health ok, the port's owner is the server, and the stop frees the port again.
+parens, and the port's owner found through a fake /proc/net/tcp by socket inode), the host-wide pinned delta
+(/proc/meminfo Mlocked + Unevictable + Shmem read before the start and after /health ok - the GLM latent cache
+of the 1.2.4 ref run, which no VmLck saw), the GPU reader on canned nvidia-smi / rocm-smi output, the engine-
+log budget grep and the expert-placement parse (the engines' lines from ref/mortar-run-20261126.txt: Inkling's
+resident-vs-offload flip must FAIL where its GPU totals were equal, GLM must show its pinned latent cache),
+the run config copy (own session dir and log, no api_key, --max-context set), the table, and the PASS/FAIL
+rules (memory figures under max(2%, 256 MiB), placement figures within 2%, pinned judged on the larger of the
+two measures) on fixed figures - plus one real cycle against `python -m serve.server --engine mock`: the start
+waits for /health ok, the port's owner is the server, and the stop frees the port again.
 
     python -m unittest tools.test_mem_vs_ctx -v
 """
@@ -125,6 +129,57 @@ class ProcParsingTests(unittest.TestCase):
             self.assertIsNone(MV.port_owner(8093, str(tmp)))
 
 
+class MeminfoTests(unittest.TestCase):
+    # two fixed reads of /proc/meminfo around a GLM load (the 1.2.4 ref run): the engine page-locked its
+    # latent cache the driver never showed in any VmLck, and the kernel's Unevictable rose by exactly it
+    BEFORE = """MemTotal:       132435100 kB
+MemFree:        42638884 kB
+MemAvailable:   81609172 kB
+Buffers:          312256 kB
+Mlocked:               0 kB
+Unevictable:      131072 kB
+Shmem:           4260444 kB
+HugePages_Total:       0
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+"""
+    AFTER = """MemTotal:       132435100 kB
+MemFree:        39527724 kB
+MemAvailable:   78498012 kB
+Buffers:          312256 kB
+Mlocked:               0 kB
+Unevictable:     3011931 kB
+Shmem:           4260444 kB
+HugePages_Total:       0
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+"""
+
+    def test_parse_meminfo_mib_and_the_shmem_variants_stay_out(self):
+        m = MV.parse_meminfo(self.BEFORE)
+        self.assertEqual(m, {"Mlocked": 0.0, "Unevictable": 128.0, "Shmem": 4160.5898437500})
+        m2 = MV.parse_meminfo("MemTotal: 100 kB\n")                  # absent keys count 0.0
+        self.assertEqual(m2, {"Mlocked": 0.0, "Unevictable": 0.0, "Shmem": 0.0})
+
+    def test_the_glm_latent_cache_shows_host_where_vmlck_read_zero(self):
+        # the ref run's "the latent cache in 2.95 GB of pinned RAM": the host-wide delta sees 2.95 GB rise
+        # while the tree's VmLck + VmPin stays 0.0 - this is the figure the fixed check now shows
+        d = MV.host_pinned_delta(MV.parse_meminfo(self.BEFORE), MV.parse_meminfo(self.AFTER))
+        self.assertAlmostEqual(d, 2.95e9 / 2**20, places=2)          # 2813.3 MiB, not 0.0
+
+    def test_delta_sums_the_three_rises_and_clamps_falls(self):
+        before = {"Mlocked": 0.0, "Unevictable": 0.0, "Shmem": 1000.0}
+        after = {"Mlocked": 68.0 * 1024.0, "Unevictable": 1024.0, "Shmem": 900.0}   # Shmem fell: a neighbour
+        # gave shared pages back - the check owns the moment, so a fall is not this run un-pinning anything
+        self.assertAlmostEqual(MV.host_pinned_delta(before, after), 68.0 * 1024.0 + 1024.0)
+        self.assertIsNone(MV.host_pinned_delta(None, after))
+        self.assertIsNone(MV.host_pinned_delta(before, None))
+
+    def test_read_meminfo_here_yes_missing_file_none(self):
+        self.assertIsNotNone(MV.read_meminfo())
+        self.assertIsNone(MV.read_meminfo("no-such-meminfo-here"))
+
+
 class GpuReaderTests(unittest.TestCase):
     NV = "0, 1024\n1, 4096\n2, 7\nnot a row, x\n"
     ROCM = ("GPU[0]\t\t: VRAM Total Memory (B): 17163091968\n"
@@ -202,21 +257,168 @@ class BudgetAndConfigTests(unittest.TestCase):
                          ["--max-context", "262144", "--ctx", "1"])   # (max-context holds when both sit there)
 
 
+class PlacementTests(unittest.TestCase):
+    """The engines' expert-placement lines, as the 1.2.4 ref run (ref/mortar-run-20261126.txt) logged them."""
+
+    GLM_32768 = ("glm fast: CUDA0 VRAM before the expert pool: 7.86 of 15.92 GB in use - dense weights 6.86, "
+                 "state/KV (32768 ctx) 0.62, activations 0.10, other (context, MTP, scratch, prompt path) 0.28")
+    GLM_262144 = ("glm pack: CUDA0 KV streaming: 32768 of 262144 positions of each of 11 DSA layers in VRAM "
+                  "(0.37 GB), the latent cache in 2.95 GB of pinned RAM\n"
+                  "glm fast: CUDA0 VRAM before the expert pool: 8.17 of 15.92 GB in use - dense weights 6.86, "
+                  "state/KV (262144 ctx) 0.92, activations 0.10, other (context, MTP, scratch, prompt path) 0.29")
+    INKLING_32768 = ("resident: every expert in VRAM (3072 copied in 7.2 s); tokens take the resident path, "
+                     "a CUDA graph each")
+    INKLING_262144 = ("offload: 0 of 3072 experts in VRAM (4.5 GiB), the rest fetched by the GPU from pinned "
+                      "host memory through 1 staging pools (0.03 GiB); tokens take the resident path's "
+                      "launches, a CUDA graph each")
+    QFN_262144 = ("saguaro generate: KV streaming: 32768 of 262144 cells per QSA layer in VRAM, the K/V in "
+                  "3.09 GiB of pinned RAM\n"
+                  "saguaro generate: KV streaming: 3.35 GiB of pinned RAM for the K/V of every session at "
+                  "--max-context 262144 (the solo session 3.09 GiB, the batch slots and the drafters 0.26 GiB)\n"
+                  "FileExpertSource: mapped pinned cache complement ready: resident 68.00 GiB, pinned 68.00 "
+                  "GiB in 19 s; 68.00 GiB page-locked after taking the pages in steps;\n"
+                  "saguaro generate: resident RAM mode: 68.00 GiB of experts in RAM (page-locked), 1729 in "
+                  "the GPU cache; adaptive swaps exchange them with the GPU cache (no file reads)")
+    MM3 = "saguaro mm3: loaded in 171.2 s, 9216 of 9216 experts in VRAM, 0.0 GB pinned pool"
+    DS4 = ("saguaro ds4: CUDA0 layers [0, 39]: weights 3.20 GB, experts 28.00 GB (3072 of 4096 in VRAM), "
+           "caches 1.10 GB; saguaro ds4: 5916 routed experts on the CPU lane (72.5 GB of RAM, 2 NUMA parts), "
+           "16 threads")
+    HY4 = "INFO CPU lane: 14678 of 20992 routed experts in VRAM (70%), the rest on 32 CPU threads"
+
+    def test_glm_shows_its_pinned_latent_cache_and_its_expert_pool(self):
+        # the figure the VmLck missed shows here too, and the GLM streaming line's "11 DSA layers in VRAM"
+        # is positions, not experts: it must not parse as one
+        p32, p256 = MV.parse_placement(self.GLM_32768), MV.parse_placement(self.GLM_262144)
+        self.assertIsNone(p32["pinned_declared_gib"])
+        self.assertEqual(p256["pinned_declared_gib"], 2.95)
+        self.assertIsNone(p256["experts_vram"])
+        self.assertAlmostEqual(p32["expert_pool_gb"], 15.92 - 7.86, places=9)
+        self.assertAlmostEqual(p256["expert_pool_gb"], 15.92 - 8.17, places=9)
+
+    def test_inkling_resident_and_offload_are_two_different_placements(self):
+        self.assertEqual(MV.parse_placement(self.INKLING_32768)["experts_vram"], 3072.0)
+        self.assertEqual(MV.parse_placement(self.INKLING_262144)["experts_vram"], 0.0)
+
+    def test_qfn_counts_the_gpu_cache_and_the_ram_tier_only(self):
+        p = MV.parse_placement(self.QFN_262144)
+        self.assertEqual(p["experts_vram"], 1729.0)
+        self.assertEqual(p["experts_ram_gib"], 68.0)          # (the FileExpertSource 68.00 GiB lines stay out)
+        self.assertEqual(p["pinned_declared_gib"], 3.35)      # (the larger of the two K/V lines)
+        self.assertIsNone(p["expert_pool_gb"])
+
+    def test_mm3_ds4_and_hy4_equivalents(self):
+        self.assertEqual(MV.parse_placement(self.MM3)["experts_vram"], 9216.0)
+        self.assertEqual(MV.parse_placement(self.MM3)["experts_ram_gib"], 0.0)      # (0.0 stated, not absent)
+        p = MV.parse_placement(self.DS4)
+        self.assertEqual(p["experts_vram"], 3072.0)
+        self.assertEqual(p["experts_ram_gib"], 72.5)
+        self.assertEqual(MV.parse_placement(self.HY4)["experts_vram"], 14678.0)
+
+    @staticmethod
+    def prow(context, placement, pinned=0.0, rss=40000.0, gpu=None):
+        return {"context": context, "pinned_tree_mib": pinned, "pinned_host_mib": None, "rss_mib": rss,
+                "gpu_mib": gpu, "budget": [], "placement": placement}
+
+    def test_inkling_fails_where_the_equal_gpu_totals_hid_the_change(self):
+        # the ref run's numbers: RSS and GPU inside max(2%, 256 MiB) (its PASS line) - the placement rule
+        # is what turns that run into the FAIL it should have been
+        rows = [self.prow(32768, MV.parse_placement(self.INKLING_32768), rss=13672.6, gpu=15716.8),
+                self.prow(262144, MV.parse_placement(self.INKLING_262144), rss=13598.2, gpu=15406.6)]
+        ok, why = MV.verdict(rows)
+        self.assertFalse(ok)
+        self.assertIn("experts in VRAM differs by 3072 between the contexts", why)
+
+    def test_glm_fails_when_the_expert_pool_moved_more_than_two_percent(self):
+        # 8.06 GB left for the experts at 32768, 7.75 at 262144: 4%, over the placement rule's 2%
+        rows = [self.prow(32768, MV.parse_placement(self.GLM_32768)),
+                self.prow(262144, MV.parse_placement(self.GLM_262144))]
+        ok, why = MV.verdict(rows)
+        self.assertFalse(ok)
+        self.assertIn("expert pool (GB) differs by", why)
+
+    def test_placement_within_two_percent_passes_and_a_missing_figure_is_not_a_change(self):
+        ok, why = MV.verdict([self.prow(32768, {"experts_vram": 1000.0}),
+                              self.prow(262144, {"experts_vram": 1020.0})])      # 20 <= 2% of 1020 = 20.4
+        self.assertTrue(ok)
+        self.assertIn("PASS", why)
+        self.assertFalse(MV.verdict([self.prow(32768, {"experts_vram": 1000.0}),
+                                     self.prow(262144, {"experts_vram": 1021.0})])[0])   # 21 > 20.42
+        # one context states the figure and the other says nothing: nothing to compare, no FAIL
+        self.assertTrue(MV.verdict([self.prow(32768, {"experts_vram": 1000.0}),
+                                    self.prow(262144, {})])[0])
+        # the placement difference outranks a memory one when it is further past its limit (the FAIL line
+        # names the biggest breach): RSS 300 MiB over its 256 MiB floor while the GPU cache lost 1000 of 1024
+        ok, why = MV.verdict([self.prow(32768, {"experts_vram": 1024.0}, rss=10000.0),
+                              self.prow(262144, {"experts_vram": 24.0}, rss=10300.0)])
+        self.assertFalse(ok)
+        self.assertIn("experts in VRAM", why)
+
+    def test_experts_in_ram_and_pinned_declared_are_compared_too(self):
+        ok, why = MV.verdict([self.prow(32768, {"experts_ram_gib": 68.0}),
+                              self.prow(262144, {"experts_ram_gib": 60.0})])
+        self.assertFalse(ok)
+        self.assertIn("experts in RAM differs by 8", why)
+        ok, why = MV.verdict([self.prow(32768, {"pinned_declared_gib": 3.35}),
+                              self.prow(262144, {"pinned_declared_gib": 30.0})])
+        self.assertFalse(ok)
+        self.assertIn("pinned RAM declared", why)
+
+    def test_nothing_measured_or_parsed_anywhere_is_nothing_to_compare(self):
+        rows = [{"context": c, "budget": []} for c in (32768, 262144)]     # no memory, no placement
+        ok, why = MV.verdict(rows)
+        self.assertFalse(ok)
+        self.assertIn("nothing", why)
+
+    def test_placement_summary_line_dashes_the_absent_figures(self):
+        line = MV.placement_summary(self.prow(32768, MV.parse_placement(self.INKLING_32768)))
+        self.assertIn("experts in VRAM 3072", line)
+        self.assertIn("expert pool (GB) -", line)
+        self.assertIn("pinned RAM declared (GB) -", line)
+
+
 class TableAndVerdictTests(unittest.TestCase):
     @staticmethod
     def rows(pinned, rss, gpu=(None, None)):
-        return [{"context": c, "pinned_mib": p, "rss_mib": r, "gpu_mib": g, "budget": []}
+        return [{"context": c, "pinned_tree_mib": p, "pinned_host_mib": None, "rss_mib": r, "gpu_mib": g,
+                 "budget": []}
                 for c, p, r, g in zip((32768, 262144), pinned, rss, gpu)]
 
-    def test_table_aligns_and_prints_dash_without_a_reader(self):
-        table = MV.format_table(self.rows([1000.0, 1010.0], [40000.0, 40500.0]))
+    def test_table_shows_both_pinned_measures_and_dashes_without_a_reader(self):
+        rows = self.rows([1000.0, 1010.0], [40000.0, 40500.0])
+        for r, h in zip(rows, (3020.8, 3020.8)):
+            r["pinned_host_mib"] = h
+        table = MV.format_table(rows)
         lines = table.splitlines()
         self.assertEqual(len(lines), 3)
-        self.assertIn("pinned MiB", lines[0])
+        self.assertIn("pinned host", lines[0])
+        self.assertIn("pinned tree", lines[0])
         self.assertIn("GPU used MiB", lines[0])
+        self.assertIn("3020.8", lines[1])
         self.assertIn("-", lines[1])
         self.assertTrue(lines[1].rstrip().endswith("-"))
         self.assertIn("40000.0", lines[1])
+        # no /proc/meminfo and no GPU reader: both unpinned rows dash, the tree row still prints
+        bare = MV.format_table(self.rows([1000.0, 1010.0], [40000.0, 40500.0])).splitlines()
+        self.assertTrue(bare[1].split()[-2] == "40000.0" and bare[1].rstrip().endswith("-"))
+
+    def test_pinned_is_judged_on_the_larger_of_the_two_measures(self):
+        # the 1.2.4 ref run: every VmLck read 0.0 while the engine page-locked 68 GiB - the host-wide delta
+        # sees it, so the pinned row must FAIL on the host figure even though the tree row is flat
+        host_only = [{"context": c, "pinned_tree_mib": 0.0, "pinned_host_mib": h, "rss_mib": 40000.0,
+                      "gpu_mib": None, "budget": []} for c, h in ((32768, 0.0), (262144, 69632.0))]
+        ok, why = MV.verdict(host_only)
+        self.assertFalse(ok)
+        self.assertIn("pinned RAM differs by 69632.0 MiB", why)
+        # the tree saw it and the host-wide read is flat (or absent): the same rule on the tree figure
+        tree_only = [{"context": c, "pinned_tree_mib": t, "pinned_host_mib": None, "rss_mib": 40000.0,
+                      "gpu_mib": None, "budget": []} for c, t in ((32768, 0.0), (262144, 69632.0))]
+        ok, why = MV.verdict(tree_only)
+        self.assertFalse(ok)
+        self.assertIn("pinned RAM differs by 69632.0 MiB", why)
+        # and it judges on the LARGER: the tree's 1000 stands inside the host's 1010
+        both = [{"context": c, "pinned_tree_mib": t, "pinned_host_mib": h, "rss_mib": 40000.0,
+                 "gpu_mib": None, "budget": []} for c, t, h in ((32768, 1000.0, 0.0), (262144, 0.0, 1010.0))]
+        self.assertTrue(MV.verdict(both)[0])
 
     def test_within_the_floor_passes(self):
         # 40000 vs 40500: 500 MiB apart, over the 2% (810 MiB of 40500 -> 500 < 810) and the 256 MiB floor
