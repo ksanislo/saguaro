@@ -159,7 +159,7 @@ serve/web/turbo.css, serve/test_models.py, serve/test_new_engines_ui.py, serve/t
 docs/SETTINGS.md, docs/DIVERGENCE.md.  serve/qfn_engine.py untouched by hand and needed no re-extract (the QFN
 driver sources engines/qfn/serve/server.py, which references none of the removed names - grep says so).
 
-## Tests run (each module one at a time, /opt/llm/saguaro/.venv/bin/python 3.13.5, node 22)
+## Tests run (each module one at a time, /opt/llm/saguaro/.venv/bin/python 3.13.5, node v20.19.2)
 
 | module | before | after |
 | --- | --- | --- |
