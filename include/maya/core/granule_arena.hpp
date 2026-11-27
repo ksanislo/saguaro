@@ -82,6 +82,12 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         return pinned_;
     }
+    // The four figures below read without the mutex, on purpose: total_, granule_ and base_ are written only by
+    // open() (before the arena is shared) and by close() (once nothing uses it any more), so any read of them -
+    // from a pinning thread or a releasing one - sees either the open() value or a null/zero closed arena, and
+    // both are answers.  (The thread-safety claim above is by construction, not by test: one non-reentrant mutex
+    // serializes ensure()/release()/pinned_at(), and the Pinner's callbacks are driver calls that never come
+    // back into the arena.)
     uint64_t reserved_bytes() const { return total_; }
     uint64_t granule_bytes() const { return granule_; }
     // Never null once open() succeeded: the addresses never move, pinned or not.
