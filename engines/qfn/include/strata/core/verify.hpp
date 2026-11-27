@@ -529,6 +529,11 @@ private:
     }
     bool capture_commit_batch(const int* rows, int S, int hbase, std::string& err);
     bool stage_batch(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos, std::string& err);
+    /// P124w: one line naming a batch window: the stage's device and layer range, each slot's rows' cell range and the
+    /// cells its session has backed (`slot_cells`; SAGUARO_ELASTIC_SLOTS gives chunks back). Failure paths only.
+    std::string bwindow_note(int S, const int* rows, const int64_t* pos) const;
+    /// ... printed when a batch window's launch failed or a layer of it stopped ringing (the illegal-access lines).
+    void note_never_rang(int64_t layer, cudaError_t q) const;
     strata::kernels::SamplerParams sampling_ = [] {
         strata::kernels::SamplerParams s;
         s.greedy = true;
