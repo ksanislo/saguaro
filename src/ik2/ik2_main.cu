@@ -9702,6 +9702,13 @@ int main(int argc, char** argv) {
         };
         std::vector<Conv> parked;
         uint64_t conv_clock = 0;
+        bool read_kept = false;   // (P125l review fix 1: the conversation in the cache ENDS at a read STOPped
+        //  between its chunk passes - the cancelled read's keep below set it, cleared whenever a request changes
+        //  the conversation. Only such a conversation is a kept read a different one arrived for; a re-sent
+        //  prompt of a conversation that ran (a timeout retry, a regenerate, a prompt diverging inside the last
+        //  answer) finds this false and rolls back exactly as before the change. A kept read parked by a
+        //  different conversation and unparked again reads it false too: the worst that costs is today's
+        //  rollback over its rows, never a wrong answer)
         // (one conversation in VRAM, its K / V there: not with --parallel's slots or KV streaming)
         const bool conv_ok = g_par <= 1 && !g_kv_streaming && !g_kv_q4;
         const int keep_n = conv_ok ? std::max(0, getenv("SAGUARO_IK2_KEEP") ? std::atoi(getenv("SAGUARO_IK2_KEEP")) : 4) : 0;
@@ -10702,7 +10709,10 @@ int main(int argc, char** argv) {
                 }
                 if (r_best == 0) {   // a new conversation
                     if (!hist.empty()) park_active(), reset();
+                    read_kept = false;
                 } else if (j_best >= 0) {
+                    read_kept = false;   // (a kept conversation back in the cache: a read it had kept there gets
+                    //  today's rollback if yet another conversation arrives before its own request comes back)
                     const auto pts = parked[j_best].loaded ? points_of(parked[j_best].snaps) : parked[j_best].points;
                     const bool fork = r_best < (int) parked[j_best].hist.size() && later_turn(pts, r_best);
                     parked[j_best].used = ++conv_clock;
@@ -10714,6 +10724,7 @@ int main(int argc, char** argv) {
                         if (parked[q].hist == key) j = q;
                     if (j >= 0) unpark(j, fork ? r_best : -1);
                 } else if (r_best < (int) hist.size() && later_turn(act_pts, r_best)) {
+                    read_kept = false;   // (the conversation goes on from a snapshot: it no longer ends at a kept cut)
                     Snap cp;   // back past a later turn: the conversation as it is stays kept, this one goes on from the snapshot
                     for (const auto& sn : snaps)
                         if (sn.pos == r_best) cp = sn;
@@ -10726,12 +10737,16 @@ int main(int argc, char** argv) {
                     snaps[0] = std::move(cp);
                     snap_next = 1 % n_snaps;
                     snap_copy(snaps[0], false);
-                } else if (r_best < (int) hist.size()) {
-                    // P125l: the cache holds a read stopped between its chunk passes (its conversation ends at a
-                    // snapshot with no logits - no turn finished past r_best, so no later turn above): a DIFFERENT
-                    // conversation arrived. It parks the kept read with everything it read (park_active takes the
-                    // full visits' rows too) and starts clean - rolling back over the kept read's rows is what
-                    // lost a paused read's 32,768 tokens and made its resume re-read the prompt from 0.
+                } else if (r_best < (int) hist.size() && read_kept) {
+                    // P125l (review fix 1): the cache holds a read stopped between its chunk passes and NOTHING has
+                    // advanced it since (read_kept) - so this prompt, matching only its start and with no later turn
+                    // above, is a DIFFERENT conversation: it parks the kept read with everything it read
+                    // (park_active takes the full visits' rows too) and starts clean - rolling back over the kept
+                    // read's rows is what lost a paused read's 32,768 tokens. Without read_kept the conversation is
+                    // one that RAN: a re-sent prompt (a timeout retry, a regenerate, the same prompt sampled again)
+                    // or one diverging inside the last answer - it falls through to the rollback below, the shape
+                    // before this change, reusing the conversation's rows up to its newest snapshot.
+                    read_kept = false;   // (parked whole; the cache starts this conversation clean)
                     park_active(), reset();
                 }
             }
@@ -10770,6 +10785,9 @@ int main(int argc, char** argv) {
             if (L < hist.size() || L == ids.size()) {
                 // back to the latest snapshot at or before L that leaves a token to run (one past it is dropped:
                 // its position's state follows from a prefix the request does not share)
+                read_kept = false;   // (a rollback or a reset: the conversation this request leaves is not the
+                //  shape a kept read's cut made - with read_kept set this leg can only be an exact re-send, which
+                //  no kept read can be: its keep cleared the last logits)
                 int best = -1;
                 for (int i = 0; i < (int) snaps.size(); ++i)
                     if (snaps[i].pos >= 0 && snaps[i].pos <= (int) L && snaps[i].pos < (int) ids.size() &&
@@ -10883,9 +10901,12 @@ int main(int argc, char** argv) {
                 // a conversation's end (the conv states and the sliding visits' windows; the full visits' rows
                 // need none, they rewrite cleanly). The request coming back for the rest matches its end exactly
                 // and its PP/DONE report cached = read_pos as the reused figure; a DIFFERENT conversation parks it
-                // whole (the r_best == 0 / r_best < hist.size() legs above) instead of reading over its rows.
-                // Without keeping (SAGUARO_IK2_KEEP=0, KV-streaming, KV-Q4: keep_n 0) the old shape below stands.
+                // whole (the r_best == 0 leg and, on this read_kept shape, the leg above) instead of reading over
+                // its rows. Without keeping (SAGUARO_IK2_KEEP=0, KV-streaming, KV-Q4: keep_n 0) the old shape
+                // below stands.
                 if (keep_n > 0 && read_pos > 0) {
+                    read_kept = true;   // (the cache now ends exactly at this cut - the one shape the
+                    //  different-conversation leg above parks instead of rolling back over)
                     hist.assign(ids.begin(), ids.begin() + read_pos);
                     hist_sig.assign(sig.begin(), sig.begin() + read_pos);
                     last.clear();
@@ -10899,6 +10920,7 @@ int main(int argc, char** argv) {
                         snap_copy(sn, true);
                     }
                 } else {   // (no keeping: the shape before - back to the latest snapshot at or below the prompt)
+                    read_kept = false;
                     int best = -1;
                     for (int i = 0; i < n_snaps; ++i)
                         if (snaps[i].pos >= 0 && snaps[i].pos <= (int) ids.size() &&
@@ -10924,6 +10946,8 @@ int main(int argc, char** argv) {
                 continue;
             }
             if (L < ids.size()) {
+                read_kept = false;   // (the read ran to the prompt's end: the conversation advances past any kept
+                //  cut and now ends at a snapshot WITH logits - a re-send of it takes the rollback, as before)
                 hist = ids;
                 hist_sig = sig;
                 Snap& sn = snaps[snap_next];
