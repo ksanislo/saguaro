@@ -329,19 +329,46 @@ bool conversation_kv_validate(const ConversationKv& image, const QsaState& st, c
 namespace {
 // After the authoritative pools were rewritten: the VRAM slots of a streamed state still hold the outgoing
 // conversation, so resolve must refill them before any attention reads (shared by restore and direct copy).
-bool refresh_residency(const QsaState& st, const ModelGeometry& g, int64_t upto, std::string& error) {
-    if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, nullptr);
+// `stream`: what the refresh runs on. A restore passes the thread's private copy stream, so the refresh is
+// stream-ordered right after the pool copies it follows and the copy-stream wait that ends the restore
+// covers it (PLAN-p125k - on the legacy stream it made that wait a whole-device sync again). `wait_on_null`:
+// the restore fallback - a thread with no copy stream at all launches on the legacy stream and waits there,
+// because `copy_done` only waits on the copy stream; the direct copy passes null WITHOUT the wait, as
+// before (its caller's device sync, and in queued mode the ordering event, are its completion).
+bool refresh_residency(const QsaState& st, const ModelGeometry& g, int64_t upto, std::string& error,
+                       void* stream, bool wait_on_null) {
+    const bool streamed = st.kv_mode == 1 || (st.kv_mode == 2 && upto > 0);
+    if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, stream);
     if (st.kv_mode == 2 && upto > 0) {
         auto shapes = strata::kernels::qsa_real_shapes();
         shapes.n_head_kv = g.n_head_kv; shapes.head_dim = g.head_dim;
         const int64_t end = (upto + shapes.page_size - 1) / shapes.page_size;
         strata::kernels::kv_ring_restore(qsa_attn_pools(st), st.host, qsa_kv_format(st),
-                                        std::max<int64_t>(0, end - st.n_slots), end, st.n_slots, shapes, nullptr);
+                                        std::max<int64_t>(0, end - st.n_slots), end, st.n_slots, shapes, stream);
     }
     const auto status = cudaGetLastError();
-    if (status == cudaSuccess) return true;
-    error = std::string("conversation snapshot residency restore: ") + cudaGetErrorString(status);
-    return false;
+    if (status != cudaSuccess) {
+        error = std::string("conversation snapshot residency restore: ") + cudaGetErrorString(status);
+        return false;
+    }
+    if (stream == nullptr && wait_on_null && streamed &&
+        cudaStreamSynchronize((cudaStream_t) nullptr) != cudaSuccess) {
+        error = "conversation snapshot residency restore: the refresh wait failed";
+        return false;
+    }
+    return true;
+}
+
+// PLAN-p125k: the restore paths' refresh stream: this thread's private copy stream, ordered after the
+// copies it just carried; a thread that cannot get one keeps today's behaviour (the legacy stream, with
+// the caller's device sync as the wait).
+void* restore_refresh_stream() {
+    cudaStream_t s = nullptr;
+    if (conversation_detail::private_stream(s) != cudaSuccess) {
+        cudaGetLastError();   // (no copy stream: the legacy stream, as before)
+        return nullptr;
+    }
+    return s;
 }
 } // namespace
 
@@ -373,7 +400,9 @@ bool conversation_kv_copy(const QsaState& from, const QsaState& to, const ModelG
         const cudaError_t e = conversation_detail::order_after_queued();
         if (e != cudaSuccess) { error = std::string("conversation snapshot direct copy: ") + cudaGetErrorString(e); return false; }
     }
-    return refresh_residency(to, g, upto, error);
+    // (the legacy-stream refresh, as before: this path's caller waits with a device sync, and in `queued`
+    //  mode the event above is what orders the legacy stream after the copies)
+    return refresh_residency(to, g, upto, error, nullptr, false);
 }
 
 bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
@@ -389,7 +418,7 @@ bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, co
                 return true;
             }) || !transfer_jobs(jobs, error)) return false;
     }
-    return refresh_residency(st, g, upto, error);
+    return refresh_residency(st, g, upto, error, restore_refresh_stream(), true);
 }
 
 bool conversation_kv_restore_prefix(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
@@ -414,7 +443,7 @@ bool conversation_kv_restore_prefix(const ConversationKv& image, const QsaState&
                 return true;
             }) || !transfer_jobs(jobs, error)) return false;
     }
-    return refresh_residency(st, g, upto, error);
+    return refresh_residency(st, g, upto, error, restore_refresh_stream(), true);
 }
 
 bool conversation_kv_part_sizes(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index,

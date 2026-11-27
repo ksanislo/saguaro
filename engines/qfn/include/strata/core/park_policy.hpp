@@ -23,6 +23,7 @@
 #include <istream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace strata::core::park {
@@ -201,6 +202,22 @@ inline bool reuse_turn_state(bool captured, bool single_stage, bool nothing_ran,
 inline bool adopt_turn_capture(bool captured, bool single_stage, bool no_retained, bool nothing_ran,
                                bool same_tokens, bool no_images) {
     return no_retained && reuse_turn_state(captured, single_stage, nothing_ran, same_tokens, no_images);
+}
+
+/// PLAN-p125k: the streams a NARROWED park/restore wait waits for on device `dev`, out of a scope of
+/// (device, stream) pairs naming the streams THIS conversation's queued compute rides on: only the pairs
+/// that lie on `dev` - waiting on another device's stream would wait on the wrong card. Whether the sync
+/// narrows at all is the caller's term (no scope registered: the whole-device sync, as before); given a
+/// scope, a pair list naming no stream on `dev` selects nothing here and the wait is then this thread's
+/// own copy stream alone - the bytes its own copies queued - which is what the wait must be on a device
+/// where this conversation's compute ran elsewhere. `S` is the stream handle: the caller uses cudaStream_t,
+/// a test can use int tags - the wait-set decision is what is checked, without a device (as the rules above).
+template <class S>
+inline std::vector<S> wait_streams(const std::vector<std::pair<int, S>>& scope, int dev) {
+    std::vector<S> out;
+    for (const auto& p : scope)
+        if (p.first == dev) out.push_back(p.second);
+    return out;
 }
 
 }  // namespace strata::core::park

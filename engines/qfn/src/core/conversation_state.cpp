@@ -24,13 +24,15 @@ bool fail(std::string& error, const char* message) {
     return false;
 }
 
+// (the park/restore split: what the thread blocks on - output only)
+struct SyncRec {
+    std::chrono::steady_clock::time_point t0;
+    ~SyncRec() { conversation_detail::snapshot_split().sync_ms +=
+                      conversation_detail::split_ms(t0, std::chrono::steady_clock::now()); }
+};
+
 bool sync(std::string& error) {
-    // (the park/restore split: what the thread blocks on - output only)
-    struct SyncRec {
-        std::chrono::steady_clock::time_point t0;
-        ~SyncRec() { conversation_detail::snapshot_split().sync_ms +=
-                          conversation_detail::split_ms(t0, std::chrono::steady_clock::now()); }
-    } sync_rec{std::chrono::steady_clock::now()};
+    const SyncRec sync_rec{std::chrono::steady_clock::now()};
     if (strata::core::device_sync_override()) {   // (the narrowed sync: this thread's queued copies are not in it)
         cudaStream_t s = nullptr;
         if (conversation_detail::private_stream(s) == cudaSuccess && cudaStreamSynchronize(s) != cudaSuccess)
@@ -40,6 +42,19 @@ bool sync(std::string& error) {
     if (status == cudaSuccess) return true;
     error = std::string("conversation snapshot synchronize: ") + cudaGetErrorString(status);
     return false;
+}
+
+bool copy_done(std::string& error) {
+    // PLAN-p125k: the POST-copy wait of a restore, narrowed to its own bytes. Every copy above a restore
+    // runs on this thread's private copy stream and lands before its copy call returns
+    // (`copy` -> `copy_nonblocking`), and the residency refresh kernels a restore queues ride that stream
+    // too (conversation_snapshot.cpp), so the copy stream is all there is still to wait for. The
+    // whole-device sync this site used is what cost a 281-token restore 1066 ms with a 1 ms split
+    // (ref/REPORT-p124a2 §1): it waited for every other conversation's queued work, not for a byte.
+    // The guarantee is unchanged: when this returns, this restore's bytes are on the device.
+    const SyncRec rec{std::chrono::steady_clock::now()};
+    if (conversation_detail::copy_stream_done() == cudaSuccess) return true;
+    return fail(error, "the restore copy stream failed");
 }
 
 bool copy(void* dst, const void* src, size_t bytes, std::string& error, bool queued = false) {
@@ -239,7 +254,7 @@ bool conversation_checkpoint_restore(const ConversationCheckpoint& c, SessionSta
     const size_t tokens = c.ids.size();
     ss.ple_prev[0] = tokens >= 2 ? c.ids[tokens - 2] : -1;
     ss.ple_prev[1] = tokens >= 1 ? c.ids[tokens - 1] : -1;
-    return sync(error);
+    return copy_done(error);   // (PLAN-p125k: only its own copies wait here - see `copy_done`)
 }
 
 bool conversation_checkpoint_copy(const SessionState& from, SessionState& to, const std::vector<int32_t>& ids,

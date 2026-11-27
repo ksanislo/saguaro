@@ -35,6 +35,7 @@
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/park_policy.hpp"
 #include "strata/core/park_release.hpp"
+#include "../core/conversation_copy.hpp"   // (PLAN-p125k: the narrowed park/restore wait, `narrow_sync`)
 #include "strata/core/resident_policy.hpp"
 #include "strata/core/vram_policy.hpp"
 #include "strata/core/coupled_draft.hpp"
@@ -15848,16 +15849,53 @@ vs.d_skip_usage = gs.d_skip_usage;
         // `light` (SAGUARO_FAST_LANE): the slot is idle and nothing in flight writes it (pipelined groups with drafts: a
         // window holds live slots only; their doorbells are the stages' threads'), so no drain: the save's device syncs
         // wait only for the streams that can write it (its stages' window streams, its drafter, the copies)
-        struct LightSync {
+        // PLAN-p125k: the same mechanism for the MAIN conversation's parks, restores and turn saves. A scope names
+        // the streams THIS conversation's queued compute rides on; while one is set, the snapshot syncs
+        // (conversation_state.cpp `sync`, and the direct `device_sync()` calls inside the scope) wait for that
+        // device's share of them and this thread's private copy stream (`conversation_detail::narrow_sync`) -
+        // this conversation's own bytes - instead of the whole device, and they no longer take the capture lock.
+        // What they must NOT wait for is everything else: other conversations' queued windows, the expert tier's
+        // background fills (several ride the legacy stream), PLE io, the adaptive tier. Where the stream list
+        // cannot bound this conversation's writers (`park_own_ok` below), no scope is set and every sync stays
+        // the whole-device sync of before. The wait-set itself is `park::wait_streams` (unit-tested).
+        struct ConvStreams {
             std::vector<std::pair<int, cudaStream_t>> streams;   // (device, stream)
             static cudaError_t run(void* self) {
-                int dev = 0;
-                if (cudaGetDevice(&dev) != cudaSuccess) return cudaGetLastError();
-                for (const auto& [d, st] : static_cast<LightSync*>(self)->streams)
-                    if (d == dev)
-                        if (const cudaError_t e = cudaStreamSynchronize(st); e != cudaSuccess) return e;
-                return cudaSuccess;
+                return strata::core::conversation_detail::narrow_sync(static_cast<ConvStreams*>(self)->streams);
             }
+        };
+        struct ConvSyncScope {   // (this thread only)
+            bool on;
+            ConvSyncScope(bool o_, ConvStreams* s) : on(o_) {
+                if (!on) return;
+                strata::core::device_sync_override() = &ConvStreams::run;
+                strata::core::device_sync_override_arg() = s;
+            }
+            ~ConvSyncScope() {
+                if (!on) return;
+                strata::core::device_sync_override() = nullptr;
+                strata::core::device_sync_override_arg() = nullptr;
+            }
+        };
+        // the shapes the stream list below bounds: the whole model on one card (no layer split, so no stage
+        // sessions and no pipelined decode - `pipe` requires a split), no prompt read running beside (its chunks
+        // queue on streams of their own), no concurrent doorbell serving. Anything else keeps the device sync.
+        auto park_own_ok = [&] { return stages.empty() && !pipe && !conc_serving && !in_prompt_read; };
+        // the main conversation's own streams: `main_stream` carries every session call (session_capture/replay/
+        // token/loop/zero); with --mtp the draft K/V the park saves is written by the drafter's stream (its final
+        // cell may still be queued) and on this card by the verify windows on `ver`/`ver_b` - a slot's batched
+        // draft prefill on the SHARED drafter writes that same pool too - and those verifiers fork/join their
+        // side streams through their own stream, so waiting for it waits for them.
+        auto add_main_streams = [&](ConvStreams& cs) {
+            int dev = 0;
+            if (cudaGetDevice(&dev) != cudaSuccess) { cudaGetLastError(); return false; }
+            cs.streams.emplace_back(dev, main_stream);
+            if (use_mtp) {
+                cs.streams.emplace_back(ver.device(), ver.stream());
+                cs.streams.emplace_back(ver_b.device(), ver_b.stream());
+                cs.streams.emplace_back(mtp.device(), mtp.stream());
+            }
+            return true;
         };
         auto persist_slot = [&](int b, bool from_this_slot, const std::vector<int32_t>& next, bool exiting,
                                 const char* why, bool ram = false, bool light = false, bool turn = false) -> bool {
@@ -15871,7 +15909,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 return true;
             std::string e = !light && pipe_inflight() ? "pipelined groups in flight" : "";
             if (light && (sl.active || sl.reading || !piped_mtp || !stage_serving)) e = "not an idle slot beside served groups";
-            LightSync ls;
+            ConvStreams ls;
             if (light) {
                 for (int k = 0; k < n_pipe; ++k) ls.streams.emplace_back(stage_verifier(k).device(), stage_verifier(k).stream());
                 if (batch_mtp) ls.streams.emplace_back(slot_mtp[(size_t) b]->device(), slot_mtp[(size_t) b]->stream());
@@ -15893,19 +15931,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                              sl.ids.size(), why, light ? " (beside the groups in flight)" : "");
             static const std::vector<ImgKey> no_imgs;   // a slot with pictures is never kept
             bool ok = true;
-            struct SyncScope {   // (this thread only, for the save)
-                bool on;
-                SyncScope(bool o_, LightSync* l) : on(o_) {
-                    if (!on) return;
-                    strata::core::device_sync_override() = &LightSync::run;
-                    strata::core::device_sync_override_arg() = l;
-                }
-                ~SyncScope() {
-                    if (!on) return;
-                    strata::core::device_sync_override() = nullptr;
-                    strata::core::device_sync_override_arg() = nullptr;
-                }
-            } sync_scope(light, &ls);
+            ConvSyncScope sync_scope(light, &ls);   // (this thread only, for the save)
             try {
                 ok = turn ? turn_capture(ParkFrom{sl.ids, no_imgs, sl.checks, sl.cvec, b}, turn_slot[(size_t) b],
                                          "slot" + std::to_string(b))
@@ -19329,18 +19355,25 @@ vs.d_skip_usage = gs.d_skip_usage;
                     live_ok = false;
                     // host -> device in synchronous copies of the whole state: one bounded allowance
                     blocking("transfer", bytes);
-                    bool restored = (n_st > 0 ? strata::core::conversation_snapshot_restore(
-                                                    image, ss, g, (const strata::core::QsaState*) nullptr, err)
-                                              : strata::core::conversation_snapshot_restore(image, ss, g, mtp.kv_state(),
-                                                                                            err)) ==
-                                    strata::core::ConversationRestore::restored;
-                    for (size_t k = 0; restored && k < n_st; ++k) {   // the later stages, each on its own GPU
-                        const strata::core::OnDevice on(stages[k]->dev);
-                        restored = strata::core::conversation_snapshot_restore(image.stage_images[k], stages[k]->ss, g,
-                                                                               draft_of(k), err) ==
-                                       strata::core::ConversationRestore::restored &&
-                                   strata::core::device_sync() == cudaSuccess;
-                        if (!restored && err.empty()) err = "stage CUDA" + std::to_string(stages[k]->dev) + " sync";
+                    bool restored = false;
+                    {   // PLAN-p125k: this restore waits on its own conversation only (no scope when the shape
+                        //  cannot be bounded - a layer split's syncs below stay whole-device, as they must)
+                        ConvStreams ctx_streams;
+                        const bool ctx_own = park_own_ok() && add_main_streams(ctx_streams);
+                        const ConvSyncScope ctx_scope(ctx_own, &ctx_streams);
+                        restored = (n_st > 0 ? strata::core::conversation_snapshot_restore(
+                                                   image, ss, g, (const strata::core::QsaState*) nullptr, err)
+                                             : strata::core::conversation_snapshot_restore(image, ss, g, mtp.kv_state(),
+                                                                                           err)) ==
+                                   strata::core::ConversationRestore::restored;
+                        for (size_t k = 0; restored && k < n_st; ++k) {   // the later stages, each on its own GPU
+                            const strata::core::OnDevice on(stages[k]->dev);
+                            restored = strata::core::conversation_snapshot_restore(image.stage_images[k], stages[k]->ss, g,
+                                                                                   draft_of(k), err) ==
+                                           strata::core::ConversationRestore::restored &&
+                                       strata::core::device_sync() == cudaSuccess;
+                            if (!restored && err.empty()) err = "stage CUDA" + std::to_string(stages[k]->dev) + " sync";
+                        }
                     }
                     if (!restored) {
                         // validated above: a failure here is a transfer failure, after device writes began - never
@@ -20016,35 +20049,43 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::fprintf(stderr, "saguaro serve: conversation cache: the outgoing %zu tokens are not parked: %s\n",
                                  live.size(), park_skip);
             }
-            if (borrow && !pin_sibling && park_worth) {
-                conversations.guard(parked.serial);   // parking the outgoing conversation must not evict the donor
-                const bool parked_ok = park_current(0);
-                const bool blocked = conversations.guard_blocked();
-                conversations.unguard();
-                if (!parked_ok) {
-                    std::printf("ERR %s\n", err.c_str());
-                    return 1;
-                }
-                if (blocked) {
-                    // the outgoing conversation fits only in the donor's room: it keeps its place, the donor is
-                    // taken whole as before (it was validated above)
-                    std::fprintf(stderr, "saguaro serve: conversation cache: no room beside the parked conversation "
-                                         "this request starts with; taking it instead of borrowing\n");
-                    borrow = false;
-                    if (const size_t at = conversations.index_of(parked.serial); at != SIZE_MAX) {
-                        if (sdir) sdir->claim(conversations.shared(at).get());
-                        incoming.emplace(conversations.take(at));
-                        incoming_src = "ram";
-                        incoming_tokens = parked.tokens;
-                        incoming_live = parked.live;
-                    }
-                    if (!park_current(incoming ? incoming->bytes() : 0)) {
+            {   // PLAN-p125k: the switch's park (and the checkpoint mount inside park_current) waits on this
+                // conversation's own bytes: the pre-copy syncs wait for its queued compute only, not for every
+                // other conversation's queued work or the expert tier's fills (the `sync 2471 ms` park). No
+                // scope where the shape cannot be bounded: the syncs stay whole-device, as before.
+                ConvStreams park_streams;
+                const bool park_own = park_own_ok() && add_main_streams(park_streams);
+                const ConvSyncScope park_scope(park_own, &park_streams);
+                if (borrow && !pin_sibling && park_worth) {
+                    conversations.guard(parked.serial);   // parking the outgoing conversation must not evict the donor
+                    const bool parked_ok = park_current(0);
+                    const bool blocked = conversations.guard_blocked();
+                    conversations.unguard();
+                    if (!parked_ok) {
                         std::printf("ERR %s\n", err.c_str());
                         return 1;
                     }
+                    if (blocked) {
+                        // the outgoing conversation fits only in the donor's room: it keeps its place, the donor is
+                        // taken whole as before (it was validated above)
+                        std::fprintf(stderr, "saguaro serve: conversation cache: no room beside the parked conversation "
+                                             "this request starts with; taking it instead of borrowing\n");
+                        borrow = false;
+                        if (const size_t at = conversations.index_of(parked.serial); at != SIZE_MAX) {
+                            if (sdir) sdir->claim(conversations.shared(at).get());
+                            incoming.emplace(conversations.take(at));
+                            incoming_src = "ram";
+                            incoming_tokens = parked.tokens;
+                            incoming_live = parked.live;
+                        }
+                        if (!park_current(incoming ? incoming->bytes() : 0)) {
+                            std::printf("ERR %s\n", err.c_str());
+                            return 1;
+                        }
+                    }
+                } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth && park_skip == nullptr) {
+                    park_ok = park_current(incoming ? incoming->bytes() : 0);
                 }
-            } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth && park_skip == nullptr) {
-                park_ok = park_current(incoming ? incoming->bytes() : 0);
             }
             spill_skip_rewind = false;
             if (!park_ok) {
@@ -20122,7 +20163,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::printf("ERR the K/V cannot grow to the parked conversation: no VRAM is left\n");
                 return 1;
             }
-            if (borrow) {
+            if (borrow) {   // (PLAN-p125k: the prefix restore's waits ride the main conversation's own scope)
+                ConvStreams borrow_streams;
+                const bool borrow_own = park_own_ok() && add_main_streams(borrow_streams);
+                const ConvSyncScope borrow_scope(borrow_own, &borrow_streams);
                 const auto t0 = Clock::now();
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked
                 bool stages_ok = donor != nullptr && donor->stage_images.size() == stages.size();
@@ -20171,6 +20215,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                              conversations.size(), conversations.bytes(), conversations.borrowed());
             }
             if (incoming) {
+                // PLAN-p125k: the incoming restore waits on its own bytes - the pre-copy sync for this
+                // conversation's queued work only, the post-copy wait for its own copy stream (which the
+                // 1 ms 281-token restore that still cost 1066 ms did not get, ref/REPORT-p124a2 §1).
+                ConvStreams rest_streams;
+                const bool rest_own = park_own_ok() && add_main_streams(rest_streams);
+                const ConvSyncScope rest_scope(rest_own, &rest_streams);
                 // (PLAN-p124a: the restore line's split counts this restore only - reset at its own start, so a
                 //  borrow's copies or a slot copy before it cannot land in it (F7: no split over its printed total))
                 strata::core::conversation_snapshot_reset_split();
@@ -22963,6 +23013,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                     });
                 if (land >= 0) {
                     const ConvCheckpoint& c = checks[(size_t) land];
+                    // (PLAN-p125k: the cut read that must not still be writing the session ran on this
+                    //  conversation's own streams, so the drain and the checkpoint restore wait on those)
+                    ConvStreams cut_streams;
+                    const bool cut_own = park_own_ok() && add_main_streams(cut_streams);
+                    const ConvSyncScope cut_scope(cut_own, &cut_streams);
                     (void) strata::core::device_sync();   // (nothing of the cut read may still be writing the session)
                     bool back = checkpoint_restore(c, ss, g);
                     for (size_t i = 0; back && i < stages.size(); ++i) {
@@ -23298,7 +23353,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                         in_slot = true;
                 }
                 std::string te;
-                if (!in_slot && ver.wait_commit(te)) (void) turn_capture(ParkFrom{live, live_imgs, checks, cvec_cached, -1}, turn_main, "main");
+                if (!in_slot && ver.wait_commit(te)) {   // (PLAN-p125k: the turn capture reads the main session:
+                    ConvStreams turn_streams;            //  its pre-copy sync waits on this conversation only)
+                    const bool turn_own = park_own_ok() && add_main_streams(turn_streams);
+                    const ConvSyncScope turn_scope(turn_own, &turn_streams);
+                    (void) turn_capture(ParkFrom{live, live_imgs, checks, cvec_cached, -1}, turn_main, "main");
+                }
             }
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             const bool lazy_was = !lazy_fly.empty();
