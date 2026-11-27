@@ -3,9 +3,11 @@
 // fake - the test is host code, no GPU: the pinning the GLM engine passes is cudaHostRegister (hipHostRegister).
 #include "maya/core/granule_arena.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace maya::core;
@@ -124,6 +126,48 @@ int main() {
     a.close();
     check(a.empty() && a.base() == nullptr && was != nullptr, "close gives the range back");
     check(!a.ensure(0, 1024, p, err), "an ensure on a closed arena is refused");
+
+    // thread-safe (granule_arena.hpp): the mutex serializes ensure()/release()/pinned_at(), so several paths of one
+    // engine pinning their positions never pin a granule twice, and a reader never sees a half-pinned one.  The
+    // Pinner's pins are only touched inside that same lock, so the recording fake is raced by the arena's lock too.
+    // The outcome is interleaving-independent: with the lock, exactly one pin per granule however the threads wind.
+    {
+        GranuleArena t;
+        FakePinner r;
+        const uint64_t total = 512 * M, gran = 64 * M;   // 8 granules
+        check(t.open(total, gran, err), "open for the thread test");
+        r.base = t.base();
+        constexpr int nthreads = 8;
+        std::atomic<bool> go{false};
+        std::atomic<int> ready{0};
+        std::atomic<bool> bad{false};   // a reader that saw an impossible figure sets this
+        std::vector<std::thread> th;
+        for (int i = 0; i < nthreads; ++i)
+            th.emplace_back([&, i] {
+                std::string e;
+                ready.fetch_add(1, std::memory_order_relaxed);
+                while (!go.load(std::memory_order_acquire)) std::this_thread::yield();   // (all enter at once)
+                for (int pass = 0; pass < 64; ++pass) {
+                    // the pinners walk the whole arena; the readers take its pinned figures - the same two paths the
+                    // header names, racing on one arena the way a live engine's grow and bookkeeping paths do
+                    if ((i & 1) == 0) t.ensure(0, total, r, e);
+                    else {
+                        const uint64_t now = t.pinned_bytes();
+                        if (now > total) bad.store(true);
+                        (void) t.pinned_at(0);
+                        (void) t.pinned_at(total - 1);
+                    }
+                }
+            });
+        while (ready.load(std::memory_order_relaxed) < nthreads) std::this_thread::yield();
+        go.store(true, std::memory_order_release);
+        for (auto& x : th) x.join();
+        check(!bad.load(), "no reader saw a pinned figure past the arena's size");
+        check(t.pinned_bytes() == total, "every granule pinned once across the pinning threads");
+        check(r.pins.size() == 8, "8 granules, 8 pins: no granule pinned twice by a racing ensure");
+        check(t.pinned_at(0) && t.pinned_at(total - 1), "the first and last granule are pinned");
+        t.close();
+    }
 
     std::printf("granule_arena_test: %d checks passed\n", checks);
     return 0;
