@@ -8917,10 +8917,12 @@ class LoadState:
     fails says so here instead (fail), and the port keeps answering with it."""
 
     def __init__(self, model: str, log_path=None, api_key: str = "", supervisor: str | None = None, port=8095,
-                 config_path=None):
+                 config_path=None, switching: bool = False):
         self.model, self.log_path = model, log_path
         self.api_key, self.supervisor, self.port = api_key, supervisor, port
         self.config_path = str(config_path) if config_path else None
+        self.switching = bool(switching)          # this start is the other half of a model switch (P125m): the page
+                                                  #  that shows the app keeps it and waits, and /v1/models keeps listing
         self.t0 = time.time()
         self.status, self.error = "loading", None
         self.failed_seen = threading.Event()      # a /health that told the supervisor about the failure
@@ -8954,6 +8956,8 @@ class LoadState:
         # which owns starts and switches itself).
         out = {"status": self.status, "model": self.model, "elapsed_s": int(time.time() - self.t0),
                "line": self.last_log_line(), "supervisor": self.supervisor}
+        if self.status == "loading" and self.switching:
+            out["switch"] = True      # (P125m: a page that shows the app keeps it on screen and says "loading <model>")
         if self.status == "failed":
             out["error"] = self.error
             if not self.supervisor:
@@ -8961,6 +8965,13 @@ class LoadState:
                 if lg and lg["path"] != self.config_path:
                     out["last_good"] = lg
         return out
+
+    def models_listing(self) -> dict:
+        """The /v1/models answer while a SWITCH loads (P125m): the model asked for, listed with status "loading" -
+        the listing a client polls keeps answering across the switch instead of dropping to a bare 503; the chat
+        routes still answer 503 + Retry-After until it is ready."""
+        return {"object": "list", "data": [{"id": self.model, "object": "model", "owned_by": "saguaro",
+                                            "created": int(self.t0), "status": {"value": "loading"}}]}
 
 
 def last_good_note_path() -> Path:
@@ -9119,6 +9130,11 @@ def make_loading_handler(state: LoadState):
                     state.failed_seen.set()      # (the supervisor has now heard it from us: main() may end)
                 self._json(503, state.health())
                 return
+            if state.switching and path in ("/v1/models", "/models"):
+                # (P125m: a switch keeps the model listing answering: the model asked for, status "loading")
+                if self._authorized():
+                    self._json(200, state.models_listing())
+                return
             if self._authorized():
                 self._loading()
 
@@ -9132,6 +9148,15 @@ def make_loading_handler(state: LoadState):
                         self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
                         return
                     self._json(200, {"starting": lg["config"]})
+                return
+            if state.switching and path in ("/v1/chat/completions", "/v1/responses", "/v1/messages"):
+                # (P125m: the chat API keeps answering through a switch, and names the model it is waiting for -
+                #  the same words the running server uses when a request names another installed model)
+                if self._authorized():
+                    self._json(503, {"error": {"type": "model_not_loaded",
+                                               "message": f"loading model {state.model}: Saguaro switched to it and "
+                                                          "answers once the load is done (GET /v1/models shows when)"},
+                                     "loading": state.model}, retry_after=5)
                 return
             if self._authorized():
                 self._loading()
@@ -9926,9 +9951,11 @@ def main() -> int:
     api_key = a.api_key or cfg.get("api_key", "")
     supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
     # the page answers on this port from the first second of the load (issue #20); this bind doubles as the old
-    # "is the port free" check: a second start stops here, before the minutes of loading
+    # "is the port free" check: a second start stops here, before the minutes of loading.  SAGUARO_SWITCH=1 (set by
+    # saguaro.py when it starts again because the page switched models, P125m): this load is a switch - /health says
+    # "switch", /v1/models keeps listing, and a page that already shows the app keeps it on screen and waits.
     load_state = LoadState(cfg.get("model_name", "qwen3.8-flash-next"), log_path=cfg.get("log"),
-                           api_key=api_key, supervisor=supervisor,
+                           api_key=api_key, supervisor=supervisor, switching=os.environ.get("SAGUARO_SWITCH") == "1",
                            config_path=str(Path(a.config).resolve()) if a.config else None)   # (as write_last_good keeps it)
     try:
         httpd = serve_loading(load_state, host=a.host, port=a.port)

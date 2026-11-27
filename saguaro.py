@@ -5340,6 +5340,9 @@ def after_server(rc: int, a) -> int:
         config, why = note_cfg, note.get("why")                                     #  a config just renamed)
         backend = read_json(config).get("backend", "cuda")
         port = note.get("port") or port
+    # P125m: the next server knows this start is a model switch: its page keeps the app on screen while the new
+    # model loads, and /v1/models keeps listing it.  A start that is not a switch clears it (the env is inherited).
+    os.environ["SAGUARO_SWITCH"] = "1" if why == "switch" else ""
     for flag, v in (("--backend", backend), ("--port", port), ("--host", a.host), ("--api-key", a.api_key),
                     ("--gpu", a.gpu), ("--gpus", a.gpus), ("--config", config)):
         if v is not None:

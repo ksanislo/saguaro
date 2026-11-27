@@ -58,7 +58,8 @@ const tpChoices = (n, ...own) => [...new Set([1, 2, ...[4, 8, 16].filter((t) => 
 // ------------------------------------------------------------------ Saguaro starting again (a switch, or new settings)
 async function watchRestart(r) {
   MS.restart = r;
-  emit();
+  S.switching = {label: r.name};               // (P125m: the bar stands on the app while Saguaro starts again; the
+  emit();                                      //  reload below is what "returns to normal" once the model is up)
   let down = false;
   for (let i = 0; i < 450; i++) {                      // (15 minutes: a big model's first load can take a while)
     await new Promise((ok) => setTimeout(ok, 2000));
@@ -75,6 +76,7 @@ async function watchRestart(r) {
     }
   }
   MS.restart = null;
+  S.switching = null;                          // (not back: the bar gives its place to "server not reachable")
   emit();
   toast("error", "Saguaro is not back yet", "The terminal it runs in shows why. This page reconnects when it is.", 30000);
 }

@@ -3,7 +3,7 @@
 // attachments, the context meter and the Markdown export.
 import {SPRITE, api, coarse, ctxfmt, db, download, fmt, headers, store, uid} from "./lib.js";
 import {P, PENALTIES, S, confirmDialog, defaultSystem, emit, levelFor, modelId, promptDialog, toast} from "./state.js";
-import {mcpOn, unloaded} from "./server.js";
+import {mcpOn, switchingView, unloaded} from "./server.js";
 import {turboOfChat} from "./turbo-core.js";
 
 // ------------------------------------------------------------------ the chats' list
@@ -577,6 +577,10 @@ export function resumePending() {
 export async function send() {
   const text = S.draft.trim();
   if (S.reload) { toast("info", "The model is reloading", "Send it once the new context size is loaded."); return; }
+  if (S.switching) {                              // (P125m: a switch is on its way; the chats stay, sending waits)
+    toast("info", switchingView(S.switching).text, "Send it once the new model is up.");
+    return;
+  }
   if ((!text && !S.attachments.length) || S.busy) return;
   const c = S.current;
   if (S.editIndex != null) c.messages.splice(S.editIndex);       // the edited message and every answer after it
@@ -593,7 +597,7 @@ export async function send() {
 }
 export function regenerate() {
   const ms = S.current.messages;
-  if (S.busy || S.reload) return;
+  if (S.busy || S.reload || S.switching) return;
   while (ms.length && ms[ms.length - 1].role === "assistant") ms.pop();
   if (!ms.length) return;
   answer();

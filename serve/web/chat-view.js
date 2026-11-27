@@ -4,7 +4,7 @@
 import {Component, html, useEffect, useLayoutEffect, useRef, useState} from "./preact.js";
 import {SPRITE, coarse, ctxfmt, esc, fmt, isPhone, modelLabel, timeStr, tokfmt} from "./lib.js";
 import {LEVELS, P, PRESET_NAMES, S, copyText, emit, presetOf, savePrefs, thinkPill, thinkTitles} from "./state.js";
-import {mcpOn} from "./server.js";
+import {mcpOn, switchingView} from "./server.js";
 import {addFiles, cancelEdit, chatView, ctxMeter, editMessage, focusInput, newChat, painters, regenerate,
         removeAttachment, scrollDown, send, setChatTurbo, setThinking, stopAnswer, thinkingOf, turboOf, updateCtxMeter} from "./chats.js";
 import {markdown, onCodeClick, patchHtml, streamingMarkdown} from "./md.js";
@@ -381,7 +381,8 @@ function Composer({center}) {
   const compactW = useRef(0);
   const text = S.draft;
   const mine = S.busy && S.busy.chat === S.current;
-  const canSend = (text.trim() || S.attachments.length) && !S.busy && !S.reload;
+  const canSend = (text.trim() || S.attachments.length) && !S.busy && !S.reload && !S.switching;
+  const sw = S.switching ? switchingView(S.switching) : null;   // (P125m: the switch bar; sending waits with it)
   useLayoutEffect(() => {
     const t = ta.current;
     if (!t) return;
@@ -403,6 +404,11 @@ function Composer({center}) {
   return html`<div class="composer-wrap">
     ${S.editIndex != null ? html`<div class="edit-bar"><${Icon} name="edit" sm/><span>Editing a message: sending it replaces the answers after it.</span>
       <button type="button" class="btn btn--secondary btn--sm" onClick=${() => cancelEdit()}>Cancel</button></div>` : null}
+    ${sw ? html`<div class=${`switchbar${sw.failed ? " switchbar--failed" : ""}`} role="status">
+      ${sw.failed ? null : html`<span class="switchbar__spin" aria-hidden="true"></span>`}
+      <span class="switchbar__text">${sw.text}${sw.step ? html` · <code>${sw.step}</code>` : null}</span>
+      ${sw.pct != null ? html`<span class="switchbar__bar" aria-hidden="true"><i style=${`width:${sw.pct}%`}></i></span>` : null}
+    </div>` : null}
     <form ref=${box} class=${`composer${tall ? " is-tall" : ""}`} onSubmit=${(e) => { e.preventDefault(); send(); }}>
       ${S.attachments.length ? html`<div class="composer__files">${S.attachments.map((a, i) => html`
         <span class="chip chip--file">${a.kind === "image" && a.url ? html`<img src=${a.url} alt=""/>` : html`<${Icon} name=${a.kind === "file" ? "attach" : "image"} sm/>`}
@@ -433,6 +439,9 @@ function Composer({center}) {
   </div>`;
 }
 function note() {
+  if (S.switching) return switchingView(S.switching).failed ? "The new model did not start - the page it failed with " +
+                                                            "says why: reload this one to see it."
+                 : "The chats stay; send again once it is up.";
   if (S.hint) return S.hint;
   if (S.busy && S.busy.chat !== S.current) return "An answer is being written in another chat.";
   return S.health.mcp_tools && mcpOn() ? "Runs on this machine. Nothing leaves it, unless an MCP tool you turned on reaches the web."
