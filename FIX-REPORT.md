@@ -1,4 +1,4 @@
-# FIX-REPORT - REVIEW-RESULT findings, one commit each (round 4: `ae2dac446..8b16a85a2`)
+# FIX-REPORT - REVIEW-RESULT findings, one commit each (round 4: `ae2dac446..db33a01f6`)
 
 The manager's card test (mortar, 2026-11-26 13:24-13:30, `REVIEW-RESULT.md` committed with these fixes) is the
 whole finding this round: the HOST side passes (1.30 GiB pinned at both contexts, expert RAM tier 68.00 GiB), but
@@ -7,10 +7,10 @@ at 262144 and only 843 at 1048576, lendable slots 1915 vs 618, and a 29,571-toke
 per Ken's acceptance (just HAVING 1M set must not hurt; memory follows USE): every context-scaled VRAM allocation
 now holds a start step (~32768 cells - the same start the host copies pin), grows with its conversation, and the
 experts get everything else until a conversation takes it back. The card's three numbered parts map to the three
-sections below; the code change is fixes `d49bedb40`..`8b16a85a2` (5 commits), the new build dir is
+sections below; the code change is fixes `d49bedb40`..`db33a01f6` (six numbered fixes, one commit each, plus a
+comment-only touch-up `81db67a8a`), the new build dir is
 `scratch/build-p124e-r4` (CUDA sm_75, ggml from `scratch/ggml-pinned`), and nothing here is GPU-testable on this
 box (no card, no resident tier) - the proof stays `scratch/card-test-elastic-kv.sh` on mortar.
-
 ## 1. FIX-FIRST step 1 - every load-time VRAM allocation sized by --max-context (`ae2dac446` line numbers)
 
 The K/V ring in VRAM is window-sized already (`kv_plan` gives `p.slots = --kv-resident / 4` pages - equal at both
@@ -78,6 +78,12 @@ four allocations above become **addresses for the whole --max-context and physic
   OR the follow rule runs (iterating the `Give` list). The load says once: "the sessions' context device state
   (page tables, the indexer's keys, the selection scratch, the RoPE tables) holds N MiB at load and grows with
   each conversation".
+* **No lock crosses the relief** (fix 6): the relief handler's give path takes the slot budget's lock and its
+  low-water check reads the RoPE registry, so neither a follow grow, a scratch grow nor `qsa_rope_grow` may hold
+  its lock while asking: each measures (locked), probes the room and asks the relief (lock-free), then maps
+  (locked) - `qsa_follow_grow_at` / `follow_room` / `follow_map_locked`.  A failed rope map now also hands back
+  the budget chunks and fresh chunks it never consumed.  (The host copies' `host_relief`-under-`g_host_mu` stays
+  as reviewed in round 2/3: that chain never re-enters the host pool.)
 * **The safety valve ("nothing may change for a conversation that really grows past 262144"):** a conversation
   that grows past the start needs VRAM the cache holds - only the give path can supply it. Where the give can
   never run (experts not all in the RAM arena, `--adapt-async`, `--prefill-head-alias`, `--peer-device`,
@@ -111,7 +117,12 @@ taken.
     off in the card config, the second's context-sized VRAM is its whole K/V pool, which `--kv-grow` already grows
     and shrinks with the context (and streaming is off there, so the rule's scope excludes it).
   - The `KMEM`/`HMEM` server gauges stay `--batch`-budget-gated; the give path's stdout line still says "elastic
-    slots" while now also serving the follow relief. Cosmetics, not semantics.
+    slots" while now also serving the follow relief. Cosmetics, not semantics. And `vision_lend=1` is now announced
+    on a follow rig without `--batch` too (the give path really does run there) - the encoder gate, unchanged where
+    the budget runs.
+  - On a rig that also sets `SAGUARO_ELASTIC_SLOTS=2` (the budget pools), the rule adds only what the budget never
+    held - the page table, the scratch, the grown RoPE - and the budget's kv/rows arrays keep their give-back-to-
+    budget trim exactly as before; a shared state simply has two pools (`slot_elastic`, `follow_elastic`).
   - Freed follow chunks go to the driver at once (a park gives its VRAM back); the cache takes that room again
     through its own paths (`VRECLAIM`, the adaptive tier), as with budget chunks today.
 
