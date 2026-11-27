@@ -226,7 +226,8 @@ conv() {   # conv <name> <prompt-file>: start it and remember its pid
 }
 echo "== load: three conversations (~${TOKENS_A}/${TOKENS_B}/${TOKENS_C} tokens), ${DURATION}s, samples every ${SAMPLE_S}s =="
 for _ in $(seq 1 30); do [ -s "$CSV" ] && [ "$(wc -l < "$CSV")" -ge 2 ] && break; sleep 1; done
-BASE_SWAP=$(awk 'NR==2 {print $3}' "$CSV")     # the sampler's first data row: the box's residual swap
+BASE_SWAP=$(awk -F, 'NR==2 {gsub(/\r/, "", $3); print $3}' "$CSV")   # the sampler's first data row (csv.writer:
+                                                                     # comma-separated, CRLF line ends)
 [ -n "$BASE_SWAP" ] || fail "the sampler wrote no rows (see $DIR/sampler.log)"
 conv A "$DIR/prompt_A.txt"
 conv B "$DIR/prompt_B.txt"
