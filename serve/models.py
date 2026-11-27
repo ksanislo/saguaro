@@ -1471,11 +1471,14 @@ def delete(root: Path, path: Path, files: bool = False) -> dict:
         if errors:
             raise OSError("could not delete " + "; ".join(errors) + " - the model stays on the list")
     stale = [path, path.with_name(f"run-{path.stem}.sh"), path.with_name(f"run-{path.stem}.bat"),
-             path.with_name(path.name + ".prev"), path.with_name(path.stem + ".shared-settings.json")]
-    if path.name.startswith(config_names.NEW):         # (its maya- shadow, the other half of a hand-made pair)
+             path.with_name(path.name + ".prev"), path.with_name(path.stem + ".shared-settings.json"),
+             path.with_name(path.stem + ".turbo.json")]   # (its live Turbo too: left, a later model set up under
+    if path.name.startswith(config_names.NEW):            #  this name would start with its panel options on)
+        # (its maya- shadow, the other half of a hand-made pair)
         shadow = path.with_name(config_names.OLD + path.stem[len(config_names.NEW):] + ".json")
         stale += [shadow, shadow.with_name(f"run-{shadow.stem}.sh"), shadow.with_name(f"run-{shadow.stem}.bat"),
-                  shadow.with_name(shadow.name + ".prev"), shadow.with_name(shadow.stem + ".shared-settings.json")]
+                  shadow.with_name(shadow.name + ".prev"), shadow.with_name(shadow.stem + ".shared-settings.json"),
+                  shadow.with_name(shadow.stem + ".turbo.json")]
     for p in stale:
         try:
             p.unlink()

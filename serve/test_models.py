@@ -862,12 +862,15 @@ class Delete(unittest.TestCase):
     def test_off_the_list_only(self):
         l = glm_quant(self.d, "Maya-L")
         prev, shared = l.with_name(l.name + ".prev"), l.with_name(l.stem + ".shared-settings.json")
+        turbo = l.with_name(l.stem + ".turbo.json")        # (the live Turbo sidecar: P125f, the third one swept)
         prev.write_text("{}")
         shared.write_text("{}")
+        turbo.write_text('{"drop": 1, "skip": "off"}')
         out = M.delete(self.d, l)
         self.assertEqual((out["freed"], out["files"]), (0, False))
         self.assertFalse(l.exists() or prev.exists() or shared.exists())
-        self.assertTrue((self.d / "GLM-5.3-Flash" / "Maya-L" / "pack").is_dir())
+        self.assertFalse(turbo.exists())                   # (left, its options would re-switch Turbo on for a
+        self.assertTrue((self.d / "GLM-5.3-Flash" / "Maya-L" / "pack").is_dir())   #  later model of this name)
 
     def test_a_folder_another_model_runs_from(self):
         # two quants' files in one folder (the setup's pack-<model>/ beside pack/): only its own pack and GGUF files
