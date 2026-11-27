@@ -3301,13 +3301,17 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         if (!lp_resume && hand_in_ == nullptr) gr_broadcast(m.emb, m.R, T, m.cs);
         // ---- the PLE rows of the whole chunk, one batched SSD request on a thread (see ple_gather).  A later chunk's
         // were read ahead during the previous chunk; the first chunk's are read beside layer 0 - they are needed from
-        // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt)
-        if (ple_on && !ple_next.valid())
+        // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt).
+        // P125j: a chunk that RESUMES above layer 1 runs no PLE block at all (m.ple_emb's only readers are the
+        // l == max(LB,1) blocks, which l_from skips), so its rows are neither gathered (~84 MB of SSD) nor landed
+        // (~84 MB of H2D) - and the next chunk's gather restarts at its own top, as it does after the first chunk.
+        const bool ple_reads = l_from <= std::max<int64_t>(LB, 1);   // ple_on means LB <= 1: this is l_from <= 1
+        if (ple_on && ple_reads && !ple_next.valid())
             ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
                 strata::aux_cpus::pin_current_thread();
                 return ple_gather(c0, b, ple_next_err);
             });
-        bool ple_pending = ple_on;
+        bool ple_pending = ple_on && ple_reads;
         // the chunk's rows onto the device just before layer 1 reads them, and the next chunk's gather started
         auto ple_land = [&]() -> bool {
             if (!ple_pending) return true;
@@ -5542,6 +5546,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             }
         }
         if (!ple_land()) return false;   // a stage that ends before layer 1: the rows land anyway, the next gather starts
+        if (ple_on && !ple_reads && ple_next.valid()) {   // P125j: a chunk before a resumed one read its rows ahead:
+            if (!ple_next.get()) {                        // waited out, landed nowhere - and no stale gather left
+                err = ple_next_err;                       // in ple_next for the NEXT chunk's top to mistake for its own
+                return false;
+            }
+        }
         if (issuer.joinable()) {
             issuer.join();
             stats_.ms_experts_host += iss_ms;
