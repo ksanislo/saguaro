@@ -8276,24 +8276,31 @@ int main(int argc, char** argv) {
     //
     // PLAN-qfn-per-request-read-stats (per-request read progress, output only - appended key=value fields, so a
     // server that does not know them reads the old positional fields exactly as before):
-    //   `PP <position> <prompt_tokens> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id>` - new_read is THIS request's
-    //   tokens read so far, counted from where this read started (the reused / restored / parked prefix never
-    //   counts), and read_ms the time this request's read has actually been running: not the waits between prompt
-    //   pieces (the slots' decode share, a yield hold), not the restore, not any queue time.  <ms> keeps its old
-    //   meaning (wall time since the request began) for servers that use it.
-    //   `RDONE rid=<id> new=<n> ms=<ms>` once per read, at its end - after the last part read, or before the DONE of
-    //   a read that ends early (cancel, BYIELD, no VRAM): the exact new tokens for this request's read (the DONE's
-    //   prompt - reused, or the clamped count when a cancel stopped it part-way) over its own read time.  The batch
-    //   path's equivalent is its `BRA <slot> 1 prompt= reused= read_ms=` line, unchanged.
-    // PLAN-u5-read-heartbeat (the read reports its progress about every second, like decode does - output only,
-    // printed from host points between layer passes / pipe pieces / KV staging passes, at most one line per ~1 s
-    // per reading request, so a one-chunk read, a long first chunk or a read mostly busy staging its K/V from
-    // RAM no longer looks frozen until it ends):
+    //   `PP <position> <prompt_tokens> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id> [stage_ms=<ms>]` - new_read is
+    //   THIS request's tokens read so far, counted from where this read started (the reused / restored / parked
+    //   prefix never counts), and read_ms the time this request's read has actually been running: not the waits
+    //   between prompt pieces (the slots' decode share, a yield hold), not the restore, not any queue time.  <ms>
+    //   keeps its old meaning (wall time since the request began) for servers that use it.  stage_ms (P124v,
+    //   PLAN-p124v-read-rate): the part of read_ms the read spent staging its K/V (copying the reused prefix in
+    //   from RAM) rather than reading new tokens - a read's TRUE read time is read_ms - stage_ms, and a server
+    //   that divides the read's tokens by read_ms alone reads a restored read as a fraction of its real speed.
+    //   `RDONE rid=<id> new=<n> ms=<ms> [stage_ms=<ms>]` once per read, at its end - after the last part read, or
+    //   before the DONE of a read that ends early (cancel, BYIELD, no VRAM): the exact new tokens for this
+    //   request's read (the DONE's prompt - reused, or the clamped count when a cancel stopped it part-way) over
+    //   its own read time.  The batch path's equivalent is its `BRA <slot> 1 prompt= reused= read_ms= [stage_ms=]`
+    //   line, unchanged otherwise.
+    // PLAN-u5-read-heartbeat + PLAN-p124v-read-rate (the read reports its progress at a steady cadence - four
+    // lines a second or so, like decode does - output only, printed from host points between layer passes / pipe
+    // pieces / KV staging passes, at most one line per ~0.23 s per reading request, so a one-chunk read, a long
+    // first chunk or a read mostly busy staging its K/V from RAM no longer looks frozen until it ends and the
+    // server's rate of it is a live figure, not a per-chunk jump):
     //   `RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-    //        pass=<i>/<n> ms=<read ms>` - stage: the reused prefix is being copied host->VRAM, read: new tokens
-    //   are being read; done / new count from where THIS read started (never a reused / restored / parked
-    //   prefix); pass is the current host pass (layer pass of the chunk, or piece of the plan between pieces) of
-    //   their total; ms is this request's own read time (the PP lines' read_ms).  The batch path prints
+    //        pass=<i>/<n> ms=<read ms> [stage_ms=<ms>]` - stage: the reused prefix is being copied host->VRAM,
+    //   read: new tokens are being read; done / new count from where THIS read started (never a reused / restored
+    //   / parked prefix); pass is the current host pass (layer pass of the chunk, or piece of the plan between
+    //   pieces) of their total; ms is this request's own read time (the PP lines' read_ms) and stage_ms the part
+    //   of it spent staging (attributed host point by host point - a close figure on one card, an approximation
+    //   across a split's pipeline, and the driver floors ms - stage_ms at 0).  The batch path prints
     //   `rid=0` with an appended `slot=<b>` (its BRP / BRA lines' slot); a batched shared chunk reports each
     //   reading slot on its own line.  U5b (PLAN-u5b-split-progress): `done` is ONE figure per reading request,
     //   shared by every host point of that read - the new tokens whose reading is complete over all the layer
@@ -11046,6 +11053,28 @@ vs.d_skip_usage = gs.d_skip_usage;
         std::atomic<long long> pp_run_us{0};
         std::atomic<bool> pp_running{false};
         Clock::time_point pp_run_t0{};
+        // P124v (PLAN-p124v-read-rate): the read clock above also covers the KV staging passes (the reused
+        // prefix copied RAM -> VRAM runs inside sp.run), and a read that spends most of it staging 50K tokens
+        // showed its rate diluted to single digits.  stage_ms= on the PP / RHB / RDONE lines carries the
+        // staging part, and the server's rate divides by the read's time MINUS it (floored at 0).
+        std::atomic<long long> pp_stage_us{0};
+        std::atomic<long long> pp_host_t{0};    // us epoch of this run's last host point (0: none yet)
+        std::atomic<int> pp_host_staged{-1};    // its kind: 1 a KV staging pass, 0 a read pass, -1 unset
+        // A host point fires when its pass COMPLETES: the interval since the previous point of the same run is
+        // that pass's time, so it lands in the staging clock when the point says `staged` (what runs between two
+        // points is not in any clock yet - the same open interval sits in ms and in stage_ms alike, leaving
+        // ms - stage_ms the read's own elapsed READ time).  A point chain broken by a long wait attributes at
+        // most 2 s to the pass that completes after it: a held read is none's time, and the server's rate
+        // figure floors ms - stage_ms at 0.
+        auto pp_host_point = [&](bool staged) {   // every host point, before the heartbeat gate
+            const long long t = (long long) std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now().time_since_epoch()).count();
+            const long long prev = pp_host_t.exchange(t, std::memory_order_relaxed);
+            pp_host_staged.store(staged ? 1 : 0, std::memory_order_relaxed);
+            if (prev > 0 && staged && t > prev && t - prev < 2000000)
+                pp_stage_us.fetch_add(t - prev, std::memory_order_relaxed);
+        };
+        auto pp_stage_ms = [&]() -> double { return (double) pp_stage_us.load(std::memory_order_relaxed) / 1000.0; };
         auto pp_running_ms = [&]() -> double {
             double ms = (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0;
             // acquire: the release store in pp_run_begin orders the pp_run_t0 write before this flag
@@ -11058,6 +11087,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             pp_running.store(true, std::memory_order_release);
         };
         auto pp_run_end = [&]() {
+            // P124v: a held gap between runs is neither read nor staging time: the host-point chain starts over
+            pp_host_t.store(0, std::memory_order_relaxed);
+            pp_host_staged.store(-1, std::memory_order_relaxed);
             if (!pp_running.exchange(false, std::memory_order_relaxed)) return;
             pp_run_us.fetch_add((long long) (std::chrono::duration<double, std::micro>(Clock::now() -
                                                                                         pp_run_t0).count() + 0.5),
@@ -11068,14 +11100,16 @@ vs.d_skip_usage = gs.d_skip_usage;
         static long long serve_rid = 0;
         long long pp_rid = 0;
         bool rdone_done = false;   // this request's RDONE (once, at its read's end or before its DONE)
-        // U5 read heartbeat (PLAN-u5-read-heartbeat): while a read runs it reports its progress the way decode
-        // does - at most one line per ~1 s per reading request, printed from the host points between layer
-        // passes / pipe pieces / KV staging passes:
+        // U5 read heartbeat (PLAN-u5-read-heartbeat + PLAN-p124v-read-rate): while a read runs it reports its
+        // progress the way decode does - at most one line per ~0.23 s per reading request (a steady four or so a
+        // second: the server's live read rate follows the read at its own cadence, without a client-side window
+        // hiding a stall), printed from the host points between layer passes / pipe pieces / KV staging passes:
         //   RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-        //       pass=<i>/<n> ms=<read ms>
+        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it>
         // stage: its K/V prefix is coming in from RAM; read: its new tokens are being read.  ms is this read's
-        // own running time (the read clock above: not the waits between pieces).  Output only - every existing
-        // line stays exactly as it was, and rid=0 lines (the batch path's) carry an appended slot=<b>.
+        // own running time (the read clock above: not the waits between pieces) and stage_ms the part of it spent
+        // staging: ms - stage_ms is its own elapsed READ time.  Output only - every existing line stays exactly
+        // as it was, and rid=0 lines (the batch path's) carry an appended slot=<b>.
         std::mutex rhb_mu;
         Clock::time_point rhb_t{};
         long long rhb_rid = 0;
@@ -11086,29 +11120,33 @@ vs.d_skip_usage = gs.d_skip_usage;
         // at `new` when the read ends.  One card: exactly the figure its own host points report (what it printed).
         strata::program::ReadProgress solo_prog;
         auto rhb_print = [&](long long rid, const char* stage, long long done, long long newn, long long reused,
-                             long long pass_i, long long pass_n, double ms) {
+                             long long pass_i, long long pass_n, double ms, double stage_ms) {
             std::lock_guard<std::mutex> lk(rhb_mu);
             const auto now = Clock::now();
-            if (rhb_rid == rid && std::chrono::duration<double, std::milli>(now - rhb_t).count() < 950.0) return;
+            if (rhb_rid == rid && std::chrono::duration<double, std::milli>(now - rhb_t).count() < 230.0) return;
             rhb_rid = rid;
             rhb_t = now;
-            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f\n", rid, stage,
-                        done, newn, reused, pass_i, pass_n, ms);
+            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f\n",
+                        rid, stage, done, newn, reused, pass_i, pass_n, ms, stage_ms);
             std::fflush(stdout);
         };
         auto rhb_solo = [&](const char* stage, int64_t card, int64_t pos0, long long pass_i, long long pass_n) {
             if (pp_rid == 0 || pp_total <= pp_from) return;   // nothing of this request is being read (a warm run)
+            pp_host_point(stage[0] == 's');   // P124v: this pass's time into the read's staging / read clocks
             solo_prog.report(card, pos0, pass_i, pass_n);     // this card's host point, into the read's figure
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
-                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms());
+                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
+                      pp_stage_ms());
         };
         // the host point between the pieces of a pipelined read: the piece ended, everything below `pos` has
         // passed every card - the read's figure takes it as its fully-read point (U5b)
         auto rhb_solo_piece = [&](const char* stage, int64_t pos, long long pass_i, long long pass_n) {
             if (pp_rid == 0 || pp_total <= pp_from) return;
+            pp_host_point(stage[0] == 's');   // P124v: the piece boundary is a host point too
             solo_prog.report_full(pos);
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
-                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms());
+                      (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
+                      pp_stage_ms());
         };
         // #471: the position the prompt pass has read up to (a chunk's or a window's end): what a request cancelled
         // mid-read reports as read, instead of the whole prompt
@@ -11383,10 +11421,11 @@ vs.d_skip_usage = gs.d_skip_usage;
             pp_reached = done;
             solo_prog.report_full(done);   // U5b: this chunk's tokens passed every card (the last stage reports)
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-            std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) done,
+            std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld stage_ms=%.1f\n", (long long) done,
                         (long long) pp_total, ms,
                         ms > 0.0 ? 1000.0 * (double) (done - pp_from) / ms : 0.0,
-                        (long long) std::max<int64_t>(0, done - pp_from), pp_running_ms(), (long long) pp_rid);
+                        (long long) std::max<int64_t>(0, done - pp_from), pp_running_ms(), (long long) pp_rid,
+                        pp_stage_ms());
             strata::core::progress_at("reading the prompt (batched), done up to token", done);
             strata::core::progress_beat();
             std::fflush(stdout);
@@ -11456,7 +11495,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
         }
         // U5 read heartbeat: the prompt path's host points between layer passes feed the RHB line of the solo read
-        // in flight (every stage reports; one read runs at a time and the gate above keeps it to ~1 line per s).
+        // in flight (every stage reports; one read runs at a time and the gate above keeps it to ~4 lines a s).
         // The batch slot reads replace these for the time they hold the path (see the admission's swap below).
         // U5b: the card is its first layer (`lb`, unique across a split's stages); the read's shared figure
         // (solo_prog) is what the line's done= shows - every card reports, one figure prints.
@@ -16374,30 +16413,58 @@ vs.d_skip_usage = gs.d_skip_usage;
             Clock::time_point rhb_t{};   // U5 read heartbeat: when this read last printed an RHB line
             strata::program::ReadProgress prog;   // U5b: this read's one shared progress figure (read_progress.hpp)
             bool prog_begun = false;     // U5b: the figure is laid out once, at the read's start (a pause keeps it)
+            // P124v (PLAN-p124v-read-rate): the read's staging time (the KV staging passes inside the read's
+            // clock), attributed host point by host point; RHB / BRP / BRA carry stage_ms= and the server's
+            // rate divides by the read's time MINUS it.  The host-point chain starts over with every run of
+            // the read (a held gap is neither read nor staging time, like the read clock's own rule).
+            std::atomic<long long> stage_us{0};   // us spent staging, over the runs settled so far
+            std::atomic<long long> host_t{0};     // us epoch of the run's last host point (0: none yet)
+            std::atomic<int> host_staged{-1};     // its kind: 1 a KV staging pass, 0 a read pass
         };
         std::vector<std::unique_ptr<AdmJob>> cy_held;   // SAGUARO_READ_YIELD: reads held at a piece boundary
-        // U5 read heartbeat (PLAN-u5-read-heartbeat), batch side: a slot's read reports itself at most one line
-        // per ~1 s from host points between the layer passes of its pieces:
+        // U5 read heartbeat (PLAN-u5-read-heartbeat + PLAN-p124v-read-rate), batch side: a slot's read reports
+        // itself at most one line per ~0.23 s (a steady four or so a second) from host points between the layer
+        // passes of its pieces:
         //   RHB rid=0 stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-        //       pass=<i>/<n> ms=<read ms> slot=<b>
+        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it> slot=<b>
         // rid=0 (as in the protocol note): the slot tells which read it is, like its BRP / BRA lines. done and
         // new count from where THIS read started (never its reused / parked prefix); ms is this read's own time
-        // since it was fed, as on the BRP lines (a read held at a piece boundary prints no lines while held).
+        // over its runs so far (the legs add up like the BRP lines' read_ms; a read held at a piece boundary
+        // prints no lines and adds no time while held) and stage_ms the part of it spent staging its K/V in
+        // from RAM: ms - stage_ms is its own elapsed READ time (a restored prefix staged first must not dilute
+        // the read's rate to single digits - the server's figure divides by the read's time, staging left out).
         // U5b (PLAN-u5b-split-progress): done is this read's shared figure (its AdmJob's ReadProgress): every
         // card's host point feeds its own card, one figure prints - never decreasing, ending at `new` (the BRP
         // points report the chunks that passed every card); two reads at once keep separate figures by their slot.
+        // A host point fires when its pass COMPLETES: the interval since the run's previous point is that pass's
+        // time, landed in the staging clock when the point says `staged` (what runs between two points is in ms
+        // and stage_ms alike, leaving ms - stage_ms the read's own elapsed READ time).
+        auto adm_host_point = [&](AdmJob& j, bool staged) {
+            const long long t = (long long) std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now().time_since_epoch()).count();
+            const long long prev = j.host_t.exchange(t, std::memory_order_relaxed);
+            j.host_staged.store(staged ? 1 : 0, std::memory_order_relaxed);
+            if (prev > 0 && staged && t > prev && t - prev < 2000000)   // a held gap stays out (cap, as solo)
+                j.stage_us.fetch_add(t - prev, std::memory_order_relaxed);
+        };
+        auto adm_stage_ms = [](const AdmJob& j) -> double {
+            return (double) j.stage_us.load(std::memory_order_relaxed) / 1000.0;
+        };
         auto rhb_slot = [&](AdmJob& j, int b, int64_t n, Clock::time_point t_read, int64_t card, int64_t pos0,
                             long long pass_i, long long pass_n, bool staged) {
+            adm_host_point(j, staged);   // P124v: this pass's time into the read's staging / read clocks
             j.prog.report(card, pos0, pass_i, pass_n);   // this card's host point, into the read's figure
             std::lock_guard<std::mutex> lk(rhb_mu);   // (every stage's thread reports: two pieces of one read at a time)
             const auto now = Clock::now();
             if (j.rhb_t != Clock::time_point{} &&
-                std::chrono::duration<double, std::milli>(now - j.rhb_t).count() < 950.0) return;
+                std::chrono::duration<double, std::milli>(now - j.rhb_t).count() < 230.0) return;
             j.rhb_t = now;
-            std::printf("RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f slot=%d\n",
-                        staged ? "stage" : "read", (long long) j.prog.done(),
+            std::printf(
+                "RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f slot=%d\n",
+                staged ? "stage" : "read", (long long) j.prog.done(),
                         (long long) std::max<int64_t>(0, n - j.resume), (long long) j.resume, pass_i, pass_n,
-                        std::chrono::duration<double, std::milli>(now - t_read).count(), b);
+                        j.read_ms + std::chrono::duration<double, std::milli>(now - t_read).count(),
+                        adm_stage_ms(j), b);
             std::fflush(stdout);
         };
         // SAGUARO_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 12, two per bucket): a batch slot's conversation keeps grid checkpoints
@@ -16703,12 +16770,14 @@ vs.d_skip_usage = gs.d_skip_usage;
             const std::vector<int64_t>& ids = j.r.ids;
             strata::core::MtpDrafter* dr = batch_mtp ? slot_mtp[(size_t) b].get() : nullptr;
             const auto t_read = Clock::now();
+            j.host_t.store(0, std::memory_order_relaxed);      // P124v: the host-point chain starts with this run
+            j.host_staged.store(-1, std::memory_order_relaxed);
             if (!j.prog_begun) {   // U5b: the read's shared progress figure (a paused read that comes back keeps it)
                 j.prog.reset(j.resume, n, g.n_layers);
                 j.prog_begun = true;
             }
             // U5 read heartbeat: this read's host points between the layer passes (and the KV staging passes)
-            // report the slot's read, ~one RHB line per second (the solo path's callback is put back by undo)
+            // report the slot's read, ~four RHB lines a second (the solo path's callback is put back by undo)
             for (size_t k = 0; k < n_st; ++k) {
                 old_layer_pass[k] = std::move(stage_prefill(k).on_layer_pass);
                 stage_prefill(k).on_layer_pass = [&, b](int64_t pass, int64_t passes, bool staged, int64_t lb,
@@ -16729,10 +16798,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                 adm_at.store(done);
                 j.prog.report_full(done);   // U5b: this chunk's tokens passed every card (the last stage reports)
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t_read).count();
-                std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f\n", b, (long long) done,
+                std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f stage_ms=%.1f\n", b,
+                            (long long) done,
                             (long long) n, ms,
                             ms > 0.0 ? 1000.0 * (double) (done - at0) / ms : 0.0,
-                            (long long) std::max<int64_t>(0, done - j.resume), j.read_ms + ms);
+                            (long long) std::max<int64_t>(0, done - j.resume), j.read_ms + ms, adm_stage_ms(j));
                 std::fflush(stdout);
                 strata::core::progress_at("reading a prompt into a batch slot, done up to token", done);
                 strata::core::progress_beat();
@@ -16985,8 +17055,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             sl.adm_reused = j.resume;
             // (no first draft: that needs the last prompt token's row, which the slot's first window computes)
             ver.set_slot_sampling(b, j.r.sp);
-            std::printf("BRA %d 1 prompt=%lld reused=%lld read_ms=%.1f wait_ms=%.1f\n", b, (long long) n,
-                        (long long) j.resume, j.read_ms, j.wait_ms);
+            std::printf("BRA %d 1 prompt=%lld reused=%lld read_ms=%.1f wait_ms=%.1f stage_ms=%.1f\n", b,
+                        (long long) n,
+                        (long long) j.resume, j.read_ms, j.wait_ms, adm_stage_ms(j));
             std::fflush(stdout);
             return AdmEnd::done;
         };
@@ -17463,19 +17534,20 @@ vs.d_skip_usage = gs.d_skip_usage;
                     // PLAN-qfn-per-request-read-stats: new_read counts this request's tokens read from where its read
                     // started (its reused prefix left out, never a parked position); read_ms is the time this read has
                     // run since it was fed (a read held for a yield prints no lines while it is held)
-                    std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f\n", b, (long long) done,
+                    std::printf("BRP %d %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f stage_ms=%.1f\n", b,
+                                (long long) done,
                                 (long long) n, ms,
                                 ms > 0.0 ? 1000.0 * (double) (done - jp->resume) / ms : 0.0,
-                                (long long) std::max<int64_t>(0, done - jp->resume), ms);
+                                (long long) std::max<int64_t>(0, done - jp->resume), ms, adm_stage_ms(*jp));
                     std::fflush(stdout);
                     strata::core::progress_at("reading a prompt into a batch slot, done up to token", done);
                     strata::core::progress_beat();
                     return true;
                 };
                 // U5 read heartbeat: the layer passes of this piece (and their KV staging passes, `staged`)
-                // report its read, ~one RHB line per second (batched chunks call each segment's own callback).
+                // report its read, ~four RHB lines a second (batched chunks call each segment's own callback).
                 // U5b: `lb` names the card (this one callback runs on every stage's thread); done= is the read's
-                // shared figure (jp->prog), fed by every card, printed by whichever point opens the one-second gate.
+                // shared figure (jp->prog), fed by every card, printed by whichever point opens the 230 ms gate.
                 pj->on_layer_pass = [&, jp, b, n](int64_t pass, int64_t passes, bool staged, int64_t lb,
                                                   int64_t pos0) {
                     rhb_slot(*jp, b, n, jp->t_read, lb, pos0, (long long) pass, (long long) passes, staged);
@@ -17718,8 +17790,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                     sl.adm_notes = nb;
                 }
                 ver.set_slot_sampling(b, j.r.sp);
-                std::printf("BRA %d 1 prompt=%lld reused=%lld read_ms=%.1f wait_ms=%.1f\n", b, (long long) n,
-                            (long long) j.resume, j.read_ms, j.wait_ms);
+                std::printf("BRA %d 1 prompt=%lld reused=%lld read_ms=%.1f wait_ms=%.1f stage_ms=%.1f\n", b,
+                            (long long) n,
+                            (long long) j.resume, j.read_ms, j.wait_ms, adm_stage_ms(j));
                 std::fflush(stdout);
                 return true;
             };
@@ -20085,6 +20158,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             pp_t0 = r0;
             pp_run_us.store(0, std::memory_order_relaxed);   // (PLAN-qfn-per-request-read-stats: this request's own
             pp_running.store(false, std::memory_order_relaxed);   //  read clock, its rid, one RDONE per read)
+            pp_stage_us.store(0, std::memory_order_relaxed);   // P124v: the read's staging time starts over too
+            pp_host_t.store(0, std::memory_order_relaxed);
+            pp_host_staged.store(-1, std::memory_order_relaxed);
             pp_rid = ++serve_rid;
             rdone_done = false;
             pp_next_check = reread_to > 0 || !req_ckpt ? INT64_MAX : resume + o.prompt_cache_every;   // ckpt=0: none
@@ -20234,10 +20310,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 pl_mtp_live[0] = pl_mtp_live[1] = false;
                 pp_run_end();   // (the read is over: its time stops here, before the line that reports it)
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) b,
+                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld stage_ms=%.1f\n",
+                            (long long) b,
                             (long long) pp_total, ms,
                             ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0,
-                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid);
+                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid,
+                            pp_stage_ms());
                 strata::core::progress_beat();
                 std::fflush(stdout);
                 return true;
@@ -20303,10 +20381,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (!ver.wait_commit(e)) return false;
                 pp_run_end();   // (the read is over: its time stops here, before the line that reports it)
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) b,
+                std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld stage_ms=%.1f\n",
+                            (long long) b,
                             (long long) pp_total, ms,
                             ms > 0.0 ? 1000.0 * (double) (b - pp_from) / ms : 0.0,
-                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid);
+                            (long long) std::max<int64_t>(0, b - pp_from), pp_running_ms(), (long long) pp_rid,
+                            pp_stage_ms());
                 strata::core::progress_beat();
                 std::fflush(stdout);
                 return true;
@@ -21388,10 +21468,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 }
                 if (sp_ok && merge_at >= 0) {   // the server's progress reaches the prompt's end, as after its last window
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-                    std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld\n", (long long) to,
+                    std::printf("PP %lld %lld %.0f %.1f new_read=%lld read_ms=%.1f rid=%lld stage_ms=%.1f\n",
+                                (long long) to,
                                 (long long) pp_total, ms,
                                 ms > 0.0 ? 1000.0 * (double) (to - pp_from) / ms : 0.0,
-                                (long long) std::max<int64_t>(0, to - pp_from), pp_running_ms(), (long long) pp_rid);
+                                (long long) std::max<int64_t>(0, to - pp_from), pp_running_ms(), (long long) pp_rid,
+                                pp_stage_ms());
                     std::fflush(stdout);
                 }
                 if (!sp_ok) {
@@ -21441,9 +21523,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             // gets the same line before its DONE (below); a request that ends with ERR gives none.
             if (!cancelled && !rdone_done) {
                 rdone_done = true;
-                std::printf("RDONE rid=%lld new=%lld ms=%.1f\n", (long long) pp_rid,
+                std::printf("RDONE rid=%lld new=%lld ms=%.1f stage_ms=%.1f\n", (long long) pp_rid,
                             (long long) std::max<int64_t>(0, n - resume),
-                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0);
+                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0, pp_stage_ms());
                 std::fflush(stdout);
             }
             if (!cy_held.empty()) {
@@ -22783,8 +22865,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t read_n = cancelled ? std::clamp<int64_t>(pp_reached - resume, 0, fresh) : fresh;
             if (!rdone_done) {   // (PLAN-qfn-per-request-read-stats: this read ends here too - cancelled, yielded
                 rdone_done = true;   //  or a prompt that was whole from the start: its own count, its own read time)
-                std::printf("RDONE rid=%lld new=%lld ms=%.1f\n", (long long) pp_rid, (long long) read_n,
-                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0);
+                std::printf("RDONE rid=%lld new=%lld ms=%.1f stage_ms=%.1f\n", (long long) pp_rid, (long long) read_n,
+                            (double) pp_run_us.load(std::memory_order_relaxed) / 1000.0, pp_stage_ms());
                 std::fflush(stdout);
             }
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
