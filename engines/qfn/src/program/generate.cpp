@@ -10981,20 +10981,26 @@ vs.d_skip_usage = gs.d_skip_usage;
                     return strata::core::conversation_memory_admit(
                         mem ? std::optional<uint64_t>(mem->available) : std::nullopt, additional, floor);
                 };
-                while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
-                       conversations.evict_oldest())
-                    ++evicted;
-                if (!admit()) {
+                auto refuse_ram = [&] {   // the refusal line, for both admission passes
                     std::fprintf(stderr, "saguaro serve: conversation cache: skip parking (physical RAM admission; need %zu MiB plus %lld MiB floor, %s; evicted %zu, %zu still parked)\n",
                                  additional >> 20, (long long) o.conversation_cache_min_free_mib, ram_note(mem).c_str(),
                                  evicted, conversations.size());
                     spill();
                     return true;
-                }
-                if (evicted)
+                };
+                auto say_evicted = [&] {
                     std::fprintf(stderr, "saguaro serve: conversation cache: evicted %zu parked conversation%s to admit this snapshot (%zu MiB plus %lld MiB floor)\n",
                                  evicted, evicted == 1 ? "" : "s", additional >> 20,
                                  (long long) o.conversation_cache_min_free_mib);
+                };
+                auto admit_room = [&] {
+                    while (!admit() && conversations.size() > 0 && evicted < conversations.slots() &&
+                           conversations.evict_oldest())
+                        ++evicted;
+                    return admit();
+                };
+                if (!admit_room()) return refuse_ram();
+                if (evicted) say_evicted();
                 strata::core::SavedConversation image;
                 size_t reused_bytes = 0;
                 bool from_capture = false;
@@ -11007,6 +11013,19 @@ vs.d_skip_usage = gs.d_skip_usage;
                         image = {};
                         std::fprintf(stderr, "saguaro serve: conversation cache: the turn capture could not stand in "
                                              "for this park (%s); capturing normally\n", ae.c_str());
+                        // (review M1: the gate above subtracted the capture's K/V as RAM this park would not
+                        //  allocate; the refusal says it must allocate them after all, and the evict loop already
+                        //  ran on the too-low figure. Re-read `additional` without the subtraction and re-run the
+                        //  admit/evict loop BEFORE the capture allocates - the same refusal as above if it does
+                        //  not fit - so the gate is never optimistic for exactly the long conversations whose
+                        //  parts are too split to alias.)
+                        if (adopt_kv > 0) {
+                            const size_t ev0 = evicted;
+                            retained = reuse.bytes() + stage_retained;
+                            additional = estimate > retained ? estimate - retained : 0;
+                            if (!admit_room()) return refuse_ram();
+                            if (evicted > ev0) say_evicted();
+                        }
                     }
                 }
                 // (adopt implies reuse.kv is empty - park::adopt_turn_capture's `no_retained` - so the move is empty here)
