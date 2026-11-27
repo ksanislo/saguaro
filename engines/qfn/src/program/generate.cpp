@@ -8393,7 +8393,11 @@ int main(int argc, char** argv) {
     // first chunk or a read mostly busy staging its K/V from RAM no longer looks frozen until it ends and the
     // server's rate of it is a live figure, not a per-chunk jump):
     //   `RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-    //        pass=<i>/<n> ms=<read ms> [stage_ms=<ms>] [pos0=<unit's first token> chunk=<unit's tokens>]` -
+    //        pass=<i>/<n> ms=<read ms> [stage_ms=<ms>] pos0=<unit's first token> chunk=<unit's tokens>` -
+    //   pos0 / chunk name the unit the passes count and print on EVERY RHB line (the piece-boundary line's
+    //   defined pos0=-1 chunk=0 included: done= just moved piece by piece, no unit in flight); a reader
+    //   before P124v2 ignores the two fields and books no share, and one reading a line without them (a
+    //   replay, an older engine) likewise keeps the whole-units figure.
     //   stage: the reused prefix is being copied host->VRAM,
     //   read: new tokens are being read; done / new count from where THIS read started (never a reused / restored
     //   / parked prefix); pass is the current host pass (layer pass of the chunk, or piece of the plan between
