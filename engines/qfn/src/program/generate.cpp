@@ -6880,7 +6880,12 @@ int main(int argc, char** argv) {
         // What it promises is what the CACHE is sized against here: on a card too full for even the smallest
         // working cache at the floored reserve, #496's lowering below may still take the reserve toward
         // kSmallReserveMib - said in its own line, never silently (re-review L1).  The cache size changes no
-        // output bit.
+        // output bit.  Linux/HIP only (re-review L3): the first cut ran the card probe on CUDA builds too,
+        // where the floor never raises - it asked the card for two figures and cleared a pending
+        // cudaGetLastError() for nothing.  Windows keeps kWddmAutoReserveMib above (the #1376 path), CUDA's
+        // free figure measures honest with the same reserve (#1376's A/B arm), and vram_policy_test still
+        // drives the header's CUDA/Windows arms directly.
+#if defined(STRATA_USE_HIP) && !defined(_WIN32)
         {
             const char* floor_env = std::getenv("SAGUARO_VRAM_RESERVE_FLOOR");
             const bool floor_on = floor_env == nullptr || std::string(floor_env) != "0";
@@ -6894,18 +6899,7 @@ int main(int argc, char** argv) {
                 const bool rsv_integrated = cudaGetDevice(&rsv_dev) == cudaSuccess &&
                                             cudaGetDeviceProperties(&rsv_p, rsv_dev) == cudaSuccess && rsv_p.integrated != 0;
                 (void) cudaGetLastError();
-#if defined(STRATA_USE_HIP)
-                const bool hip_backend = true;
-#else
-                const bool hip_backend = false;
-#endif
-                floored = strata::core::vram::hip_auto_reserve_mib(hip_backend,
-#ifdef _WIN32
-                                                                   true,
-#else
-                                                                   false,
-#endif
-                                                                   rsv_integrated, total_vram, asked);
+                floored = strata::core::vram::hip_auto_reserve_mib(true, false, rsv_integrated, total_vram, asked);
             }
             if (floored > asked) {
                 std::fprintf(stderr, "saguaro generate: expert cache auto: the reserve stays at least %d MiB on this ROCm "
@@ -6915,9 +6909,10 @@ int main(int argc, char** argv) {
                                      "the cache by hand, SAGUARO_VRAM_RESERVE_FLOOR=0 keeps the reserve as asked, and a "
                                      "card too full for any working cache at it may still see the #496 line lower it\n",
                              floored, asked, o.vram_reserve_given ? "it was asked for" : "it is the default");
-                o.vram_reserve_mib = floored;
+                 o.vram_reserve_mib = floored;
             }
         }
+#endif
         const int64_t prefill_mib = owned_prefill_mib();
         // the draft layer's head and logits are allocated when it binds, after this: 0.1.27's CJK subset made them
         // ~110-180 MiB larger, and out of the reserve they left 16 GB cards below the stall line (#199)
@@ -10606,12 +10601,16 @@ vs.d_skip_usage = gs.d_skip_usage;
                              (long long) o.conversation_cache_min_free_mib);
         }
         if (o.serve) {
-            // park_swap_mib= joins the INFO line (P124x): the server's parser reads the keys it knows and ignores
-            // the rest; an external one keyed on the exact token count must key on names instead (report 4).
-            std::printf("INFO park_pool=%d park_pool_mib=%lld park_free_mib=%lld park_psi=%.1f park_idle_s=%lld park_swap_mib=%lld\n",
+            // park_swap_mib= joins the INFO line (P124x) WHEN THE RULE IS ON: with SAGUARO_PARK_SWAP_MIB=0 the
+            // line is exactly what it was before P124x (re-review L3 - an off switch should say nothing new);
+            // the server's parser reads the keys it knows and ignores the rest, so an external one must key
+            // on names, not on the token count of this line (report 4).
+            const std::string swap_tok = park_lim.swap_bytes > 0
+                                             ? " park_swap_mib=" + std::to_string(park_lim.swap_bytes >> 20) : "";
+            std::printf("INFO park_pool=%d park_pool_mib=%lld park_free_mib=%lld park_psi=%.1f park_idle_s=%lld%s\n",
                         o.conversation_cache_pool ? 1 : 0, (long long) (park_lim.pool_bytes >> 20),
                         (long long) (park_lim.free_bytes >> 20), park_lim.psi, (long long) park_lim.idle_s,
-                        (long long) (park_lim.swap_bytes >> 20));
+                        swap_tok.c_str());
             std::fflush(stdout);
         }
         auto park_clock = [] { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); };

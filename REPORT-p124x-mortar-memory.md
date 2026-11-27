@@ -197,9 +197,11 @@ under it costs a re-read, not an abort. How it interacts with rule (a): a budget
 MemAvailable above the free floor, so the credited and raw readings agree and the swap term is silent;
 it fires when the operator overrode the cap, when something outside the engine filled the host, or when
 the box was booted into pressure - and PSI (avg10 > 10) stays the earlier, softer warning. `=0` turns it
-off like the other rules, and the release/trim notes print the swap figure beside the free one (the INFO
-`park_pool` line gains `park_swap_mib=`: the server's parser reads the keys it knows and ignores the rest -
-an external one keyed on the exact token count should key on names, §4).
+off like the other rules, and the release/trim notes print the swap figure beside the free one. The INFO
+`park_pool` line gains `park_swap_mib=` **only while the rule is on** - with `=0` the line is exactly what
+it was before P124x (re-review L3: an off switch should say nothing new) - and the server's parser reads
+the keys it knows and ignores the rest, so an external one keyed on the exact token count should key on
+names, §4.
 
 ### 2d. A #267 verify timeout that drained says so, and the server stops killing the process for it - 652b1cd63, 26feff6db, 9ff4ff922
 
@@ -249,10 +251,10 @@ Ran one at a time (g++ 14.2, -std=c++20, no GPU; scratch/p124x-build):
   ends the request and the (fake) engine idles for the next GEN (P124x d - the fake speaks the protocol the
   server must honor; the real serve loop still exits the process after the line, 2d/F-A), the not-drained
   and still-closed notes and the older engine's note-less line still kill it, `fatal_engine_line` as a
-  table (F3's words included). Run via `scratch/run_p124x_server_tests.py`, which registers the root's
-  `serve/turbo_live.py` under the name the QFN serve package imports it by - that import has been
-  unresolvable standalone since 936183783, at this branch's base as well (pre-existing, not this branch's;
-  noted rather than fixed here).
+  table (F3's words included). Run via `tools/run_qfn_serve_tests.py` (committed so the named module runs on
+  a clean checkout, re-review L3), which registers the root's `serve/turbo_live.py` under the name the QFN
+  serve package imports it by - that import has been unresolvable standalone since 936183783, at this
+  branch's base as well (pre-existing, not this branch's; noted rather than fixed here).
 * Build: **CUDA sm_75** - `cmake -S engines/qfn -B scratch/build-p124x-sm75 -DSTRATA_ENABLE_CUDA=ON
   -DCMAKE_CUDA_ARCHITECTURES=75` (nvcc 13.1, ninja): the `strata` target links whole (saguaro-qfn, 172
   steps, no errors; the pre-existing kernel warnings unchanged) - verify.cpp, generate.cpp and
