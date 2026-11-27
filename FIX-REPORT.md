@@ -1,113 +1,95 @@
-# FIX-REPORT - REVIEW-RESULT findings, one commit each (round 7: `e2684fc39..12dc848fb`)
+# FIX-REPORT - manager FIX-FIRST card round 8 (`e3ec5d022` rig, crash after the staging line)
 
-The manager's round-7 card (`REVIEW-RESULT.md`, committed with this report): LOAD and SPEED pass unchanged (1.30 /
-1.30 GiB host K/V, 68 / 68 GiB expert RAM, 2571 / 2509 cache slots, 30K read 35.0 / 37.0 s) and round 6's fix works
-(the device state grows, 546148 cells, the cache gives way); GROWTH now fails at the NEXT allocation - the YaRN
-switch of that same 546,145-token conversation, `ERR no VRAM for the YaRN RoPE rows`. The card's three numbered
-parts map to the three sections below (`e758a5b07` + its follow-up `df1adca13`, `33e462af7`, `0434ba69d`; the nit
-`12dc848fb`). New build dir `scratch/build-p124e-r7` (CUDA sm_75, ggml from `scratch/ggml-pinned`), 268/268,
-`saguaro-qfn` links, no GPU touched.
+The manager's round-8 card (`REVIEW-RESULT.md`, committed with this report): LOAD and SPEED pass again, round 7's
+YaRN-rows fix works (the rows back on growth, the cache gives way), and the 546,065-token prompt read now
+**SIGSEGVs 3.5 s in** - right after "the prompt path's K/V staging holds 786432 cells (a loan of 2030 slots,
+chunk 12544)". The card: the staging still sizes itself from a whole-context assumption, not from the elastic
+state; check every index against what is BACKED; the crash is an access past a backed range; size the staging
+from the state, grow the backing ahead of the chunk about to be touched, never touch an unbacked page; unit
+test + new build dir. Three numbered parts, three commits: `12a165e76` (fix 1), `88fa7dc80` (fix 2),
+`7ea94ee0e` (fix 3). New build dir `scratch/build-p124e-r8` (CUDA sm_75, ggml from `scratch/ggml-pinned`, cache
+diffed against r7's - same flags), 444/444 targets, `saguaro-qfn` links, no GPU touched. No nit items on this
+card (three numbered fixes only).
 
-**What the code actually did.** Round 6 put the give-before-map path (`vmm_grow_room`) in front of the follow-pool
-and scratch maps only. The two context arrays that grow on use and did NOT go through it were exactly the two the
-card hit: `qsa_rope_yarn_fit` took room ONLY from the card's slot budget - budget short, it returned false without
-ever asking the expert cache; no budget at all (the follow-rule rigs), and `VmmRange::map_range` quietly made fresh
-driver chunks mid-map, again with no relief. And its size came from `solo_yarn_rows`' `n + max_new + 64`, which for
-a request whose `max_new` runs to the end of the context IS `--max-context` - so the switch tried to back the whole
-0.75 GiB table in one step, through a path that could not ask for room.
+## Finding 1 - the exact access, and every index the read makes through it (`12a165e76`)
 
-## Finding 1 - EVERY growth-time VRAM allocation runs the give-way-before-map path (`e758a5b07`, `df1adca13`)
+**The gate.** `Prefill::run_impl` has the read's one and only index gate: a segment of a run reaching past the
+staging was refused with "the K/V staging holds N cells" (prefill.cpp:3282-3289 before this fix). It compared
+`sg.p0 + sg.n` with `m.stage_cells` - the LOAN's cells, 786432 on the card, sized by `stage_cells_for` =
+reach + a quarter rounded up to the grid, capped only by `max_cells`. The conversation's BACKED cells - the
+bytes that actually exist behind the addresses - entered nowhere. Everything the read's kernels index by cell
+hangs off that gate:
 
-The card's list, from the round-5 accounting lines ("addresses for --max-context", `grep DeviceNote`), with what
-each allocation does now:
-
-| allocation (accounting line) | grow site | room path |
+| what the read indexes by cell | index line | the array's real backed extent |
 |---|---|---|
-| streamed states' context device state - follow pools (`layer.cpp:2570` addresses, `layer.cpp:2763` start step) | `qsa_follow_grow_at` `layer.cpp:1727` | `follow_room` `layer.cpp:1716` -> `vmm_grow_room` (round 6) |
-| block-score scratch (`layer.cpp:1938`) | `qsa_scores_grow` `layer.cpp:1957` | `follow_room` -> `vmm_grow_room` (round 6) |
-| grown RoPE table past the trained 262144 (`layer.cpp:2611`) | `qsa_rope_grow` `layer.cpp:2139` | `vmm_grow_room_pooled` (round 7; the old loop asked the relief per refused chunk) |
-| **YaRN level's RoPE rows** (`layer.cpp:2718`) | `qsa_rope_yarn_fit` `layer.cpp:2218` | `vmm_grow_room_pooled` (round 7; **was budget-only, no relief at all - this is the card's failure**) |
+| the pinned host copy - the staging copy's source (`kv_stage_blocks_from_host`, prefill.cpp:3327 / 3805) | page `= cell/4` of each array | the registered pieces: `qsa_host_backed_cells` (layer.cpp:1161) - the card: **546148 cells = 136537 pages** (log lines 149-167, "the host copy backs 546148") |
+| the device follow state - page table + pooled indexer keys (append, reset bound, selection's gather) | `table[cell/4]`, pool rows | `qsa_table_backed_pages` / `qsa_follow_backed_cells` (layer.cpp:1802 / 1813) - grown by the same fit, the same number |
+| **the RoPE rows - the read rotates every position it touches** (`rope()` prefill.cpp:3755 -> `rope_tab_cs`) | mrope.hpp:95-100: `c = __ldg(t.cos + (size_t)(p - t.min_pos) * 32 + pair)` | **`rope_tab_cs` answers "in range" for any `p < t.max_pos`, and `rope_table_set` registers `max_pos = kRopeYarnOff + max_cells` - the WHOLE context (layer.cpp:2739-2741; the plain table likewise at 2744). The table is a VMM range with only `RopeGrow::cells` rows mapped (layer.cpp:2069, `rope_map` 2119-2136): a position past `r->cells` passes the table's own bound and steps off the mapped prefix. Card: backed 557056 rows ("covers 557056", log 170/175), extent 1048576.** |
 
-`vmm_grow_room_pooled` (new in `vmm_grow.hpp`, the same order as `vmm_grow_room`): the card's slot budget first
-(its chunks cost the experts nothing), then the driver for the shortfall, the FIRST refusal asking the relief ONCE
-for the whole remainder, and the map starting only with every chunk in hand. `qsa_rope_yarn_fit` also keeps its
-chunks measure / room / map apart (round 4's rule - the relief's low-water check counts the RoPE chunks through the
-very lock it holds), and a refused rope/YaRN map or room now prints the round-6 line (which driver call, the bytes
-asked, free VRAM, what the cache was asked and gave) instead of silence, and records the refusal in
-`qsa_dev_pin_failed()` so the solo admit and the decode's end answer `no VRAM`, not `no RAM` (`df1adca13` - the
-round-6 wording bug at a new site).
+That last row is the crash mechanism the card asked for by name: the RoPE table is *registered* for the whole
+context and *backed* for a prefix, and the kernel's range test uses the registration. Any read - the prompt
+itself, a checkpoint re-read, a verify window - that rotates a position past `r->cells` (or addresses host
+pages past 136537, or follow pages past the mapped prefix) takes a load/store at a VA whose VMM range has no
+page there: **a fault, not a refusal** - the driver's guard under the reservation. The loan's grid is the
+reach of that index space: 786432 cells = 196608 staging pages, and the backed state ends at 546148 / 557056 -
+cells (546148, 786432] have addresses and no memory, and the old gate waved through anything up to 786432.
 
-Allocations examined and left as they are, with why: `qsa_slots_grow` (`layer.cpp:1548`, the slots' rings and pooled
-rows) takes no driver allocation at all - it only remaps chunks the slot budget holds, and the budget is filled by
-the same cache `give()` (`generate.cpp:13888`) that the `vram_relief` hook (`generate.cpp:18722`) drives, so its
-room arrives through the same giving path. `qsa_slots_grow_fresh` and the `*_back_whole` fallbacks are the load's
-start step and the feature-off fallback - no relief is installed at the load, and the fallback's numbers stay byte
-for byte (criterion D). `mtp.cpp:1445`'s records buffer already asks the relief before retrying. The load-time
-carves, head and drafters do not grow on use.
+Stated straight, as the card asked: with the crash log's numbers every logged backed prefix (host 546148,
+rope/yarn 557056) still covers the prompt's own reach 546065, so this GPU-less box cannot point at the one
+in-range test that was defeated on the 9070 XT (the driver's own reservation granularity under memory
+pressure is the standing suspect for the follow-pool or rope range). What the audit CAN prove, and what is now
+fixed, is that a single gate compared the read's reach with a LOAN SIZE and nothing else - so every access in
+the table above was one headroom step away from the guard, and the fix closes all of them at once:
 
-## Finding 2 - the YaRN rows follow the POSITIONS IN USE (`33e462af7`) - and which sizing, said out
+* `qsa_rope_backed_cells(st, yarn)` (new, layer.cpp:2274) - the rows a table actually has; a whole (ungrown)
+  table answers its extent.
+* `session_backed_cells(s)` (new, session.cpp:201) - host pieces, follow state AND the rope rows (plain, plus
+  YaRN while `rope_level`) in one number, capped by the context; pinned-whole sessions answer `max_cells`.
+* the run's segment gate (prefill.cpp) now refuses any segment reaching past
+  `min(stage_cells, session_backed_cells(segment's own session))` once `Prefill::set_backed_limit(true)` is on -
+  on for the solo request's reads wherever the session's host copies are elastic; the refusal line says
+  "the K/V staging and the backed context hold N cells, the chunk reaches M", so a card that still trips on a
+  real access names the cell and the arrays instead of faulting.
 
-**Which: "back them in chunks as the conversation grows", as a prefix over the positions the conversation has
-reached (+ a fixed 32768-token ahead-step) - not "the window in use".** Reason, from how the kernel reads them:
-`rope_tab_cs` (`include/strata/kernels/mrope.hpp:95-99`) reads row `p - kRopeYarnOff` for whatever position the
-current kernel is ROTATING, and a prompt re-read, a checkpoint reuse or the drafter's verify window can re-rotate
-any cell below the conversation's length - so the backed set must stay a gapless prefix [0, positions reached), and
-a per-window backing would leave holes that the next re-read reads as unmapped VMM. What it does NOT owe is
-positions the conversation has not reached:
+## Finding 2 - staging sized from the state; the read backs up ahead of its chunk (`88fa7dc80`)
 
-* `solo_yarn_rows` (`generate.cpp:21218`) sizes `min(request end, at + kSoloPinAhead) + 64`, `at` = the positions
-  in use at the call (the prompt `n` before a read, `21263`; the current cell `p` at a mid-reply crossing, `21238` -
-  the crossing window lands inside the ahead-step). The old `n + max_new + 64` was `--max-context` itself when
-  `max_new` runs to the end of the context: that is the card's "all 0.75 GiB at the switch".
-* the request-start fit (`generate.cpp:19541`) passes `rope_cells = solo_pin` (prompt + ahead-step, the number the
-  host   copies already use, `generate.cpp:19525`) to `session_vram_fit` (`session.cpp:297`) / `session_vram_need`
-  (`session.cpp:310`), which cap the rope grows with it - the K/V state still takes the whole request (the plan:
-  grow ahead of need once, at the read's start), the RoPE rows trail the positions.
-* past that, the rows arrive chunk by chunk from the fits that track the conversation - the decode's 32K-ahead pin
-  step (`generate.cpp:22492` -> `solo_host_fit_r` -> `session_host_fit`, whose rope step is `session.cpp:270`), the
-  batch slots' `slot_fit` grow target (`generate.cpp:14039` -> `session_slot_fit` `session.cpp:240-241`) and the
-  slot decode step (`yarn_fit` `generate.cpp:14519`, sized by the slot's own next cells).
+New pure header `core/read_backing.hpp` (the sizing and the order, unit-tested - see finding 3):
 
-On the card's run: the switch backs ~546K+33K positions (a read from 0 needs every row it re-rotates, and 546K rows
-of cos+sin is what a 546K conversation costs - not the 1M table), the next 32K rows come with the reply's first
-32K tokens, each step through the cache's give-way, and `qsa_rope_yarn_trim` still hands all of it back when no YaRN
-conversation is live.
+* `stage_cells_elastic(reach, backed, full)` - the loan's existing grid rule capped at the BACKED cells plus
+  one grid step (131072): the step the read's grow runs ahead of its pieces. Below the grid's base the base no
+  longer out-promises the backing either (`backed + step`, never a promised 262144 for a 32768-backed state);
+  monotonic in the backing; nothing elastic (`backed < 0`) or all backed - today's sizing, word for word.
+  `Prefill::stage_cells_elastic` wraps it (session `max_cells`, `SAGUARO_STAGE_HEADROOM`), and `lend()` /
+  `stage_covers()` size and match every loan through it (generate.cpp).
+* The solo read's `run()` is a piece loop: each piece ends at `read_piece_end = min(r, session-backed,
+  staging)`; when that stops short of the piece, the conversation is backed ahead FIRST - `solo_host_fit_r` +
+  `solo_vram_fit`, the very fits the request start uses (give-way and relief included), in `kSoloPinAhead`
+  steps, capped by the staging and the request's end - then the piece runs. A read that cannot be backed
+  further, or reaches past a loan that cannot grow mid-read, ends with "no VRAM/no RAM ... (out of memory)"
+  on the read's existing soft-fail path (the request fails, the engine goes on) - it never issues the access.
+* The card's own numbers keep today's fast path: prompt 546065, backed 546148 - backed + step rounds to the
+  SAME 786432-cell loan and the read is ONE piece with zero grows (asserted in the test). A card backed for
+  100000 lays out 231072 staging cells instead of 786432 - a smaller loan is slots the cache keeps for experts.
+* Kept as is, on purpose: `SAGUARO_PIPED_CONCURRENT=1` reads call `sp.run` straight (their pump owns the
+  stepping) - they gain the backed gate (refuse, not fault) but not the mid-read grow; pinned-whole rigs take
+  none of this (`check_backed` off, `backed = max_cells`, the run lambda is the same single call).
 
-## Finding 3 - the tests, for each growth allocation (`0434ba69d`)
+## Finding 3 - the tests, the build (`7ea94ee0e`)
 
-`src/core/vmm_grow_test.cpp` (the module the card names - run ALONE) now covers BOTH room paths, and its header
-lists which growth allocation runs which (table above). Five new cases for the pooled path: the budget's chunks are
-taken whole and cost the driver and the cache nothing ("unused room the experts already hold"); budget, then
-driver, then the relief asked ONCE for the SHORTFALL after the budget, `give:` before `map:` - event by event, the
-YaRN switch's order; a room that never arrives maps NOTHING and reports `from_pool` so the caller gives the
-budget's chunks back; `may_relief=false` never asks; a need of 0 touches nothing. 44 checks (the round-6 28 pass
-word for word). The pooled case caught a real bug in the helper fix 1 added: `vmm_grow_room` sized its one relief
-ask by `got.size()`, which the pooled path seeds with the budget's chunks - a grow whose budget part landed and
-whose card part refused asked the cache for ZERO bytes and died; the ask is now `need - chunks THIS call made`
-(the plain path's numbers are unchanged - its `got` starts empty).
-
-## The nits
-
-* Taken (`12dc848fb`): `serve`'s `engine_refusal` matched only "no VRAM is left", so `ERR no VRAM for the YaRN RoPE
-  rows` - the very line this card hit - stayed an ordinary request error; "no VRAM for..." now ends as
-  `EngineOutOfVram` too (retry once / 503), `serve/test_vram_refusal.py` gains the case, `serve/qfn_engine.py`
-  re-extracted with `tools/saguaro/extract_qfn_engine.py`, never hand-edited.
-* Taken (`df1adca13`): the rope/YaRN grows record `qsa_dev_pin_failed()` (see finding 1).
-* Not taken: a per-window YaRN backing (the card's "or"); finding 2 says why - the kernel reads rows for any
-  position a later window re-rotates, so only the prefix rule is safe without hooking every window.
+`read_backing_test` (new, 82 checks, registered beside `park_policy_test` / `kv_host_growth_test` /
+`vmm_grow_test`): the plain grid unchanged (the card's 546065 read is the 786432 loan of the crash log); the
+elastic loan (nothing-backed = one step, 100000-backed = 231072, base does not out-promise, monotonicity and
+"never past the reach's size" as property loops); the ORDER: a simulated read on a 131072-backed card asserts
+per piece that it never touches a cell past the backed or the staged end, walks to exactly the staging's end
+in < 16 ahead-step grows and ends on the ERROR where today's engine faults; and the healthy card's numbers stay
+the single run they were.
 
 ## Verification
 
-* `cmake -S engines/qfn -B scratch/build-p124e-r7 -G Ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
-  -DCMAKE_CUDA_ARCHITECTURES=75 -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_CONVERSATION_TESTS=ON
-  -DSTRATA_MMQ_TQ_OVERLAY=OFF -DSTRATA_GGML_DIR=$PWD/scratch/ggml-pinned`; `ninja -C scratch/build-p124e-r7` ->
-  268/268, `saguaro-qfn` links, `sm_75` objects only, no GPU run. The warnings in the touched files are exactly the
-  pre-existing set the round-5 report lists (layer.cpp's indentation/unused-var pair, generate.cpp's `w`); nothing
-  new from the rope/session/test changes.
-* `ctest --test-dir scratch/build-p124e-r7 -R '^vmm_grow_test$'` run ALONE -> passed, "44 checks OK";
-  `ctest ... -R '^kv_host_growth_test$'` run ALONE -> passed, "22 checks OK" (its helpers did not change);
-  `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_vram_refusal` -> 4/4 OK. One at a time, nothing else run.
-* No GPU here, so the card keeps the proof: `scratch/card-test-elastic-kv.sh` (gitignored, the manager's copy) gained
-  criterion G - the 546K run's log must show the YaRN rows climbing step by step (NOT 1048576 at the switch), each
-  step preceded by the cache's give on a full card, no `ERR no VRAM for the YaRN RoPE rows` anywhere, and the
-  round-7 load/speed figures of the card unchanged.
+* `scratch/build-p124e-r8`: fresh configure (cache diffed against r7's: same flags), `ninja` 444/444 clean.
+* `ctest -R '^read_backing_test$'` run ALONE -> passed (82 checks); `kv_host_growth_test` run ALONE -> passed
+  (22); `vmm_grow_test` run ALONE -> passed (44). Nothing else run; no GPU here, no card test run here.
+* Card test owed by the rig: the 546,065-token request must answer (needle "7319"); load + speed unchanged.
+  With this fix the read can only answer, refuse with the cell named, or fail with a no-VRAM/no-RAM line -
+  the staging can no longer promise past the backed end, the run gate checks the backed end per segment, and
+  every piece is backed before it runs.
