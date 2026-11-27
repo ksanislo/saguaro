@@ -838,6 +838,7 @@ bool Glm5Model::mtpw_cache_rows(const RowSeq& rb, int64_t p0, int n, const float
     const Glm5Geometry& g = g_;
     auto& C = F->mtpc;
     if (n <= 0) return true;
+    if (rb.kv != nullptr && !kv_pin(rb.kv, p0 + n, err)) return false;   // P125g: the entries' host pages registered
     if (n > C.cap) {
         err = "glm multi mtp: more cache entries than the window holds";
         return false;

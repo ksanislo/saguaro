@@ -251,6 +251,7 @@ bool Glm5Model::rows_bind(const int* seqs, int n, RowSeq* rw, std::string& err) 
             err = "glm rows: the context of sequence " + std::to_string(sq) + " is full";
             return false;
         }
+        if (r.kv != nullptr && !kv_pin(r.kv, r.p + 1, err)) return false;   // P125g: the row's host pages registered
         r.Rc = r.state;
         r.Ro = r.state + (int64_t) g.hc * E;
         r.res = r.state;

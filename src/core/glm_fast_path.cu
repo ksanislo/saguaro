@@ -7560,6 +7560,7 @@ static bool kda_graph_wanted() {
 bool Glm5Model::fast_layers(int64_t p, bool hop_in, std::string& err) {
     (void) hop_in;
     if (!el_.empty() && !seq_grow(seq_index(), p + 1, err)) return false;   // elastic: position p backed
+    if (kv_ != nullptr && !kv_pin(kv_, p + 1, err)) return false;   // P125g: its host pages registered (the window's too)
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     cudaStream_t s = F->cs;
@@ -7921,6 +7922,7 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
 bool Glm5Model::fast_mtp(int64_t p, int32_t next_tok, std::string& err, int step, bool sub, bool read_back,
                          const float* emb_staged, bool head) {
     if (!el_.empty() && !seq_grow(seq_index(), p + 1, err)) return false;
+    if (kv_ != nullptr && !kv_pin(kv_, p + 1, err)) return false;   // P125g: the draft block's rows land in the host copy
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     cudaStream_t s = F->cs;
@@ -10026,6 +10028,8 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
     }
     for (Glm5Model* m : parts)   // elastic: the slot's positions backed first
         if (!m->seq_grow(m->seq_index(), n, err)) return false;
+    for (Glm5Model* m : parts)   // P125g: the slot's granules registered before its rows are copied into them
+        if (m->kv_ != nullptr && !kv_pin(m->kv_, n, err)) return false;
     const Glm5Geometry& g = g_;
     const int64_t run = (int64_t) g.d_inner() * g.kda_head_dim + (int64_t) 3 * g.d_inner() * (g.d_conv - 1);
     const int64_t rows2 = (int64_t) 2 * (g.idx_kpool - 1) * g.idx_key;   // a DSA layer's open pool: ik, ig rows

@@ -881,11 +881,48 @@ int64_t Glm5Model::kv_resident() const {
     return 0;
 }
 
+namespace {
+// The granule arena's registration (P125g, PLAN-p125g): cudaHostRegister per granule, hipHostRegister in HIP
+// builds through the shim.  Mapped like the whole-max cudaHostAlloc was, Portable like every pin in this engine.
+struct KvPinner : maya::core::Pinner {
+    bool pin(void* at, uint64_t bytes) override {
+        if (cudaHostRegister(at, (size_t) bytes, cudaHostRegisterMapped | cudaHostRegisterPortable) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        return true;
+    }
+    void unpin(void* at, uint64_t) override {
+        if (cudaHostUnregister(at) != cudaSuccess) cudaGetLastError();
+    }
+};
+maya::core::Pinner& kv_pinner() {
+    static KvPinner p;
+    return p;
+}
+// The granule an arena divides into: 64-256 MB, the report's range (M of ref/REPORT-p125c-glm-mem.md), moved by
+// SAGUARO_GLM_KV_PIN_GRANULE_MB; a cache smaller than one granule is one granule.
+uint64_t kv_pin_granule(uint64_t total) {
+    const char* v = getenv("SAGUARO_GLM_KV_PIN_GRANULE_MB");
+    uint64_t mb = v != nullptr && v[0] != '\0' ? (uint64_t) std::atoll(v) : 128;
+    mb = std::min<uint64_t>(std::max<uint64_t>(mb, 64), 256);
+    const uint64_t g = mb << 20;
+    return g > total ? total : g;
+}
+}  // namespace
+
 // This part's DSA layers (the NextN block's too) keep a sequence's latent cache in one pinned, device-mapped host
 // allocation - the authoritative copy, written by both dsa_preps - and `cells` positions of it in VRAM: the state arena's
 // latent runs are the VRAM slots, and every layer gets a residency map (one device allocation for all of them), nothing
-// resident.  ctx: that sequence's context.  Under WSL the driver pins only about 1 GB in all, which the start reports as
-// an error.  Null with err empty: no DSA layer on this part.
+// resident.  ctx: that sequence's context.  Null with err empty: no DSA layer on this part.
+//
+// P125g (item M of ref/REPORT-p125c-glm-mem.md): the arena is a GranuleArena - the whole range reserved as address
+// space here, a granule cudaHostRegister'ed when a position of it is first named (kv_pin) and given back when the
+// conversation resets, parks or ends.  What a conversation pins is what it writes, not what --max-context allows;
+// the addresses never move, so the layers' host rows are still one pointer each.  A machine whose device cannot use
+// the host pointer of registered memory (or where the reservation itself fails) keeps the old whole-max
+// cudaHostAlloc, pinned at the load as it was.  Under WSL the driver pins only about 1 GB in all: with the granules
+// that cap is no longer a load error, it stops a conversation where it reaches it (kv_pin's err).
 Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::string& err) {
     namespace k = maya::kernels;
     const std::vector<int> ls = dsa_layers();
@@ -906,9 +943,21 @@ Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::
                     " pages of whole 16-byte runs");
     const uint64_t layer_bytes = (uint64_t) K->n_blocks * K->page * K->row_bytes;
     K->host_bytes = layer_bytes * ls.size();
+    K->slab_bytes = layer_bytes;
     uint8_t* d = nullptr;
-    if (cudaHostAlloc((void**) &K->host_arena, K->host_bytes, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
-        cudaHostGetDevicePointer((void**) &d, K->host_arena, 0) != cudaSuccess) {
+    int can = 0;   // the device may read and write registered memory through the host's own pointer (UVA)
+    if (cudaDeviceGetAttribute(&can, cudaDevAttrCanUseHostPointerForRegisteredMem, dev_) != cudaSuccess) {
+        cudaGetLastError();
+        can = 0;
+    }
+    std::string aerr;
+    if (can && K->arena.open(K->host_bytes, kv_pin_granule(K->host_bytes), aerr)) {
+        K->host_arena = K->arena.base();
+        d = K->host_arena;
+        K->pin_slabs.reserve(ls.size());
+        for (size_t i = 0; i < ls.size(); ++i) K->pin_slabs.push_back((uint64_t) i * layer_bytes);
+    } else if (cudaHostAlloc((void**) &K->host_arena, K->host_bytes, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+               cudaHostGetDevicePointer((void**) &d, K->host_arena, 0) != cudaSuccess) {
         cudaGetLastError();
         char b[320];
         std::snprintf(b, sizeof b, "KV streaming: cannot pin %.2f GB of RAM for the latent cache - lower the context, or "
@@ -955,9 +1004,43 @@ Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::
 
 void Glm5Model::kv_stream_free(KvStream* K) {
     if (K == nullptr) return;
-    if (K->host_arena) cudaFreeHost(K->host_arena);
+    const bool lazy = !K->arena.empty();
+    if (lazy) {   // granules a conversation pinned and never gave back (a stream freed mid-conversation)
+        K->arena.release(kv_pinner());
+        K->arena.close();
+    }
+    if (K->host_arena && !lazy) cudaFreeHost(K->host_arena);
     if (K->map_arena) cudaFree(K->map_arena);
     delete K;
+}
+
+// P125g: register the granules of K's host copy that hold the positions BELOW end_pos, before any kernel names them.
+// Every DSA layer's slab gets its prefix [0, end_pos x row_bytes) - a conversation writes positions in order, so what
+// a decode or a chunk touches grows from the arena's start, and attention only ever reads a position it wrote.
+// Whole pages: a resolve fills and the prompt's stage copy takes whole blocks, whose last row can sit in the next
+// granule.  The slack past end_pos: a decode step's verify window writes rows up to kWinMax positions past the one
+// it commits and the draft chain's a little further - pinned ahead of them, so a speculative write never lands on
+// an unregistered page (it costs at most one granule of pinned bytes over what was written).  True for a stream on
+// the eager whole-max arena, which was pinned in full at the load.  False with err: the driver refused (out of
+// pinned RAM - the WSL cap of about 1 GB in all, a host with nothing left): what pinned before the refusal stays,
+// the request ends on err, the engine lives.
+bool Glm5Model::kv_pin(KvStream* K, int64_t end_pos, std::string& err) {
+    if (K == nullptr || K->arena.empty()) return true;
+    const int64_t slack = 2 * kWinMax + 2 + K->page;   // (the window's rows, the chain's, and the block's rest)
+    const int64_t end = std::min(end_pos + slack, K->n_blocks * K->page);
+    if (end <= 0) return true;
+    const int64_t blocks = (end + K->page - 1) / K->page;
+    const uint64_t span = (uint64_t) blocks * (uint64_t) K->page * (uint64_t) K->row_bytes;
+    for (const uint64_t slab : K->pin_slabs)
+        if (!K->arena.ensure(slab, span, kv_pinner(), err)) {
+            char b[320];
+            std::snprintf(b, sizeof b, "KV streaming: cannot grow the pinned latent cache (%s) - lower the context, "
+                          "or turn it off (--kv-streaming off in the config's args; under WSL the driver pins only "
+                          "about 1 GB in all)", err.c_str());
+            err = b;
+            return false;
+        }
+    return true;
 }
 
 // the first sequence's stream (the only one without SAGUARO_GLM_SEQS); the prompt path's staging copy is sized for it,

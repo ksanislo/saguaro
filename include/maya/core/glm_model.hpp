@@ -700,6 +700,11 @@ public:
     // a stream for one sequence's caches of a context of ctx tokens (null: no DSA layer here, or err), and its free
     KvStream* kv_stream_make(int64_t cells, int64_t ctx, std::string& err);
     void kv_stream_free(KvStream* K);
+    // P125g (PLAN-p125g): register the host copy's granules (GranuleArena) that the positions BELOW end_pos live
+    // in, before any kernel names them - whole pages (a resolve reads whole blocks), plus the slack a decode step
+    // writes past its committed position (the verify window's rows, the draft chain's).  A no-op for a stream on the
+    // eager whole-max arena; false with err when the driver refuses (out of pinned RAM: the WSL ~1 GB cap).
+    static bool kv_pin(KvStream* K, int64_t end_pos, std::string& err);
     uint64_t kv_stage_bytes_ = 0;                            // the prompt path's staging copy (the first sequence's)
     uint64_t slot_image(const std::function<uint8_t*(uint64_t, bool&)>& alloc, std::string& err, double* ms);
     void kv_stream_reset_maps();                             // nothing resident (reset, slot_load)

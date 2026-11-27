@@ -363,6 +363,7 @@ bool Glm5Model::mtp_cache_rows(int64_t p0, int n, const float* h, const int32_t*
         err = "glm mtp: more cache entries than the window holds";
         return false;
     }
+    if (kv_ != nullptr && !kv_pin(kv_, p0 + n, err)) return false;   // P125g: the entries' host pages registered
     cudaStream_t s = F->cs;
     const int64_t E = g.n_embd;
     const auto& Ly = F->L[(size_t) mtp_il_];
