@@ -8885,6 +8885,10 @@ int main(int argc, char** argv) {
             for (int64_t c = c0; c < c1; ++c) k += r.mapped(c) ? 1 : 0;
             return k;
         };
+        // P124e r11: a move never lands in an active prompt loan (the read's buffers live in [first_now, slots))
+        int64_t lend_lo = xcache.slots();
+        if (guard_loans)
+            for (const auto& l : guard_loans(&xcache)) if (l.first >= 0) lend_lo = std::min<int64_t>(lend_lo, l.first);
         while ((int64_t) kvg.spare.size() + freeable() < need && kvg.lo > kvg.floor) {
             if (owner.empty()) {
                 owner.assign((size_t) xcache.slots(), -1);
@@ -8894,7 +8898,7 @@ int main(int argc, char** argv) {
                 for (size_t r = 0; r < profile.size(); ++r)
                     rank[(size_t) profile[r].first * (size_t) g.n_expert + (size_t) profile[r].second] = (int32_t) r;
                 for (size_t i = 0; i < host_res.size(); ++i)
-                    if (host_res[i] >= kvg.top) cold.emplace_back(heat((int32_t) i), (int32_t) i);
+                    if (host_res[i] >= kvg.top && host_res[i] < lend_lo) cold.emplace_back(heat((int32_t) i), (int32_t) i);
                 std::sort(cold.begin(), cold.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
             }
             --kvg.lo;
@@ -13925,6 +13929,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             const auto& lay = strata::kernels::cpu::expert_layout();
             int64_t gave = 0, moved = 0;
             std::vector<int32_t> out;   // experts evicted
+            // P124e r11: a move never lands in an active prompt loan (the read's buffers live in [first_now, slots))
+            int64_t lend_lo = xc.slots();
+            if (guard_loans)
+                for (const auto& l : guard_loans(v.cache)) if (l.first >= 0) lend_lo = std::min<int64_t>(lend_lo, l.first);
             while (freeable() < need && v.lo > give_floor) {
                 if (owner.empty()) {
                     owner.assign((size_t) xc.slots(), -1);
@@ -13934,7 +13942,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     for (size_t q = 0; q < v.prof.size(); ++q)
                         rank[(size_t) v.prof[q].first * (size_t) g.n_expert + (size_t) v.prof[q].second] = (int32_t) q;
                     for (size_t i = i0; i < i1; ++i)
-                        if (host_res[i] >= v.top && host_res[i] < xc.slots()) cold.emplace_back(heat((int32_t) i), (int32_t) i);
+                        if (host_res[i] >= v.top && host_res[i] < lend_lo) cold.emplace_back(heat((int32_t) i), (int32_t) i);
                     std::sort(cold.begin(), cold.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
                 }
                 --v.lo;
