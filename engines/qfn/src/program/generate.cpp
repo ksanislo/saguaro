@@ -19510,6 +19510,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 const auto head_t0 = Clock::now();
                 native_head.unload();
                 sp.reset();
+                drop_read_pause();   // P125j: the reset dropped the saved rows - the record goes with them
                 if (init_prompt_paths() != 0) {
                     std::printf("ERR rebuilding the head-alias prompt path failed: %s\n", err.c_str());
                     return 1;
@@ -21742,6 +21743,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (o.prefill_head_alias) {
                 sp.reset();
+                drop_read_pause();   // P125j: the reset dropped the saved rows - the record goes with them
                 const auto head_t0 = Clock::now();
                 if (!native_head.load(o.native_head_shards, g.n_embd, n_vocab, err)) {
                     std::printf("ERR restoring the native output head failed: %s\n", err.c_str());
@@ -22902,8 +22904,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (nf_hit) live_ok = false;   // #879 (the next request's start drops the rest)
                 live_prompt_n = live_ok ? n : -1;
                 drop_read_pause();   // P125j: the read went on to its end; any paused chunk is complete
-            } else if (!nf_hit && !read_vram && lp_pos >= 0 && req_imgs.empty() && o.prompt_cache > 0 &&
-                       (req_ckpt || req_cont) && lp_pos + lp_tokens <= (int64_t) cur.size()) {
+            } else if (!nf_hit && !read_vram && lp_pos >= 0 && sp.pause_rows_bytes() > 0 && req_imgs.empty() &&
+                       o.prompt_cache > 0 && (req_ckpt || req_cont) && lp_pos + lp_tokens <= (int64_t) cur.size()) {
                 // P125j: the read stopped between two LAYERS of the chunk from token lp_pos: the layers
                 // below lp_layer read that chunk (its K/V cells, GDN/conv state and indexer tails hold
                 // its tokens in the session) and the layers from lp_layer on did not.  The conversation
