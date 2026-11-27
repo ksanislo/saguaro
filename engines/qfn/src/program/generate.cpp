@@ -6306,6 +6306,14 @@ int main(int argc, char** argv) {
             if (!strata::core::qsa_host_pin_failed() || !ram_reclaim || ram_reclaim(-1) != 0) return false;
         return true;
     };
+    // P124e (round 8, manager card): the cells a prompt read on the solo conversation may index - where its
+    // host copies, device follow state and RoPE rows ALL have memory behind them (every stage's session; the
+    // context's own end caps it).  Reads run inside it; the fits grow it ahead of the chunk that needs more.
+    auto solo_backed_cells = [&]() -> int64_t {
+        int64_t b = strata::core::session_backed_cells(ss);
+        for (auto& st : stages) b = std::min(b, strata::core::session_backed_cells(st->ss));
+        return b;
+    };
     // (the host copies only: the VRAM ring's residency map may name any of its slots, so the solo session's VRAM pools
     // keep what they grew to - a slot trims its own only with its state reset)
     auto solo_host_trim = [&](int64_t cells) {
@@ -21264,6 +21272,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::printf("ERR no VRAM for the YaRN RoPE rows\n");
                     return 1;
                 }
+            }
+            // P124e (round 8, manager card): the elastic conversation's reads are checked against what it is
+            // BACKED for (host copy, device follow state, RoPE rows) as well as against the staging - a chunk
+            // reaching past the backed end is refused with an error, never read through unmapped memory.
+            // Pinned-whole rigs (nothing elastic) keep today's exact path.
+            if (strata::core::session_host_elastic(ss)) {
+                sp.set_backed_limit(true);
+                for (auto& st : stages) st->sp.set_backed_limit(true);
             }
             std::vector<int64_t> cuts = {reread_to, root_at, message_at, turn_at, n - 1};
             if (pin_at >= 0) {

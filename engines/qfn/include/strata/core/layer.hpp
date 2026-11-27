@@ -423,6 +423,10 @@ void qsa_rope_release(const float* cos_tab);
 void qsa_set_rope_yarn(const strata::kernels::RopeScaling* yarn);
 bool qsa_rope_yarn_fit(const QsaState& st, int64_t cells);
 int64_t qsa_rope_yarn_need(const QsaState& st, int64_t cells);
+/// P124e (round 8, manager card): the positions the table `st` reads is BACKED for now (P124e: its whole extent when
+/// it is not a grown table; `yarn` asks the SAGUARO_YARN_ELASTIC table instead of the plain one).  A read at the
+/// YaRN level rotates position p through row p: past this many rows the table's VMM tail is unmapped.
+int64_t qsa_rope_backed_cells(const QsaState& st, bool yarn);
 /// No YaRN conversation is live: every YaRN table's chunks back to its card's slot budget (or freed).  Returns them.
 int64_t qsa_rope_yarn_trim();
 /// One conversation's stored keys from plain RoPE (as the kernels computed it) to the YaRN level, its first `cells`

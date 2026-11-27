@@ -133,6 +133,11 @@ uint64_t session_host_backed(const SessionState& s);
 /// slot whose VRAM ring is carved whole still follow its conversation's memory (session_slot_fit's host half).
 bool session_host_elastic(const SessionState& s);
 int64_t session_host_backed_cells(const SessionState& s);
+/// P124e (round 8, manager card): the cells EVERYTHING a prompt read indexes by cell is backed for at once -
+/// the host copies and device follow state (above) AND the RoPE rows it rotates positions through (the tables
+/// are registered for the whole context, only their backed prefix is mapped).  Capped by the context; the
+/// whole context for a session nothing of is elastic.
+int64_t session_backed_cells(const SessionState& s);
 /// ... grown (never trimmed) for `cells` cells: the solo session's, before anything writes them (a request's prompt and
 /// its max_new, a restored conversation).  False: no RAM to pin.
 bool session_host_fit(SessionState& s, int64_t cells);

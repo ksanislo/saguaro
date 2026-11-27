@@ -198,6 +198,20 @@ int64_t session_host_backed_cells(const SessionState& s) {
     return n;
 }
 
+int64_t session_backed_cells(const SessionState& s) {
+    // P124e (round 8, manager card): every array a prompt read indexes by cell, in ONE number: the pinned host
+    // copy and the device follow state (session_host_backed_cells) AND the RoPE rows the read rotates positions
+    // through - the tables are registered for the whole context while only their backed prefix is mapped.
+    int64_t n = session_host_backed_cells(s);
+    n = n < 0 ? std::numeric_limits<int64_t>::max() : n;
+    if (s.qsa_states != nullptr && s.qsa_alloc > 0) {
+        const QsaState& p0 = s.qsa_states[s.qsa_ord0];   // (the stage's tables, shared: the first state's)
+        n = std::min(n, qsa_rope_backed_cells(p0, false));
+        if (s.rope_level) n = std::min(n, qsa_rope_backed_cells(p0, true));
+    }
+    return std::min(n, s.max_cells);
+}
+
 bool session_slot_fit(SessionState& s, int64_t cells, bool trim) {
     if (s.slot_cells < 0) {
         // P124e (manager card test, 11-26): not an elastic-VRAM slot (SAGUARO_ELASTIC_SLOTS off, or no VMM on the

@@ -2271,6 +2271,15 @@ int64_t qsa_rope_yarn_need(const QsaState& st, int64_t cells) {
     const RopeGrow* r = st.cos_tab != nullptr ? yarn_of(st.cos_tab) : nullptr;
     return r == nullptr || rope_target(*r, cells) <= r->cells ? 0 : rope_need(*r, cells);
 }
+int64_t qsa_rope_backed_cells(const QsaState& st, bool yarn) {
+    // P124e (round 8): the kernel registers the table for the WHOLE context (rope_table_set at the owner's init
+    // says max_pos = the extent) while only r->cells positions are MAPPED - a read whose rotary positions pass
+    // them steps off the backed VMM prefix into the guard.  A whole (ungrown) table is backed for its extent.
+    std::lock_guard<std::mutex> lk(g_rope_mu);
+    if (st.cos_tab == nullptr) return std::numeric_limits<int64_t>::max();
+    const RopeGrow* r = yarn ? yarn_of(st.cos_tab) : rope_grow_of(st.cos_tab);
+    return r == nullptr ? st.max_cells : r->cells;
+}
 
 int64_t qsa_rope_yarn_trim() {
     std::lock_guard<std::mutex> lk(g_rope_mu);
