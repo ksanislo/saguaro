@@ -7108,14 +7108,22 @@ int main(int argc, char** argv) {
     // device state - page tables, pooled indexer keys, the block-score scratch, the RoPE tables - VMM ranges backed
     // for one start step each.  A conversation that grows past it takes new chunks, and on a card the expert cache
     // has filled, the room can only come from the cache: the serve loop's give path (SAGUARO_ELASTIC_SLOTS_GIVE),
-    // which needs the cache in VMM and the RAM-arena tier.  Where that cannot run, back the context state whole NOW
-    // (the free-VRAM figure the cache then sizes from is today's, and so is every number the card test compares).
+    // which needs the cache in VMM.  Where that cannot run, back the context state whole NOW (the free-VRAM figure
+    // the cache then sizes from is today's, and so is every number the card test compares).
+    // P124e (round 5, manager card): round 4 also required the RAM-arena expert tier (srcp == &arena_src), and the
+    // card's own rig cannot have it: --resident-budget-gib implies --mmap-experts (the argument parse sets it), so
+    // on MORTAR - the acceptance rig - the rule ALWAYS fell back to backing --max-context whole: that is the
+    // ~3.4 GiB the card measured between 262144 and 1048576 (and the reason 262144 cost more than round 3's carve).
+    // The arena was never actually needed: the give evicts the cache's COLDEST resident experts, and an evicted
+    // expert answers from wherever the source keeps it - the mapped file tier is exactly the mode where the file
+    // answers (blob_stable/prefetch are the same interface), as they do for every cache miss already.  Any expert
+    // source can feed the relief; only the OTHER guards (below) genuinely stop the give.
     bool vram_follow_on = strata::core::qsa_vram_follow_active();
     const bool vram_follow_give =
-        vram_follow_on && srcp == &arena_src && o.adapt_async == 0 && !o.prefill_head_alias && o.peer_device < 0 &&
+        vram_follow_on && srcp != nullptr && o.adapt_async == 0 && !o.prefill_head_alias && o.peer_device < 0 &&
         !o.vram_elastic && !remote_caches;
     if (vram_follow_on && !vram_follow_give) {
-        const char* why = srcp != &arena_src ? "the experts are not all in the RAM arena"
+        const char* why = srcp == nullptr ? "there is no expert source to read evicted experts from"
                         : o.adapt_async ? "--adapt-async is on"
                         : o.prefill_head_alias ? "--prefill-head-alias is on"
                         : o.peer_device >= 0 ? "--peer-device is on"
@@ -13676,7 +13684,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                 give_off_why = "no elastic slots and no VRAM-follow state";
                 return false;
             }
-            const char* why = srcp != &arena_src ? "the experts are not all in the RAM arena"
+            // P124e (round 5, manager card): the give serves the follow relief with ANY expert source, not just the
+            // RAM arena - an evicted expert answers from the mapped file tier exactly as from the arena (round 4's
+            // srcp == &arena_src made the card's rig - --resident-budget-gib, hence the file tier - fall back).
+            const char* why = srcp == nullptr ? "there is no expert source to read evicted experts from"
                             : ajob ? "--adapt-async is on"
                             : o.prefill_head_alias ? "--prefill-head-alias is on"
                             : d_res == nullptr || host_res.empty() ? "there is no residency table"
@@ -13687,7 +13698,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (why != nullptr) {
                 give_off_why = why;
-                std::fprintf(stderr, "saguaro batch: SAGUARO_ELASTIC_SLOTS_GIVE is off: %s\n", why);
+                std::fprintf(stderr, "saguaro batch: SAGUARO_ELASTIC_SLOTS_GIVE is off: %s%s\n", why,
+                             efollow_on ? " (the context's device state cannot grow from the cache's room)" : "");
                 return false;
             }
             for (size_t k = 0; k < gv_parts; ++k) {
@@ -13706,9 +13718,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                 for (const PfPart& p : pf_parts)
                     if (p.cache == v.cache && p.first >= 0) v.top = std::min<int64_t>(v.top, p.first);
                 v.lo = v.top;
-                std::fprintf(stderr, "saguaro batch: elastic slots on CUDA%d: the expert cache (%lld slots) gives the slots "
-                                     "room below slot %lld when its budget runs short\n", v.dev,
-                             (long long) v.cache->slots(), (long long) v.top);
+                std::fprintf(stderr, "saguaro batch: %s on CUDA%d: the expert cache (%lld slots) gives the %s room "
+                                     "below slot %lld when %s runs short\n",
+                             eslots_on ? "elastic slots" : "the context's elastic device state", v.dev,
+                             (long long) v.cache->slots(), eslots_on ? "slots" : "context state", (long long) v.top,
+                             eslots_on ? "its budget" : "a conversation grows past the start step");
                 gv.push_back(std::move(v));
             }
             return true;
@@ -13877,8 +13891,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             for (const int32_t i : out) srcp->prefetch((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
             ++v.gives;
             v.moved += moved;
-            std::fprintf(stderr, "saguaro batch: elastic slots: CUDA%d's expert cache gives %lld MiB to the slots (%lld slots, "
-                                 "%lld hotter experts moved to colder ones' slots); %lld of %lld slots hold experts\n",
+            std::fprintf(stderr, "saguaro batch: elastic slots: CUDA%d's expert cache gives %lld MiB to the slots or the "
+                                 "context state (%lld slots, %lld hotter experts moved to colder ones' slots); %lld of "
+                                 "%lld slots hold experts\n",
                          v.dev, (long long) (given * (int64_t) G >> 20), (long long) gave, (long long) moved,
                          (long long) (v.lo + (xc.slots() - v.top)), (long long) xc.slots());
             return given;
