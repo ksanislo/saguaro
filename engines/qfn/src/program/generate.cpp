@@ -19854,6 +19854,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
             }
+            // (review L1: the hold survived the reset() above only for the switch's park - which consumed it if it
+            //  ran, as park_body clears it either way. Where it did not run (park_gain, a slot hold's park_skip, a
+            //  pin_sibling borrow) the session is still about to be rewritten below: the slot copy-in, the borrow
+            //  restore, the incoming restore. Drop the capture here, once the park has had its turn and before any
+            //  of those rewrites, so no later park can adopt bytes a rewrite is replacing.)
+            turn_main.adopt_clear();
             if (slot_source >= 0) {
                 lent_slot = -1;   // (a longer start than the main session's)
                 const auto t0 = Clock::now();
