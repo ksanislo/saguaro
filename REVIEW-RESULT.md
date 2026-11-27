@@ -1,137 +1,136 @@
-# REVIEW-RESULT - P125j layer pause (re-review round 3 of d789228f0..HEAD; HEAD = the round-2 fix report)
+# REVIEW-RESULT - P125j layer pause (re-review round 4 of d789228f0..HEAD; HEAD = bcfc5c03f, the round-3 MERGE; superseded by the manager's card FAIL)
 
-MERGE
+FIX-FIRST
 
-All seven open items of the round-2 review (3 MAJORs + 4 NITs) are fixed and re-verified here from the
-sources, each fix's blast radius traced; everything else the brief asks for re-checked and holds.
-`git diff 3208d412c..HEAD` shows the fixes touched ONLY the seven finding sites (generate.cpp: the two
-head-alias drops, the hoisted pause decision + live clamp, the pause keep's `pause_rows_bytes() > 0` and
-`pp_reached` line; prefill.cpp: the PLE skip; the two headers; the test; SETTINGS.md) - the ten previously
-verified fixes are byte-identical to what the round-2 review re-verified. Every plan-named test module was
-run here and passes. No new finding rises above a note. The card script remains the one thing no box here
-can run (no card, the plan excludes GPU runs); with MAJOR 2 fixed engine-side its sums now close by
-construction, so it is ready to earn its keep on the card.
+The round-3 MERGE holds for the code it read - all seven of round 2's findings are still fixed in the
+tree and both plan-named unit modules pass here - but the feature never reaches the shape the SHIPPED
+QFN config runs its prompt reads in (`--batch`, the concurrent reader), and the `SAGUARO_PRIORITY_IDLE_S`
+5 -> 0 flip ships into exactly that config. The manager's card run on 4xT4 (live Q4 `--batch` config,
+scratch/card-r1-test.txt, scratch/card-r1-engine.txt) failed exactly where this review locates it:
+cut 1's normal request waited 12.2 s (the plan promises 1 s), no pause/priority/STOP line anywhere,
+the low read ran 37632 tokens straight through "on a thread of its own".
 
-## Round 2's findings - fix verified for each (file:line of this tree)
+## Findings
 
-1. MAJOR 1 (live path trusted deeper than a dropped pause) - FIXED (ec0f6bd0b). The dropped-pause branch
-   (generate.cpp:20334-20351) now caps the trust at `read_pause.pos` exactly like the parked adopt
-   (20136-20149): `resume = pause_pos`, `live.resize`, `live_imgs = imgs_below(...)`, checkpoints deeper
-   than the pause erased - so the image follow-up that shares only the live prefix re-reads the paused
-   chunk over ALL its layers before anything deeper is attended over, parked or spilled. Verified the
-   orderings around the hoist: the whole pause decision now sits above `mtp.kv_restore(resume)`
-   (20353-20356), so the drafter's ring restores to the clamped depth; nothing between the old and new
-   spot reads the pause or `resume` (the parked-path mirror, the `off_path` erasure at 20195-20203 which
-   drops checkpoints deeper than the *clamped* resume too, and `limit_reuse` / `turn_main.begin` /
-   `pp_next_check` / the RESUME line at 20360-20380 all see the clamped figure). `resume <= pause_pos`
-   needs no clamp - the read from there rewrites the chunk over every layer before going deeper - and the
-   clamp cannot fire on the exact continuation (the `go_on` branch is exclusive, 20333).
-2. MAJOR 2 (leg-sum could not pass) - FIXED engine-side (bb0c65a76). The pause keep sets
-   `pp_reached = lp_pos + lp_tokens` (generate.cpp:22924) before both the cancelled `read` figure
-   (`clamp(pp_reached - resume, 0, fresh)`, 23115) and the engine's "prompt N tokens = R reused + K read"
-   line the script sums (23354, regex/awk fields verified). The legs then telescope exactly: cut leg
-   K = (P+T) - resume, resumed leg R = P+T (the RESUME line prints the un-clamped `resume`) with
-   K counted from there, last leg R + K = N exact (a completed leg reads `fresh = n - resume`). Re-checked
-   the neighbours: the #1620 keep is the pause keep's `else` and the P124b landing needs `!live_ok`, so
-   the bumped figure reaches nothing else; a leg that merely CARRIED the pair (cancel before the chunk)
-   has `resume == pp_reached == P+T` and keeps reporting `read = 0` for that leg; a refused keep keeps the
-   old figure, which is right - its chunk was not kept and is genuinely re-read.
-3. MAJOR 3 (`--prefill-head-alias` desynced the record from its rows) - FIXED (df890dd14). Both
-   head-alias `sp.reset()` sites now pair the drop: generate.cpp:19513 and 21746 call `drop_read_pause()`
-   (the lambda drops record AND rows, 10453). The pause keep additionally refuses on
-   `sp.pause_rows_bytes() == 0` (22907), so the after-read reset (21746, which runs BEFORE the keep)
-   degrades the leg to the #1620 keep at `pp_reached` - a completed chunk end - and the mismatch
-   pair-check (22998-22999) plus the rowless-clear (23000) take the leftovers down together. With that,
-   an armed record always owns rows (armed only at the keep 22924-22928 or a `give_pause` that returned
-   true, 20128-20135; cleared with the rows everywhere: take_pause_rows clears `pause_` itself,
-   prefill.cpp:1959-1962), so the rowless park - and with it the half-written session-dir write - is
-   unreachable (the park takes rows exactly when the record is armed, 11089-11104). Checked the other
-   `Prefill::reset()` sites: 9704/9707 are the startup init retry, before any request can arm a pause.
-   Default off: the flag's sites are guarded by `o.prefill_head_alias`, nothing changes without it.
-4. NIT 4 (doc said 0, restored pauses report -1) - FIXED (6a2ea08e4): prefill.hpp:359-363 now says -1 for
-   a restore-handed-back pause and says why (`give_pause` never sets `SavedPause::chunk`,
-   prefill.cpp:1966-1974; the label's only reader carries the in-run capture). Doc-only.
-5. NIT 5 (`state_bytes` wrapped `per_row` before its guard) - FIXED (dc4dbea8a):
-   layer_pause.hpp:69-71 clamps `row_floats > UINT64_MAX/4` first, so `per_row` can never wrap and the
-   guard below never divides by a wrapped zero. Two new checks (a 2^62-float row saturates; the widest
-   countable row stays exact) at layer_pause_test.cpp:141-144; 43 checks, 0 bad.
-6. NIT 6 (resumed chunk above max(LB,1) gathered + landed ~84 MB of PLE rows nobody read) - FIXED
-   (fc4e5f5d8): `ple_reads = l_from <= max(LB, 1)` (prefill.cpp:3308) gates the chunk-top gather (3309)
-   and `ple_pending` (3314, hence both lands), matching the only readers of `m.ple_emb` - the
-   `l == max(LB,1)` land at 3617 and the `l == 1` blocks at 3622/3663, which `l_from` skips. A stale
-   ahead-read gather is waited out at the chunk's end and clears `ple_next` (5549-5554), so the NEXT
-   chunk's top restarts the pipeline at its own gather instead of mistaking the stale one for its own -
-   the first chunk's cold-start shape, and a continuation always resumes at its c0 = 0 where `ple_next`
-   starts fresh. Buffer bookkeeping verified: the skip never flips `ple_buf`, the wait completes the old
-   gather before the same buffer is refilled, and the `ple_copied` event pairs stay correct. NON-RESUME
-   runs are untouched: `l_from == LB` makes `ple_reads` true, so all three sites reduce to the old
-   expressions term for term.
-7. NIT 7 (SETTINGS.md contradicted the pause switch) - FIXED (79cebc30e): both the
-   `SAGUARO_PRIORITY_IDLE_S` row (docs/SETTINGS.md:238) and the Request-priority paragraph (250-253) now
-   say that with `SAGUARO_LAYER_PAUSE=0` the read stops between CHUNKS again and the grace is what keeps
-   a follow-up's wait short - set it back to 5.
+1. BLOCKER - the layer pause (and every read preemption) is inert under `--batch`; the card run fails.
+   - serve/server.py:5744-5747: the read preemption (the cut that would send STOP) fires only for
+     `keeps_stopped_read AND not engine.batch`. QfnEngine sets `keeps_stopped_read = True`
+     (serve/server.py:9501) and its docstring (serve/server.py:9497-9507) says outright: "the preemption
+     never cuts a batch read". `can_pause = False` (serve/server.py:9500) also kills the fair-read pause
+     (serve/server.py:5727-5729). Under `--batch` the server therefore never sends a STOP for a prompt
+     read at any granularity - neither chunk-end nor layer. That is why the card log has no STOP line
+     at all.
+   - Engine side: under `--batch` every long prompt read runs on the piped concurrent reader thread
+     (generate.cpp:20766 gates `piped && (pr_conc || slot_admit)`; the reader thread runs `sp.run` at
+     generate.cpp:20911-20928; the card engine log's line is its own print at generate.cpp:21010-21009
+     region, scratch/card-r1-engine.txt:35). The P125j capture (`lp_pos/lp_layer/lp_tokens/lp_chunk`)
+     exists ONLY in the inline solo `run` lambda (generate.cpp:20667-20670); the reader-thread run sets
+     none of them, so the pause keep (generate.cpp:22907-22936) can never arm on that leg, and a run
+     that ended `err "layer paused"` on the reader thread falls into `if (!read_ok)`
+     (generate.cpp:21010-21013) and aborts the read as a failure - the saved rows are then dropped by
+     generate.cpp:23000 (`sp.clear_pause()`). Note `lp_on` IS true for the reader-thread run
+     (prefill.cpp:2978: no job, `bat` false, hand_in_/next_/embd_rows null, stop_between_layers wired at
+     generate.cpp:12694), so the layer pause itself would fire if the flag were ever set - what is
+     missing is the server cutting batch reads, the capture/keep on that leg, and the give-way/slot
+     carrying of the layer+rows (the batch machinery stops at chunk heads only:
+     `sp.stop_at_chunk` at generate.cpp:20906-20909, BYIELD at 20974-20975, give_way parking at
+     20700-20718).
+   - Consequence for the plan: step 4's promise (normal request's first token within 1 s, on the card,
+     with the live config) is not met; `tools/card_tests/layer_pause.sh` correctly FAILs on any
+     `--batch` CFG at "no 'prompt read paused' line" (scratch/card-r1-test.txt, cut 1 at position
+     16128, TTFT 12.22 s).
+2. MAJOR - the grace default 5 -> 0 ships without the protection it was bought with (MANAGER: "idle
+   grace -> 0 only with this"). serve/server.py:416-417 defaults `SAGUARO_PRIORITY_IDLE_S` to 0.0,
+   docs/SETTINGS.md:238 and 250-253 justify 0 by "a low prompt read steps aside at its next LAYER", and
+   serve/test_priority.py's IdleGraceDefault asserts 0.0 - but finding 1 means that sentence is false
+   for the batch config the package ships in: in 1.2.5 the 5 s grace was the only shield for a normal
+   follow-up arriving while no low read has started yet (the old SETTINGS wording: "long enough for an
+   agent's tool-call gap, since a low prompt read steps aside only at the end of a chunk"); with 0 the
+   low read starts the moment the box is quiet and the follow-up queues behind the whole concurrent
+   read (the card run's 12.2 s class of wait). NIT 7's fix (79cebc30e) documents only the
+   `SAGUARO_LAYER_PAUSE=0` combination, not the `--batch` one. Either fix finding 1 (then 0 is earned)
+   or keep the default at 5 when the engine runs batch slots and say so in the docs and the test.
+3. NIT - REPORT-p125j-layer-pause.md:283-285 is accurate ("serve/server.py only ever cuts a solo QFN
+   read, keeps_stopped_read and not batch") but then calls that "the shape the priority cut actually
+   uses". For a live `--batch` QFN box it is not - that is the shape the cut CANNOT use. The report's
+   honest-scope note should name `--batch` as the config where the whole feature is inert, and step 4's
+   card claim should say its checks can only pass where a pause can be taken at all.
+4. NIT - when finding 1 is fixed through the batch machinery, the card script's expectations must move
+   with it: the script greps the solo mechanics (server line "inside chunk c at layer l", engine line
+   "the read paused at chunk" from prefill.cpp:5537, the solo RESUME/RDONE "prompt N tokens = R reused +
+   K read" figures summed against READ_TOL). A batch cut that gives way through BYIELD/give_way parks a
+   partial read in a SLOT (generate.cpp:20700-20718) and reports slot/BGEN figures instead - either the
+   script covers both, or it pins a solo config for these exact lines.
 
-## Re-checked per the brief (my own pass, no regression found)
+## Round 2/3's items - re-verified in this tree, nothing regressed
 
-- Feature OFF: `lp_on` is false for every run with SAGUARO_LAYER_PAUSE=0, a job, a batch, a split, a hand
-  or picture rows (prefill.cpp:2978-2979), and every new block needs `lp_on`, `lp_resume` (never true
-  without it) or an armed `pause_` (never armed): the embedding wrapper (3227/3300), `gr_broadcast`
-  (3301), the loop start `l_from = LB` (3611), the pause block (5516-5546), the PLE trio (3308-3314,
-  5549), run()'s read-past clear (6204) - all no-ops; the generate.cpp capture (20667), keep branch
-  (22907), clamp (20323) and DONE `%s` likewise; the server pause line without the keys is byte-identical
-  (serve/server.py:5877-5887) and `SavedConversation::bytes()` adds only capacities. MAJOR 1's move of
-  `kv_restore`/`tr`/`set_prompt_len` below the pause decision sits above a dead block with OFF - behaviour
-  unchanged. The grace default 0 is the plan's intended change, gated on this work shipping (step 3).
-- Locks / threads / stdout: no new mutex anywhere in the diff (checked every `+` line); the pause reads
-  the stdin thread's atomic `stop_req` from the run thread (generate.cpp:12690-12694, the same flag as
-  `should_stop`); one `fprintf(stderr)+fflush` per pause (prefill.cpp:5537-5542) and the keep line
-  (22932-22936), the DONE keys ride inside the single existing DONE printf (23139-23147) - no line
-  interleaving; the server takes the keys only from the fresh DONE after `gen.close()`
-  (serve/server.py:5819-5822, 5882) and `carry_leg`/`add_carry` never touch `paused_*`.
-- Generated file: `tools/saguaro/extract_qfn_engine.py` re-run here produced a byte-identical
-  serve/qfn_engine.py (tree clean after); the only hunk in both engines/qfn/serve/server.py:1636-1638 and
-  serve/qfn_engine.py:1193-1195 is the DONE-key tuple.
-- Tests really exercise the change: `pause_point`/`resumes`/`state_bytes` are the exact functions
-  prefill.cpp:5517-5518/3230/5541 calls, and the 43 hand-computed checks walk the pause/resume/size rules
-  the engine relies on; IdleGraceDefault asserts the new 0.0 default. The card script checks the plan's
-  four promises end to end (port 8092, own dirs, api_key dropped, engine stderr kept in its out folder).
-- No secrets and no path outside the repo in the diff; no Co-Authored-By / Claude-Session / Assisted-by
-  trailer anywhere in `git log d789228f0..HEAD`.
+All seven of round 2's fixes sit where round 3 said (spot-checked at HEAD): the dropped-pause trust
+clamp above `mtp.kv_restore` (generate.cpp:20323-20351); the pause keep's `pp_reached = lp_pos +
+lp_tokens` (generate.cpp:22924); both head-alias pair-drops (generate.cpp:19513, 21746) plus the keep's
+`sp.pause_rows_bytes() > 0` refusal (22907); the `-1` doc in prefill.hpp; the `state_bytes` row clamp
+with the two extra checks (43 green); `ple_reads` gating the gather/pending/land plus the stale
+`ple_next` wait (prefill.cpp:3308-3314, 5549-5554); the SETTINGS.md grace-back-to-5 clause.
 
-## What I ran (plan-named modules, one at a time)
+## Re-checked per the brief (this pass)
 
-- `cmake --build scratch/build-p125j-cuda75 --target layer_pause_test` +
-  `ctest -R layer_pause_test`: Passed; binary: "ok: 43 checks, 0 bad".
+- Feature OFF (`SAGUARO_LAYER_PAUSE=0`): `lp_on` false at prefill.cpp:2978-2979; `lp_resume` never true;
+  `l_from == LB` (prefill.cpp:3228, 3611); the embedding/gr_broadcast guards (3241/3300/3301), the pause
+  block (5516-5554), the run-past clear (6198-6201) and every generate.cpp block sit behind `lp_on`,
+  `lp_resume` or an armed `pause_` that only a taken pause can arm; DONE's new `%s` carries the empty
+  `lp_note`; the server line is byte-identical without the DONE keys (serve/server.py:5877-5887); the
+  extra `sp.clear_pause()` at 23000 is a no-op on an empty record. The grace default is the only
+  intended OFF-visible change - finding 2.
+- Locks / threads / stdout: no new mutex/lock_guard/unique_lock on any `+` line of the diff; the pause
+  reads the stdin thread's atomic `stop_req` (generate.cpp:12694) from the run thread - the same
+  pattern as `should_stop`; one `fprintf(stderr)+fflush` per pause (prefill.cpp:5537-5542) and one keep
+  line (generate.cpp:22932-22936); the DONE keys ride the single existing DONE printf (23139-23147) - no
+  line interleaving; nothing acquires a lock the pause path could already hold.
+- Generated file: serve/qfn_engine.py's only hunk (serve/qfn_engine.py:1193-1195) mirrors the source
+  hunk (engines/qfn/serve/server.py:1636-1638) key for key; no other drift in either file (regenerating
+  would edit the tree, so this pass verified hunk-for-hunk; round 3 verified byte-identical output).
+- Tests really exercise the change: layer_pause_test walks the exact `pause_point` / `resumes` /
+  `state_bytes` the engine calls (prefill.cpp:5517, 3230, 5541); test_priority pins the new default.
+  But nothing automated covers the server gate, the reader-thread leg, or a resume end-to-end - those
+  rest solely on the card script, and it failed (findings 1/4).
+- No secrets, no paths outside the repo in the diff (the script reads CFG only, writes under its
+  --out folder, drops `api_key`); no forbidden commit trailers in `git log d789228f0..HEAD`.
+
+## What ran here (plan-named modules, one at a time)
+
+- `cmake --build scratch/build-p125j-cuda75 --target layer_pause_test` + `ctest -R layer_pause_test`:
+  Passed ("ok: 43 checks, 0 bad" from the binary's own rule).
 - `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_priority`: Ran 68, OK.
-- `cmake --build ... --target strata_prefill` / `--target strata`: exit 0 each - the committed tree
-  compiles and links.
-- `tools/saguaro/extract_qfn_engine.py`: byte-identical regeneration; `git status` clean.
-- `bash -n tools/card_tests/layer_pause.sh` clean; `py_compile` on serve/server.py, serve/qfn_engine.py,
-  engines/qfn/serve/server.py, serve/test_priority.py: OK.
-- Not run: the card script itself - no card on this box and the plan excludes GPU runs.
-
-## Notes (no action)
-
-- When the MAJOR-1 clamp fires, the INFO `ctx_source=`/`ctx_reused=` line (generate.cpp:20208, printed
-  before the clamp) can disagree with the RESUME line's clamped depth; the value feeds only the
-  "new conversation, N tokens to read" log for `source=none` (serve/qfn_engine.py:1026-1029), which that
-  request never takes. Cosmetic.
-- A restored pause re-kept without a re-capture reports `paused_chunk=-1` on the DONE (the run-relative
-  label cannot survive a park - NIT 4's doc); the server line and the card regex tolerate it
-  (`inside chunk [0-9-]+ at layer [0-9]+`).
+- `bash -n tools/card_tests/layer_pause.sh`: clean.
+- `tools/card_tests/layer_pause.sh` NOT run here (no card); the manager's card run on the live Q4
+  `--batch` config FAILED as quoted in finding 1 - that is the plan's step-4 gate.
 
 ## Manager's four
 
-- Resume at the exact layer: implemented (`l_from` = the saved layer, prefill.cpp:3227-3239, 3611) and
-  helper-tested; the silent-wrong-read holes (image follow-up, head-alias) are closed, so the resume
-  either goes on at the saved layer or re-reads the chunk over all its layers. The card proof is the
-  script's, for the card.
-- Nothing read twice: the reused figure covers the paused chunk, the resumed read restarts at its first
-  token, rows read past a pause are cleared (prefill.cpp:6204), and the engine's own leg figures now sum
-  to the prompt exactly (MAJOR 2 above) - `layer_pause.sh` demonstrates it rather than failing on it.
-- Parks with the conversation: record + rows ride park (generate.cpp:11089-11104) and restore
-  (20125-20151), are counted in the budget (10978, `bytes()`), refuse disk writes while live (10738,
-  10845, 11108), and the record can no longer outlive its rows (MAJOR 3) - evicting a parked pause drops
-  it and the prompt re-reads, as before P125j.
-- Idle grace -> 0 only with this: 0.0 ships with the working pause, tested (test_priority 68) and
-  documented, including the switch-off combination that needs it back at 5 (NIT 7).
+- Resume at the exact layer: implemented and helper-tested on the SOLO GEN path
+  (prefill.cpp:3229-3239/3611 + capture 20667 + keep 22907) - but never reached on a `--batch` read
+  (finding 1).
+- Nothing read twice: the leg figures telescope after bb0c65a76 (22924) wherever a pause can arm; the
+  card run exercised no leg at all (no cut), so the sums stay unproven end to end.
+- Parks with the conversation: record+rows ride the park (generate.cpp:11089-11104), come back at the
+  restore (20125-20135), count in the budget (10978), and refuse disk writes while live (10738, 10845,
+  11108-refuse) - holds, for solo reads.
+- Idle grace -> 0 only with this: NOT met - 0 ships into the batch config where the pause is inert
+  (finding 2).
+
+## Fix (the manager's steps, with the sites this review verified)
+
+1. FIX-REPORT: trace a low read under `--batch` from the server's step-aside (serve/server.py:601
+   `step_aside`, gated out at 5744-5747, QfnEngine docstring 9497-9507) into the engine's reader
+   (generate.cpp:20766, 20892-21033): the stop is checked at chunk heads only (`sp.stop_at_chunk`
+   20906-20909 wired to BYIELD 20974-20975), and `stop_between_layers` (12694) is armed but its result
+   has no capture/keep on that leg (20667 is inline-only; 21010-21013 aborts; 23000 drops the rows).
+2. Make the concurrent reader honour the layer-boundary stop and the server's step-aside: open the cut
+   for batch (or route it through the BYIELD lane), capture the pause figures on the reader-thread leg
+   and let the keep / give_way carry them (a slot's partial read would need the layer+rows too -
+   20700-20718 parks ids only), keep the legs' reused+read = prompt closed either way, and log
+   'prompt read paused' with chunk/layer as the solo path does.
+3. A unit/fake test for the concurrent-reader path; rebuild QFN sm_75 in a NEW dir under scratch/; run
+   tools/card_tests/layer_pause.sh on the live Q4 config until it PASSes (its expectations may need the
+   batch wording - finding 4).
+4. The grace default stays 0 only once step 2 works end to end on the card; if the batch cut does not
+   ship, the default goes back to 5 (serve/server.py:416, test_priority, SETTINGS.md in one step).
