@@ -1037,15 +1037,18 @@ void Glm5Model::kv_stream_free(KvStream* K) {
 // the eager whole-max arena, which was pinned in full at the load.  False with err: the driver refused (out of
 // pinned RAM - the WSL cap of about 1 GB in all, a host with nothing left): what pinned before the refusal stays,
 // the request ends on err, the engine lives.
-bool Glm5Model::kv_pin(KvStream* K, int64_t end_pos, std::string& err) {
+bool Glm5Model::kv_pin(const KvStream* K, int64_t end_pos, std::string& err) {
     if (K == nullptr || K->arena.empty()) return true;
     const int64_t slack = 2 * kWinMax + 2 + K->page;   // (the window's rows, the chain's, and the block's rest)
     const int64_t end = std::min(end_pos + slack, K->n_blocks * K->page);
     if (end <= 0) return true;
     const int64_t blocks = (end + K->page - 1) / K->page;
     const uint64_t span = (uint64_t) blocks * (uint64_t) K->page * (uint64_t) K->row_bytes;
+    // const K: pinning is the arena's mutex-guarded bookkeeping, not a write to the stream's data (the rows'
+    // read-only views name their positions through it too)
+    maya::core::GranuleArena& ar = const_cast<maya::core::GranuleArena&>(K->arena);
     for (const uint64_t slab : K->pin_slabs)
-        if (!K->arena.ensure(slab, span, kv_pinner(), err)) {
+        if (!ar.ensure(slab, span, kv_pinner(), err)) {
             char b[320];
             std::snprintf(b, sizeof b, "KV streaming: cannot grow the pinned latent cache (%s) - lower the context, "
                           "or turn it off (--kv-streaming off in the config's args; under WSL the driver pins only "

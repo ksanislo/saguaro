@@ -705,8 +705,10 @@ public:
     // P125g (PLAN-p125g): register the host copy's granules (GranuleArena) that the positions BELOW end_pos live
     // in, before any kernel names them - whole pages (a resolve reads whole blocks), plus the slack a decode step
     // writes past its committed position (the verify window's rows, the draft chain's).  A no-op for a stream on the
-    // eager whole-max arena; false with err when the driver refuses (out of pinned RAM: the WSL ~1 GB cap).
-    static bool kv_pin(KvStream* K, int64_t end_pos, std::string& err);
+    // eager whole-max arena; false with err when the driver refuses (out of pinned RAM: the WSL ~1 GB cap).  A const
+    // K: pinning is the arena's mutex-guarded bookkeeping, not a write to the stream's data - the rows' read-only
+    // views name their positions through it too.
+    static bool kv_pin(const KvStream* K, int64_t end_pos, std::string& err);
     // ... and the give-back of one stream's pins (its conversation reset, parked or released).  The caller must
     // have nothing in flight that touches the arena: a sync of the part (its stream, or the whole card) first.
     static void kv_unpin(KvStream* K);
