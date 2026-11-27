@@ -20305,12 +20305,6 @@ vs.d_skip_usage = gs.d_skip_usage;
                         }
                         break;
                     }
-            // KV streaming: the drafter's ring may hold cells past `resume` from a longer turn; the main layers'
-            // host copies and slots are always current (every writer writes both), so they need nothing
-            if (use_mtp && resume > 0 && reread_to <= 0) mtp.kv_restore(resume);
-            tr("request", n, geni ? 1 : 0);
-            req_times = ReqTimes{};
-            if (use_mtp) mtp.set_prompt_len(n);
             // P125j: does this request go on with a read paused between two layers of a chunk?  Only the
             // exact continuation can: same conversation ending exactly at the paused chunk's end, and the
             // chunk's tokens are the request's own.  The session then starts the read INSIDE that chunk
@@ -20318,6 +20312,12 @@ vs.d_skip_usage = gs.d_skip_usage;
             // whole chunk (its lower layers were read: reused + read = the prompt, nothing read twice).
             // Anything else has zeroed or restored the session or taken another conversation - the pause
             // goes with what dropped it, and the read continues from the checkpoint / token 0 as usual.
+            // But a dropped pause must also CAP what this request trusts: from the pause's first token to
+            // the paused chunk's end the session's cells hold these tokens for the layers BELOW the pause
+            // alone, and a read starting above them (an image follow-up, whose image sits past the live
+            // prefix, continues at resume = live.size() = the chunk's end) would decode over cells no
+            // layer >= the pause ever wrote.  The chunk is re-read over all its layers before anything
+            // deeper is trusted - the parked path clamps a diverging adopt exactly this way.
             int64_t lp_from = -1;
             if (read_pause.pos >= 0) {
                 const bool go_on = reread_to <= 0 && req_imgs.empty() &&
@@ -20330,8 +20330,32 @@ vs.d_skip_usage = gs.d_skip_usage;
                                    sp.paused_tokens() == read_pause.tokens &&
                                    sp.paused_chunk() == read_pause.pos;
                 if (go_on) lp_from = read_pause.pos;
-                else drop_read_pause();
+                else {
+                    const int64_t pause_pos = read_pause.pos;
+                    drop_read_pause();
+                    if (resume > pause_pos) {
+                        std::fprintf(stderr, "saguaro serve: this prompt does not go on with the paused read "
+                                             "(paused at token %lld, it shares %lld): continuing from the "
+                                             "pause's first token instead\n",
+                                     (long long) pause_pos, (long long) resume);
+                        resume = pause_pos;
+                        // the conversation is trusted only as deep as every layer wrote: the read past
+                        // here rewrites every layer anyway, and a park of a longer `live` would snapshot
+                        // the half-written cells into a conversation that no longer says it is paused
+                        live.resize((size_t) pause_pos);
+                        live_imgs = imgs_below(live_imgs, pause_pos);
+                        for (auto it = checks.begin(); it != checks.end();)
+                            it = (int64_t) it->ids.size() > pause_pos ? checks.erase(it) : it + 1;
+                    }
+                }
             }
+            // KV streaming: the drafter's ring may hold cells past `resume` from a longer turn; the main layers'
+            // host copies and slots are always current (every writer writes both), so they need nothing.
+            // (P125j: below the pause decision, so a clamped `resume` restores the ring to the trusted depth)
+            if (use_mtp && resume > 0 && reread_to <= 0) mtp.kv_restore(resume);
+            tr("request", n, geni ? 1 : 0);
+            req_times = ReqTimes{};
+            if (use_mtp) mtp.set_prompt_len(n);
             const int64_t read_from = lp_from >= 0 ? lp_from : (reread_to > 0 ? 0 : resume);
             conversations.limit_reuse(read_from);
             turn_main.begin(read_from);
