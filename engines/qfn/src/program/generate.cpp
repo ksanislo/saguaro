@@ -3894,6 +3894,10 @@ int main(int argc, char** argv) {
 #if defined(STRATA_GPU_METAL)   // Apple Silicon: every expert is on the GPU; ggml-cpu (NEON) is the only CPU expert code
     strata::metal_engine::set_model_shard(o.native_preset.c_str());   // the decode window reads the model GGUF itself
     o.mmap_experts = true;   // ... experts included: no resident copy of them (the GGUF shards in place)
+    // the streamed expert arena ranks its slots by a profile (metal/src/engine/window.cpp, stream_arena), which it
+    // looks up itself (SAGUARO_METAL_EXPERT_PROFILE, else Strata's data/expert-profile.bin, which Saguaro does not
+    // ship): --expert-profile is that profile here too.  A SAGUARO_METAL_EXPERT_PROFILE already set still wins.
+    if (!o.expert_profile.empty()) setenv("SAGUARO_METAL_EXPERT_PROFILE", o.expert_profile.c_str(), 0);
     if (false) {
 #else
     if (!strata::kernels::cpu::cpu_avx2_ok() && isa_floor[0] == '\0') {

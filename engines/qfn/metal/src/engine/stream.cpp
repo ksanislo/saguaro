@@ -406,7 +406,9 @@ bool ExpertStream::make_arena(mtl::Context& cx, uint64_t budget, const std::stri
     for (const auto& p : rank) {
         Cls& k = cls_[(size_t) lay_[(size_t) p.first].cls];
         const uint64_t cost = k.n < min_slots ? 0 : k.pages * PAGE;
-        if (used + cost > budget) break;
+        // (Saguaro: a slot under the min_slots floor is there whatever the budget - fill it too.  With `break` a budget
+        //  under the floor, as on a 32 GB Mac with little free memory, left every slot empty: "0 experts read".)
+        if (cost > 0 && used + cost > budget) continue;
         used += cost;
         ++k.n;
         fill.push_back(p);
