@@ -22914,6 +22914,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 live_imgs = imgs_below(req_imgs, lp_pos + lp_tokens);
                 live_ok = true;
                 live_prompt_n = n;
+                // The paused chunk counts as READ on this leg (its layers below the pause read it):
+                // pp_reached only advances at COMPLETED chunk ends, and this chunk never completes here,
+                // so without this the DONE `read` figure leaves the chunk in NEITHER leg - the cut leg
+                // stops at its start and the resumed leg counts from above it - and the legs' reads no
+                // longer sum to the prompt (layer_pause.sh's nothing-read-twice check).
+                pp_reached = lp_pos + lp_tokens;
                 read_pause.pos = lp_pos;
                 read_pause.layer = lp_layer;
                 read_pause.tokens = lp_tokens;
