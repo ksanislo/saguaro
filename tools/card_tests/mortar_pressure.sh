@@ -18,8 +18,11 @@
 # card's free VRAM (rocm-smi, else nvidia-smi) every SAMPLE_S s into samples.csv.
 #
 # PASS (the plan's line, and the PASS/FAIL verdict lands on stdout):
-#   * no abort      - no "the engine had stopped" in the server log (a drained #267 that the new rule keeps
-#                     alive is a REPORTED line, not an abort; a not-drained one is fatal and fails, correctly);
+#   * no abort      - no "the engine had stopped" in the server log.  Every #267 shape fails this: a
+#                     not-drained line is fatal, and a drained one (the recovered note, P124x d) ends its
+#                     request without a kill but the engine exits after the line and the server reloads it
+#                     today (review F-A - the serve loop has no return-to-stdin path for it yet).  The
+#                     recovered line is echoed at the verdict so the run can tell the shapes apart;
 #   * VRAM never under the floor - every free-VRAM sample >= VRAM_FLOOR_MIB (default 512: the engine's own
 #                     #2065 paging line; the fix should keep the card at or above 512 + slack at request start);
 #   * no swap growth - swap in use never rises more than SWAP_GROW_MIB above its baseline at load start

@@ -192,7 +192,7 @@ off like the other rules, and the release/trim notes print the swap figure besid
 `park_pool` line gains `park_swap_mib=`: the server's parser reads the keys it knows and ignores the rest -
 an external one keyed on the exact token count should key on names, §4).
 
-### 2d. A #267 verify timeout that drained ends the request, not the engine - 652b1cd63, 26feff6db, 9ff4ff922
+### 2d. A #267 verify timeout that drained says so, and the server stops killing the process for it - 652b1cd63, 26feff6db, 9ff4ff922
 
 `release_gpu_waits(timeout, poison, re_armed)`: the serve watchdog (which ends the process right after)
 keeps releasing **and poisoning**; a window that timed out on its own 20 s host wait releases with
@@ -202,9 +202,22 @@ and a split's verifier (a next stage, or an incoming hand-off word - the hand-of
 count the next window must not start under), stay poisoned. `timed_out_note()` words the three shapes
 apart (review F3): `...did not finish within 5 s (#267)` / `...released and the GPU finished (#267)` -
 printed only when the verifier really took the arm back - / `...released and the GPU finished, but the
-verifier cannot take another window (#267)`. The server's `fatal_engine_line()` treats only the second as
-recovered: the request ends with the engine's error and the same engine takes the next one - the
-one-minute reload with five requests waiting (§1.1) was the cost of killing otherwise. The not-drained
+verifier cannot take another window (#267)`.
+
+**What this does NOT yet do (re-review F-A): the re-armed process does not survive to take the next
+request.** Every serve path that prints a timed-out ERR returns 1 out of the request loop - the solo
+prompt read (generate.cpp:21616-21626), the solo decode window (:22665-22667), the batch step (:18768)
+and a batch_fatal prompt read (:21073) - so on a drained self-timeout the engine prints its ERR line and
+the process exits seconds later; the server logs "the engine had stopped" and reloads. The one-minute
+reload with five requests waiting (§1.1) is therefore NOT avoided yet: making the re-armed shape return
+to stdin (fail the request, keep the process) is the engine change that claim waits for, in exactly those
+paths, gated on the re-arm. The verifier re-arm itself holds (verify.cpp:554-563) and takes another
+window - it just never gets one, since the process is gone.
+
+What the rule does deliver today: the server's `fatal_engine_line()` treats only the re-armed note as
+recovered, so the request ends with the engine's own error line instead of the pump's SIGKILL of a
+process that was ending itself cleanly, the shapes are told apart truthfully (F3), and the protocol is in
+place for the engine half: a recovered line means the verifier can take another window. The not-drained
 note, both "an earlier window never finished" lines, and a timed-out line with no note (an older engine)
 keep the kill. Per review F4 the coupling is stated where it lives: the note-means-recovered rule holds
 because this server and the engine binary ship from one build (`serve/qfn_engine.py` is extracted from
@@ -224,11 +237,13 @@ Ran one at a time (g++ 14.2, -std=c++20, no GPU; scratch/p124x-build):
   the "one byte over the tight fit" edge; the 9070 XT 700 -> 1024 floor, CUDA/Windows/integrated-APU/
   small-card/unknown-total arms unbumped, at/above the floor kept, a given 0 floored.
 * `serve/test_fatal_recovery.py` - 11 checks: the drain/kill protocol through real pipes - the drained note
-  ends the request and the same engine answers the next one (P124x d), the not-drained and still-closed
-  notes and the older engine's note-less line still kill it, `fatal_engine_line` as a table (F3's words
-  included). Run via `scratch/run_p124x_server_tests.py`, which registers the root's `serve/turbo_live.py`
-  under the name the QFN serve package imports it by - that import has been unresolvable standalone since
-  936183783, at this branch's base as well (pre-existing, not this branch's; noted rather than fixed here).
+  ends the request and the (fake) engine idles for the next GEN (P124x d - the fake speaks the protocol the
+  server must honor; the real serve loop still exits the process after the line, 2d/F-A), the not-drained
+  and still-closed notes and the older engine's note-less line still kill it, `fatal_engine_line` as a
+  table (F3's words included). Run via `scratch/run_p124x_server_tests.py`, which registers the root's
+  `serve/turbo_live.py` under the name the QFN serve package imports it by - that import has been
+  unresolvable standalone since 936183783, at this branch's base as well (pre-existing, not this branch's;
+  noted rather than fixed here).
 * Build: **CUDA sm_75** - `cmake -S engines/qfn -B scratch/build-p124x-sm75 -DSTRATA_ENABLE_CUDA=ON
   -DCMAKE_CUDA_ARCHITECTURES=75` (nvcc 13.1, ninja): the `strata` target links whole (saguaro-qfn, 172
   steps, no errors; the pre-existing kernel warnings unchanged) - verify.cpp, generate.cpp and
@@ -250,6 +265,11 @@ Ran one at a time (g++ 14.2, -std=c++20, no GPU; scratch/p124x-build):
   would re-park), and the raw floor plus PSI still guard it. The bar itself is one env away either way.
 * Rule (d)'s recovered note trusts the paired engine (F4): stated in the server comment and here, not
   enforced by a handshake. An explicit version/behaviour line in the engine's READY would close it.
+* Rule (d)'s engine half (re-review F-A): the re-armed shape should end the request and return to stdin
+  (solo generate.cpp:21616/:22665, batch :18768/:21073, gated on the re-arm) instead of `return 1` -
+  until it does, every drained #267 still costs the reload. The batch half is the delicate one (other
+  slots are mid-window); this branch deliberately keeps the conservative exit and says so rather than
+  shipping an unwound batch state that was never GPU-tested.
 * `park_swap_mib=` on the INFO `park_pool` line: this repo's parser reads keys by name and ignores
   unknowns (checked, no consumer), but an external parser keyed on the exact token count of that line
   breaks - the token list of the engine's INFO lines is nowhere documented, and this found none as a place

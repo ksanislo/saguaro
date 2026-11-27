@@ -3,7 +3,11 @@
 P124x (d): the engine releases a timed-out window's GPU waits itself; when they DRAINED and its verifier
 re-armed, the line says "released and the GPU finished (#267)" and the server ends the request only - a
 did-not-drain line, a timed-out line without the note, and a drained-but-still-closed (split) line end the
-engine.  The fake speaks each of those shapes, in its --mode."""
+engine.  The fake speaks each of those shapes, in its --mode.  These tests pin the SERVER half of the rule:
+a recovered line must never invalidate the engine.  The real engine serve loop prints the recovered line
+and still exits the process (return 1 on every timed-out ERR - review F-A), so end-to-end survival of a
+drained #267 waits on the engine returning to stdin on the re-armed shape; the fake idles after the line,
+which is the protocol the server implements for that engine."""
 import os
 from pathlib import Path
 import sys
@@ -31,8 +35,9 @@ for line in sys.stdin:
    else:
     kind='verify batch' if mode=='batch' else 'verify'
     if mode=='recovered':
-     # the engine drained its waits and re-armed: the request ends with this line, the engine idles for
-     # the next GEN (the engine's timeout path answers ERR and returns to stdin - no DONE follows)
+     # drained and re-armed: the server must end the request on this line without killing the process, and
+     # the fake idles for the next GEN - the protocol the server implements; today's engine exits after the
+     # line (review F-A), so this fake proves the server half, not the pending engine half
      print(f'ERR {kind}: timed out at layer 18; its GPU waits were released and the GPU finished (#267)',flush=True)
     elif mode=='split':
      # drained, but the split verifier stays closed: the fatal shape P124x review F3 must keep fatal
@@ -98,8 +103,10 @@ class FatalRecovery(unittest.TestCase):
         self.wait_dead(e)
 
     def test_a_drained_267_timeout_ends_the_request_not_the_engine(self):
-        # P124x (d): waits released AND the GPU finished - the engine re-armed its verifier.  The request ends
-        # with the engine's error and the SAME engine takes the next one: no kill, no minute-long reload.
+        # P124x (d): waits released AND the GPU finished - the verifier re-armed, and this fake speaks that
+        # protocol: the request ends with the engine's error, no kill, the SAME engine takes the next one.
+        # That survival is the server half (review F-A): the real engine exits after the line today, so the
+        # no-reload end to end waits on the serve loop returning to stdin on the re-armed shape.
         e=self.engine('recovered');svc=self.service(e)
         with self.assertRaises(ValueError):self.run_request(svc)     # the ERR ends this request
         self.assertEqual(svc.history[-1]['finish'],'error')
