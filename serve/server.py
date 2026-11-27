@@ -1557,6 +1557,11 @@ class StrataEngine:
             for k, v in ik2_log_facts("".join(head), self.max_context).items():
                 self.info.setdefault(k, v)                # (an engine that says it itself, INFO: its own figure)
             self._ik2_log(head)
+            if not self.multi:   # P125l: SOLO saguaro-ik2 honours a STOP only between a prompt's chunk passes
+                self.keeps_stopped_read = True   #  (ik2_main.cu:10815-10841) and keeps the conversation at its last
+                #  snapshot then (the last turn's end, or the last message's start - :10870-10892), so a cut read
+                #  continues from where the engine kept it; --parallel slot_resets a stopped READER - "nothing of its
+                #  prompt is kept" (:10494-10499) - so the multi one is not given it and its reads run to their end.
         if self.info.get("engine_kind") == "hy4":
             self.keeps_stopped_read = True   # R122: a STOP between its prompt's chunks keeps the conversation live at the chunk reached (solo, hy4_main.cpp:1086, :1106-1110)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)

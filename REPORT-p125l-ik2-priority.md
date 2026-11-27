@@ -94,4 +94,43 @@ Its READY says only `stop` (solo) or `stop multi=N` (--parallel) - no `pause`, n
   (ik2_main.cu:10494-10499). A read cut in multi LOSES the read (re-read from 0; harmless,
   but work lost) - so the read flag must NOT be given on a multi ik2.
 
-*(Steps 2-4: implementation, tests and results appended below as they land.)*
+## 2. Implementation: the ik2 driver gets the flag (solo only)
+
+One change, in serve/server.py (`StrataEngine.__init__`, the ik2 start-up block next to the
+hy4 one): an engine whose INFO line says `engine_kind=ik2` is now given
+`keeps_stopped_read = True` **when its READY said no `multi=`** (solo). With the flag, the
+existing `Service._sliced` read preemption (serve/server.py:5844-5858) cuts a LOW ik2 prompt
+read with a plain STOP tick at a `PP` line whenever `step_aside` says so, and the resumed call
+re-sends the same prompt - the engine re-finds its resume point at its kept snapshot itself.
+No engine change (this box has no card; the engine is used exactly as it is, "with what the
+engine has").
+
+What this means per mode, with what the engine really keeps:
+
+- **Answer, solo and --parallel**: already worked (the token-tick step-aside is not gated on
+  any flag, and saguaro-ik2 honours STOP between tokens in both loops); the cut keeps the K/V
+  through the prompt (solo) / through the prompt plus what was written (multi slot hist), and
+  the resume continues from there - no prompt re-read.
+- **Read, solo**: the flag given. The engine sees STOP only *between* chunk passes - a chunk
+  pass is never split, so a mid-read stop is always a between-chunks stop (said here per the
+  plan). Resume continues from the latest snapshot (the last message's start once past it,
+  else the conversation as it was at the request's start); the K/V held at that point is not
+  re-read. **Where a mid-read stop loses work**: a read cut before any snapshot of this
+  request was taken - the first prompt of a new conversation before its `p_ms` snapshot - comes
+  back and reads again from 0; nothing breaks (the engine's prefix match recomputes honestly),
+  the read is just not further along, and the log line keeps the numberless wording ("continues
+  from where the engine kept it") - the driver never claims a reused figure the engine did not
+  report (the engine reports none over the pipe: no RESUME line, and PP's `cached` is its
+  start's figure).
+- **Read, --parallel**: deliberately NOT given (`if not self.multi`). The engine's
+  `STOP <rid>` on a reading request slot_resets its slot - "a reader stopped: nothing of its
+  prompt is kept" (ik2_main.cu:10494-10499) - so cutting it would lose the read, the exact
+  shape P124b says never to cut. Its reads run to their end, as the existing
+  `test_another_line_engine_is_not_given_it` recorded.
+
+Hy4 and MM3 are untouched (serve/server.py:1526-1530, :1560-1561 unchanged); no READY-word
+(`keepread`) claim was added to the engine.
+
+## 3-4. Tests and results
+
+*(appended as they land)*
