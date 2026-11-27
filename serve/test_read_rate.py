@@ -353,7 +353,10 @@ class QfnAdmissionReads(unittest.TestCase):
             self.assertEqual(stat.read_pos, 438)              # prompt - reused, exactly
             self.assertEqual(svc._read_counted(stat), 438)    # the engine-total window saw the same
             t[0] += 2.0
-            self.assertEqual(svc._prefill_tok_s(), 438 / 2.0)  # the real count over the window's 2 s span
+            # P124v: the live figure is the read's own true readout - 438 tokens over the 9897 ms of READ time
+            # the engine reported for them (aged by the 0.5 s past the beat grace since the read ended) - not
+            # the window's 438 / 2 s, which read a 9.9 s read as if it took the window's span
+            self.assertAlmostEqual(svc._prefill_tok_s(), 438 / 10.397, places=3)
             self.assertIsNone(svc.totals["peak_prefill"])      # 438 < PEAK_MIN_READ_TOKENS: no peak from a short read
 
     def test_provisional_steps_never_count_as_reads_they_may_be_positions(self):
@@ -381,7 +384,10 @@ class QfnAdmissionReads(unittest.TestCase):
             self.drain(eng)
             self.assertEqual((stat.read_pos, svc._read_counted(stat)), (431, 431))
             t[0] += 1.0
-            self.assertEqual(svc._prefill_tok_s(), 431.0)           # the real count over the window's 1 s span
+            # P124v: its own true readout - 431 tokens over the 33 ms of READ time the engine says they took,
+            # held through the beat grace (431 < the peak's token minimum, so it makes no peak) - not the
+            # window's 431 / 1 s, a figure that was neither this read's rate nor its span
+            self.assertAlmostEqual(svc._prefill_tok_s(), 431 / 0.033, places=0)
 
     def test_legs_of_one_request_add_up(self):
         # after a fair slice the same request is admitted again (the held prefix reused): the legs' reads add up
@@ -731,8 +737,9 @@ class PerRequestEngineStats(unittest.TestCase):
             self.assertAlmostEqual(svc._own_read_rate(b, t[0], 0), 10000 / 2.0)   # ITS read: 5000 tok/s
             self.assertNotEqual(a.read_eng_ms, b.read_eng_ms)                     # (never one shared number)
             t[0] += 1.0
-            total = svc._prefill_tok_s()                                          # the live total: sum of the chats
-            self.assertAlmostEqual(total, (438 + 10000) / 1.0)
+            total = svc._prefill_tok_s()   # P124v: the live total is the sum of each read's OWN true readout
+            self.assertAlmostEqual(total, 438 / 0.9 + 10000 / 2.0)                # (its own tokens over its own
+            #  read time, aged by the silence since - never one shared window dividing the summed tokens by 1 s)
 
     def test_convs_list_computes_the_reading_rows_own_rate(self):
         # the review finding (11-21): _convs_list must compute every live row's own read rate - with the

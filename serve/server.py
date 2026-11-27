@@ -291,6 +291,8 @@ def text_file_limit(context: int) -> int:
 # token (the Monitor showed five-digit numbers) and then undershoots for the first second of every answer.  5 s: drafted
 # tokens come in bursts of 1-4 a step, and over 2 s the rate swung +-25% around the engine's steady one
 RATE_WINDOW_S = 5.0
+READ_BEAT_STALE_S = 1.5      # P124v: an engine that beats (~4 a second) older than this is silence: a stalled
+#  read's rate then falls with it and drains to nothing past the window, instead of freezing at the last beat
 PEAK_MIN_SPAN_S = 2.0     # a peak only from an answer or read this old: younger windows read bursts as rates
 RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean so far, with the span floored here
 # A request that waited this long in the FIFO gets a line in the server window when its turn comes: with nothing else
@@ -4367,12 +4369,19 @@ class Service:
 
     def _prefill_tok_s(self):
         """Engine-total prompt READ rate now, summed over every chat reading its prompt (the drivers' read hooks
-        feed it, as the answer tokens feed _tok_s).  Every read is an interval: the window's count = the in-progress
-        reads' steps counted inside it + each FINISHED read's tokens spread over its overlap with the window - the
-        exact count over the time it really took, so three sparse-progress reads that end in the same second read as
-        one engine at their true ~810 tok/s, not 1536 (live 11-20: a top-up landing at a read's end doubled the peak).
-        0.0 while nothing reads a prompt; a reading above the peak becomes the peak, gated on the tokens counted
-        inside RATE_WINDOW_S like decode gates on answer length."""
+        feed it, as the answer tokens feed _tok_s).  P124v (PLAN-p124v-read-rate): once the engine reports its
+        own per-read figures (new_read / read_ms, the RHB beats' done over the read's own READ time), this is the
+        SUM over the reads running right now of each read's true rate - (tokens finished + the in-flight chunk's
+        passed share) over the time that read itself spent reading, no queue / staging / decode time and no
+        window mean smoothing the read's own beats away.  A read that stopped mid-way (a stall) falls with the
+        silence and drops out; a read that ended (BRA / its answer started) is no longer reading and contributes
+        nothing.  Smoothed only by the engine's own beat cadence - no client-side averaging that hides a stall.
+        0.0 while nothing reads.  Without the engine's fields (an older engine) the read stays an interval and
+        the old window figure counts it: the in-progress reads' steps inside RATE_WINDOW_S + each FINISHED read's
+        tokens spread over its overlap with the window - the exact count over the time it really took, so three
+        sparse-progress reads that end in the same second read as one engine at their true ~810 tok/s, not 1536
+        (live 11-20).  A reading above the peak becomes the peak, gated on the tokens counted inside the window
+        like decode gates on answer length."""
         with self.status_lock:
             if not self.status.get("busy"):
                 return 0.0
@@ -4383,6 +4392,25 @@ class Service:
             readers = [r for r in self.running if r.at_engine and r.first_token is None]
             if not readers:
                 return 0.0
+            if any(st.read_eng_ms and st.read_eng_ms > 0 for st in readers):
+                total, n_tot, span_max = 0.0, 0, 0.0    # (the per-read readouts, summed: the engine's own cadence
+                for st in readers:                      #  is the only smoothing)
+                    r = getattr(st, "read_cur", None)
+                    open_read = r is not None and r[2] is None
+                    rate = self._own_read_rate(st, now, self._read_counted(st))
+                    if rate <= 0:
+                        continue                        # (staged out, stalled, or history: nothing to sum)
+                    total += rate
+                    n = st.read_eng_n or 0
+                    span = (st.read_eng_ms or 0.0) / 1000.0
+                    if n > 0 and st.read_eng_ms:
+                        n_tot += n
+                        span_max = max(span_max, span)
+                        if open_read and n >= PEAK_MIN_READ_TOKENS and span >= PEAK_MIN_SPAN_S:
+                            self._note_peak_read(rate, n, now)      # this read's own readout, gated like before
+                if total > 0 and n_tot >= PEAK_MIN_READ_TOKENS and span_max >= PEAK_MIN_SPAN_S:
+                    self._note_peak_read(total, int(round(n_tot)), now)
+                return total
             w0 = now - RATE_WINDOW_S
             n, t_lo = 0.0, None
             for r in self.reads:                        # finished reads: their tokens over their overlap with it
@@ -4458,13 +4486,38 @@ class Service:
             self.reads.popleft()
 
     def _own_read_rate(self, st, now, n_own) -> float:
-        """One chat's live read rate (PLAN-qfn-per-request-read-stats): once the engine's progress lines carry
-        its own figures, its new_read over its own read_ms - the reader's wall time no longer mixes in what the
-        chat spent queued or held at a piece boundary.  Without those fields (an older engine): its counted
-        tokens over the time since the engine took it, as before."""
+        """One chat's live read rate (PLAN-qfn-per-request-read-stats + PLAN-p124v-read-rate): once the engine's
+        progress lines carry its own figures, its new_read over its own read_ms (the heartbeat's READ time:
+        staging / restore / queue / decode left out) - the reader's wall time no longer mixes in what the chat
+        spent queued or held at a piece boundary.  A read the engine beats for that stops beating (a stall, a
+        wedge): the readout FALLS with the silence instead of freezing at the last beat, and drains to nothing
+        past the window.  Without the engine's fields (an older engine): its counted tokens over the time since
+        the engine took it, as before - drained to 0 once nothing has landed for a full window."""
         if st.read_eng_ms and st.read_eng_ms > 0 and st.read_eng_n:
-            return st.read_eng_n / (st.read_eng_ms / 1000.0)
-        return n_own / (now - st.engine_t0) if n_own and st.engine_t0 and now > st.engine_t0 else 0.0
+            span = st.read_eng_ms / 1000.0
+            r = getattr(st, "read_cur", None)
+            if r is not None and r[2] is None and st.first_token is None:
+                if getattr(st, "read_hb", None) is not None:
+                    # an engine that beats every ~0.23 s: a beat older than the cadence plus one Monitor poll is
+                    # silence - the readout falls with it (a stalled read shows a falling rate, never a frozen one)
+                    gap = now - (st.read_t1 or now)
+                    if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
+                        return 0.0
+                    span += max(0.0, gap - READ_BEAT_STALE_S)
+            elif r is None or r[2] is not None:
+                # the read is over (BRA / a leg's close) but its answer has not started: its true rate ages
+                # with the wall time since it ended, and drops out once it is only history
+                gap = now - (r[2] if r is not None else st.read_t1 or now)
+                if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
+                    return 0.0
+                span += max(0.0, gap - READ_BEAT_STALE_S)
+            return st.read_eng_n / span
+        if n_own and st.engine_t0 and now > st.engine_t0:
+            r = getattr(st, "read_cur", None)
+            if r is not None and r[2] is None and st.read_t1 and now - st.read_t1 > RATE_WINDOW_S:
+                return 0.0                           # (the window drained empty: nothing read lately)
+            return n_own / (now - st.engine_t0)
+        return 0.0
 
     def _read_counted(self, stat) -> int:
         """The prompt tokens this request's reads have counted (closed intervals plus an open one's steps) - what
@@ -4502,16 +4555,21 @@ class Service:
                       flush=True)
 
     def _note_hb(self, stat, hb):
-        """(a driver's hook, PLAN-u5-read-heartbeat) the engine's own about-once-a-second report of a read in
-        flight: its stage (KV staging from RAM, or new tokens being read), done / new (new tokens done of the
-        total), reused, and its rate over the last heartbeat interval.  It refreshes the chat's live figures
-        every second - a one-chunk read, a long first chunk or a read mostly busy staging its K/V from RAM no
-        longer shows nothing until it ends - and feeds the counted tokens in as a normal read step, so the
-        engine-total window moves per second too.  No step of its own while it stages (done 0: nothing to count)."""
+        """(a driver's hook, PLAN-u5-read-heartbeat + PLAN-p124v-read-rate) the engine's own ~four-times-a-second
+        report of a read in flight: its stage (staging the reused prefix from RAM, or new tokens being read),
+        done / new (new tokens done of the total), reused, and the read's own clocks - ms over its whole read
+        time and rt = ms - stage_ms over the part of it actually spent READING.  It refreshes the chat's live
+        figures every beat and books the counted tokens in as a normal read step, pairing them with the READ's
+        own time (rt): the request's live rate is then done / rt - the tokens really read over the time the read
+        really ran, with no staging / restore / queue / decode time mixed in (that mixing is what showed
+        single-digit tok/s during a read that runs at 100-800).  The beat's own interval rate is NOT a peak
+        candidate: only the readout itself feeds the peaks.  No step of its own while it stages (done 0: nothing
+        to count)."""
         stat.read_hb = dict(hb, at=time.time())
         n = hb.get("done") or 0
         if n > 0:
-            self._note_read(stat, n, hb.get("rate"), False, False, hb.get("ms"))
+            rt = hb.get("rt")
+            self._note_read(stat, n, None, False, False, rt if rt and rt > 0 else hb.get("ms"))
 
     def _note_read(self, stat, n_read, tok_s=None, exact=False, prov=False, read_ms=None):
         """A read step of one request: the drivers' PP lines and the batch slots' read counters call this (through
@@ -9708,8 +9766,13 @@ def _qfn_engine_class():
                                     # slot's own line - new_read= its tokens from where the read started (never its
                                     # reused / parked prefix), read_ms= the time that read has actually run.  No
                                     # first-position delta, no shared reader's rate: the legs add up in base.
+                                    # P124v: read_ms minus its stage_ms (the K/V staging, an engine before the
+                                    # field says 0) is the read's own READ time the rate divides by.
                                     new = int(float(kv["new_read"]))
                                     rms = float(kv.get("read_ms") or 0) or None
+                                    sm = float(kv.get("stage_ms") or 0)
+                                    if rms is not None and sm > 0:
+                                        rms = max(0.0, rms - sm) or None
                                     own = new / (rms / 1000.0) if new and rms and rms > 0 else rate
                                     tls.own_pp = ((pos, int(f[3])), own)
                                     cb(base + new, own, False, False, rms)
@@ -9721,7 +9784,8 @@ def _qfn_engine_class():
                             elif f[:2] == ["BRA", str(slot)] and f[2:3] == ["1"]:
                                 kv = dict(x.partition("=")[::2] for x in f[3:] if "=" in x)
                                 new = max(0, int(kv["prompt"]) - int(kv.get("reused") or 0))
-                                ms = float(kv.get("read_ms") or 0)
+                                ms = max(0.0, float(kv.get("read_ms") or 0)   # P124v: the read's own READ time:
+                                              - float(kv.get("stage_ms") or 0))   #  the staging part is left out
                                 tls.read_leg_base = base + new   # (a later leg of the same request counts from here)
                                 cb(base + new, new / (ms / 1000) if ms > 0 and new else None, True, False,
                                    ms if ms > 0 else None)     # (the engine's own read_ms rides along: its clock)
