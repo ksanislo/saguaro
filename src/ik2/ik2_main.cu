@@ -9249,6 +9249,36 @@ int main(int argc, char** argv) {
         std::printf("  pool %zu: %d slots of %.1f MiB (%.1f GiB, %d layers)\n", p, EC.pools[p].n_slots,
                     EC.pools[p].slot_bytes / 1048576.0,
                     (double) EC.pools[p].n_slots * EC.pools[p].slot_bytes / 1073741824.0, EC.pools[p].n_layers);
+    // (P125e b1, preload the offload tier): a card that takes the offload path with NO picks profile copied nothing
+    // into its VRAM tier at the load - "offload: 0 of 3072 experts" (ref/REPORT-p125b-ik2-vram.md 2.2) - and every
+    // cold expert cost a host fetch until the dynamic cache learned.  The pool is there anyway; fill it at the load
+    // with the resident copy loop's own copy, round-robin over the layers of each pool so every layer keeps its
+    // share instead of the first layers eating it all.  A shipped SAGUARO_IK2_WARM profile prices the picks better
+    // and wins; EP fills what it owns.  The copy counts stay out of the request's miss/bytes counters, as with warm.
+    auto preload_tier = [&]() {
+        const double tw = now();
+        const uint64_t m0 = EC.misses, b0 = EC.bytes_up;
+        int n = 0;
+        for (size_t p = 0; p < EC.pools.size(); ++p) {
+            std::vector<int> ls;
+            for (int l = 0; l < c.n_layer; ++l)
+                if (EC.layer_pool[l] == (int) p) ls.push_back(l);
+            int left = EC.pools[p].n_active;
+            for (int e = 0; e < c.E && left > 0; ++e)
+                for (const int l : ls) {
+                    if (left <= 0) break;
+                    EC.get(M.L[l], l, e, EC.tick, g_cs, nullptr, true, true);
+                    --left, ++n;
+                }
+        }
+        CU(cudaStreamSynchronize(g_cs));
+        ++EC.tick;   // (the same tick rule the warm fill uses: the first prefetch's ticks must not evict the tier)
+        std::printf("tier: %d of %d experts (%.1f GiB) copied at the load, every layer its share (no picks file - "
+                    "SAGUARO_IK2_WARM would price them; the cache relearns from here)\n", n, c.n_layer * c.E,
+                    (EC.bytes_up - b0) / 1073741824.0);
+        std::fflush(stdout);
+        EC.misses = m0, EC.bytes_up = b0;
+    };
     const char* wf = getenv("SAGUARO_IK2_WARM");
     if ((wf && *wf) || g_ep) {   // the cache filled with the most picked experts (SAGUARO_IK2_POP_OUT's file or all owned for EP)
         FILE* in = (wf && *wf) ? std::fopen(wf, "rb") : nullptr;
@@ -9262,6 +9292,7 @@ int main(int argc, char** argv) {
         if (cnt.empty() && g_ep) cnt.assign((size_t) c.n_layer * c.E, 1);
         if (cnt.empty()) {
             std::printf("warm: the cache starts empty\n");
+            if (g_off_want && d == 0 && !g_ep) preload_tier();   // (the profile named does not read: still no reason for an empty tier)
         } else {
             const double tw = now();
             const uint64_t m0 = EC.misses, b0 = EC.bytes_up;
@@ -9300,6 +9331,8 @@ int main(int argc, char** argv) {
                         now() - tw);
             EC.misses = m0, EC.bytes_up = b0;
         }
+    } else if (g_off_want && d == 0) {
+        preload_tier();   // (b1: no SAGUARO_IK2_WARM, no EP - the tier starts full rather than empty)
     }
     if (g_off_want && d == 0) {   // the offload path: the tier is what the cache holds (warmed above), tables a layer
         if (pin_later) {   // the experts the tier does not hold: read into their blocks, then pinned a run at a time
