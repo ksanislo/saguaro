@@ -1,5 +1,6 @@
 // The batch window's row layout (include/strata/core/batch_rows.hpp): plain one-row slots, a slot's contiguous group of
-// proposed rows (--batch-mtp), and the hand-off capacity of a layer split's stages.  Header-only, CPU.
+// proposed rows (--batch-mtp), the hand-off capacity of a layer split's stages, and (P124w) the bound of a window's rows
+// against each elastic slot session's backed cells.  Header-only, CPU.
 #include "strata/core/batch_rows.hpp"
 
 #include <cstdio>
@@ -71,6 +72,26 @@ int main() {
         check(run(rows, pos, 0, 1, 8, 0, false) != nullptr, "an empty window");
         check(run(rows, pos, 3, 1, 8, -1, false) != nullptr, "a negative hand-off base");
         check(run(rows, pos, 3, 1, 8, 0, false) == nullptr, "three rows of one slot are a group");
+    }
+    // P124w: the backed-cells bound of an elastic --batch slot (SessionState::slot_cells; -1: backed whole)
+    using strata::core::first_row_past_backed;
+    {
+        const int64_t pos[] = {10, 11, 500};
+        const int64_t backed[] = {12, 12, 501};
+        check(first_row_past_backed(3, pos, backed) == -1, "rows inside their slots' backed cells");
+        const int64_t edge[] = {10, 11, 500};
+        const int64_t edge_backed[] = {11, 12, 1000};
+        check(first_row_past_backed(3, edge, edge_backed) == -1, "the last backed cell is still readable");
+        const int64_t past[] = {10, 12, 1000};
+        check(first_row_past_backed(3, edge, past) == 0, "a row at the first unbacked cell");
+        const int64_t late[] = {10, 11, 500};
+        const int64_t late_backed[] = {12, 12, 500};
+        check(first_row_past_backed(3, late, late_backed) == 2, "the first offending row, not a later one");
+        const int64_t elastic[] = {-1, -1, -1};
+        check(first_row_past_backed(3, late, elastic) == -1, "a session backed whole is never past");
+        const int64_t zero[] = {0};
+        const int64_t none[] = {0};
+        check(first_row_past_backed(1, zero, none) == 0, "an unfitted elastic slot holds nothing");
     }
     if (failures != 0) return EXIT_FAILURE;
     std::printf("batch_rows_test: ok\n");
