@@ -1604,8 +1604,14 @@ static int glm_pack_generate(const Options& o) {
             if (i != keep && (lru == SIZE_MAX || slots[i].used < slots[lru].used)) lru = i;
         return lru;
     };
-    // the conversation in the model (its snapshot, snap_tokens) into a slot
-    const auto slot_put = [&](const char* why) {
+    // the conversation in the model (its snapshot, snap_tokens) into a slot.  `detaches`: the caller releases this
+    // context right after (seq_release) or the engine is shutting down, so the slot is the conversation's only copy -
+    // only then does the pinned host copy go back with the park (P125g).  Every park the conversation continues from
+    // (the system-prompt slot taken mid-read, the checkpoint continuation, a paused request) must keep its pins: the
+    // host copy is the authoritative one - the VRAM slots are only a cache and nothing writes rows back into it, so
+    // MADV_DONTNEED-ing it under a still-bound conversation loses the whole written past (release + kv_pin re-pins
+    // ZERO-FILLED) and every later host read - the prefill stage, every VRAM miss - reads zeros.
+    const auto slot_put = [&](const char* why, bool detaches = false) {
         slot_reap();
         if (slot_max <= 0 || snap_in_slot || snap_tokens.size() < slot_min) return;
         // an earlier state of this conversation is superseded (the same pictures: the same tokens with other
@@ -1631,6 +1637,8 @@ static int glm_pack_generate(const Options& o) {
             slots.back().data = buf;
             slots.back().img = snap_img_hash;
             snap_in_slot = true;
+            if (detaches)   // P125g: parked AND given up (the caller releases the context) - only now is the slot
+                model.kv_pinned_release();   // the live copy and the pinned K/V granules go back
             uint64_t total = 0;
             for (const auto& s : slots) total += s.bytes;
             size_t evicted = 0;
@@ -1685,6 +1693,8 @@ static int glm_pack_generate(const Options& o) {
         slots.push_back({snap_tokens, path, bytes, ++slot_clock});
         slots.back().img = snap_img_hash;
         snap_in_slot = true;
+        if (detaches)   // P125g: parked AND given up on disk too - the granules go back only with a detaching park
+            model.kv_pinned_release();
         uint64_t total = 0;
         for (const auto& s : slots) total += s.bytes;
         size_t evicted = 0;
@@ -2027,8 +2037,8 @@ static int glm_pack_generate(const Options& o) {
             }
         }
         if (reuse == 0 && slot_max > 0) {
-            slot_put("");              // the conversation in the model, before this prompt overwrites it
-            reuse = slot_take(prompt);
+            slot_put("", true);        // the conversation in the model, before this prompt overwrites it - detached:
+            reuse = slot_take(prompt); //   its state goes back or a slot_take writes another conversation over it
             if (reuse > 0) ckpt_drop_past(0);   // another conversation's state now
         } else if (reuse > 0 && !from_ckpt && slot_max > 0 && getenv("SAGUARO_GLM_SLOT_ROUNDTRIP") != nullptr) {
             // a test: the restored state goes through a slot file and back - the same tokens must follow
@@ -3633,7 +3643,7 @@ static int glm_pack_generate(const Options& o) {
                     v = c;
             if (v < 0) return false;
             bind_ctx(v);
-            slot_put(" (its context's memory went to another conversation)");
+            slot_put(" (its context's memory went to another conversation)", true);   // detached: seq_release follows
             snap_tokens.clear();
             ckpts.clear();   // (MULTI_CKPTS: they stand on the DSA rows the release hands back)
             model.seq_release(v, true);
@@ -3676,7 +3686,7 @@ static int glm_pack_generate(const Options& o) {
         std::sort(order.begin(), order.end(), [&](int a, int b) { return ctxs[(size_t) a].used > ctxs[(size_t) b].used; });
         for (size_t i = (size_t) std::max(0, keep_n); i < order.size(); ++i) {
             bind_ctx(order[i]);
-            slot_put(" (an idle context's memory went back to the experts)");
+            slot_put(" (an idle context's memory went back to the experts)", true);   // detached: seq_release follows
             snap_tokens.clear();
             ckpts.clear();   // (MULTI_CKPTS: they stand on the DSA rows the release hands back)
             model.seq_release(order[i], true);
@@ -5398,11 +5408,11 @@ static int glm_pack_generate(const Options& o) {
         if (slot_keep && !slot_ram)
             for (int c = 0; c < (int) ctxs.size(); ++c) {
                 bind_ctx(c);
-                slot_put(" on shutdown");
+                slot_put(" on shutdown", true);   // the engine ends: every parked copy can go back
             }
         return 0;
     }
-    if (slot_keep && !slot_ram) slot_put(" on shutdown");
+    if (slot_keep && !slot_ram) slot_put(" on shutdown", true);   // the engine ends: the parked copy can go back
     save_profile("quit");   // #477
     maya::core::Glm5Model::set_routing_dump("", err);   // --dump-routing: the trace closed whole
     return 0;

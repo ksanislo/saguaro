@@ -5269,9 +5269,10 @@ std::vector<Glm5Model::VramReport> Glm5Model::vram_report() const {
     std::vector<VramReport> out;
     int cur = 0;
     cudaGetDevice(&cur);
-    // PLAN-context-panel, output only: the pinned host K/V this engine allocated for KV streaming (0 when it does
-    // not stream) - the engine's figure, carried on every part's line; this engine keeps no conversations parked
-    // in RAM outside its slots, so every line's `parked` is 0
+    // PLAN-context-panel, output only: the pinned host K/V this engine holds for KV streaming NOW (0 when it does
+    // not stream) - P125g: the granules written so far, read again every time the line is re-printed, so a
+    // re-printed line follows the growing and the giving-back; the engine's figure, carried on every part's line;
+    // this engine keeps no conversations parked in RAM outside its slots, so every line's `parked` is 0
     const uint64_t host_room = kv_host_bytes();
     for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         const FastState* F = m->fast_;
@@ -5288,7 +5289,7 @@ std::vector<Glm5Model::VramReport> Glm5Model::vram_report() const {
         cudaGetLastError();
         r.weights = m->w_arena_bytes_;
         r.kv = m->state_bytes_;
-        r.kv_ram = m->kv_ != nullptr ? m->kv_->host_bytes : 0;
+        r.kv_ram = m->kv_ != nullptr ? m->kv_->pinned_now() : 0;   // P125g: what it holds pinned now
         r.act = m->sc_bytes_ + (F != nullptr ? F->arena_bytes + F->scratch_bytes : 0);
         r.drafter = m->mtp_arena_bytes_ + (m->dflash_ ? m->dflash_->bytes() : 0);
         if (F != nullptr) {
@@ -5325,7 +5326,7 @@ std::vector<std::array<uint64_t, 5>> Glm5Model::vram_fingerprint() const {
         std::array<uint64_t, 5> r;
         r[0] = m->elastic() ? m->el_held() : m->state_bytes_;
         r[1] = m->elp_ != nullptr ? m->el_pool_mapped() : (F != nullptr ? F->pool_bytes : 0);
-        r[2] = m->kv_ != nullptr ? m->kv_->host_bytes : 0;
+        r[2] = m->kv_ != nullptr ? m->kv_->pinned_now() : 0;   // P125g: the same bytes as the VRAM line's kv_ram
         r[3] = m->prefill_borrow_bytes();
         r[4] = m->vision_lend_bytes();
         out.push_back(r);
@@ -7560,6 +7561,7 @@ static bool kda_graph_wanted() {
 bool Glm5Model::fast_layers(int64_t p, bool hop_in, std::string& err) {
     (void) hop_in;
     if (!el_.empty() && !seq_grow(seq_index(), p + 1, err)) return false;   // elastic: position p backed
+    if (kv_ != nullptr && !kv_pin(kv_, p + 1, err)) return false;   // P125g: its host pages registered (the window's too)
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     cudaStream_t s = F->cs;
@@ -7921,6 +7923,7 @@ bool Glm5Model::fast_token(int32_t token, std::string& err) {
 bool Glm5Model::fast_mtp(int64_t p, int32_t next_tok, std::string& err, int step, bool sub, bool read_back,
                          const float* emb_staged, bool head) {
     if (!el_.empty() && !seq_grow(seq_index(), p + 1, err)) return false;
+    if (kv_ != nullptr && !kv_pin(kv_, p + 1, err)) return false;   // P125g: the draft block's rows land in the host copy
     FastState* F = fast_;
     const Glm5Geometry& g = g_;
     cudaStream_t s = F->cs;
@@ -10049,6 +10052,9 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
             return false;
         }
     }
+    for (Glm5Model* m : parts)   // P125g: the slot's granules registered before its rows are copied into them -
+        if (m->kv_ != nullptr && !kv_pin(m->kv_, n, err)) return false;   //  once the parts proved ready, so a
+                                                                          //  refused load does not hold the pins
     // the part that runs layer il now (the NextN block: the one that carries it), and il's place among its KDA layers
     // and its DSA layers
     const auto owner = [&](int il) -> Glm5Model* {
@@ -10363,6 +10369,9 @@ bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::
                 return false;
             }
         }
+        // P125g: this part's granules registered once its layout proved right (a slot of another model, or one
+        // this engine cannot lay out, must not leave the pins held) and before any of its rows is written
+        if (m->kv_ != nullptr && !kv_pin(m->kv_, n, err)) return false;
         cudaSetDevice(m->dev_);
         cudaStreamSynchronize(m->fast_->cs);
         if (m->snap_ == nullptr && n_rec > 0 &&

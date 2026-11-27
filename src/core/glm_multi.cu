@@ -628,6 +628,22 @@ bool Glm5Model::seq_can_grow(int s, int64_t tokens) const {
 
 // the caller has nothing of s in flight; its state from the context-sized caches on is gone (reset or reload it)
 void Glm5Model::seq_release(int s, bool all) {
+    // P125g (give-back): sequence s's pinned host latent copy goes back with its context - on every platform (the
+    // elastic VRAM mechanism below is CUDA-only, but since P125g the host copy grows granule-wise everywhere).
+    // A bound sequence keeps its stream in kv_, its SeqCtx in none; the card sync is what makes unregistering safe.
+    // The loops below switch the thread's device per split part - the elastic block restores it on CUDA only, so
+    // it is saved here and given back at the end on every platform (as kv_pinned_release does): on HIP every later
+    // per-thread call after a seq_release would otherwise run on the last part's card.
+    int cur = 0;
+    cudaGetDevice(&cur);
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        KvStream* K = s >= 0 && s < (int) m->seq_.size() ? m->seq_[(size_t) s].kv : nullptr;
+        if (m->cur_seq_ == s) K = m->kv_;
+        if (K == nullptr || K->arena.empty() || K->arena.pinned_bytes() == 0) continue;
+        cudaSetDevice(m->dev_);
+        cudaDeviceSynchronize();
+        kv_unpin(K);
+    }
 #if !defined(MAYA_USE_HIP)
     for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         if (m->el_.empty() || s < 0 || s >= (int) m->el_.size()) continue;
@@ -651,11 +667,11 @@ void Glm5Model::seq_release(int s, bool all) {
             e.fixed_on = false;
         }
     }
-    cudaSetDevice(dev_);
 #else
     (void) s;
     (void) all;
 #endif
+    cudaSetDevice(cur);   // (the thread's device, as it was when the caller came in - on every platform)
 }
 
 int64_t Glm5Model::seq_backed(int s) const {

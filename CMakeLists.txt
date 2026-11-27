@@ -334,6 +334,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/idle_gate_test.cpp")
   add_test(NAME idle_gate_test COMMAND idle_gate_test)
 endif()
 
+# ---- granule_arena_test --------------------------------------------------
+# The lazy pinned host arena (include/maya/core/granule_arena.hpp): a reserved range whose granules
+# cudaHostRegister on first write and give the pages back on release - the bookkeeping, with a recording
+# fake for the driver's pin (host code only, like idle_gate_test above; PLAN-p125g).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/granule_arena_test.cpp")
+  add_executable(granule_arena_test EXCLUDE_FROM_ALL tests/granule_arena_test.cpp)
+  target_include_directories(granule_arena_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(granule_arena_test PRIVATE maya_warnings)
+  find_package(Threads)
+  if(Threads_FOUND)
+    target_link_libraries(granule_arena_test PRIVATE Threads::Threads)
+  endif()
+  add_test(NAME granule_arena_test COMMAND granule_arena_test)
+endif()
+
 # ---- maya_plan ----------------------------------------------------------
 # Also header-only.  A "planner" that hides state would be one whose decision is not inspectable, and the
 # whole point of P1.S9 is that the decision is arithmetic you can check by hand.

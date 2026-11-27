@@ -263,9 +263,16 @@ class PlacementTests(unittest.TestCase):
     GLM_32768 = ("glm fast: CUDA0 VRAM before the expert pool: 7.86 of 15.92 GB in use - dense weights 6.86, "
                  "state/KV (32768 ctx) 0.62, activations 0.10, other (context, MTP, scratch, prompt path) 0.28")
     GLM_262144 = ("glm pack: CUDA0 KV streaming: 32768 of 262144 positions of each of 11 DSA layers in VRAM "
-                  "(0.37 GB), the latent cache in 2.95 GB of pinned RAM\n"
+                  "(0.37 GB), pinned latent cache grows with use: 0 MiB of pinned RAM at start, up to 2.95 GB\n"
                   "glm fast: CUDA0 VRAM before the expert pool: 8.17 of 15.92 GB in use - dense weights 6.86, "
                   "state/KV (262144 ctx) 0.92, activations 0.10, other (context, MTP, scratch, prompt path) 0.29")
+    # the P124t ref run's pre-P125g line (one cudaHostAlloc): the declared pin sits before "of pinned RAM"
+    GLM_262144_OLD = ("glm pack: CUDA0 KV streaming: 32768 of 262144 positions of each of 11 DSA layers in VRAM "
+                      "(0.37 GB), the latent cache in 2.95 GB of pinned RAM")
+    # P125g's eager fallback (a device that cannot use the host pointer of registered memory): the whole cache
+    GLM_262144_FALLBACK = ("glm pack: CUDA0 KV streaming: 32768 of 262144 positions of each of 11 DSA layers in "
+                           "VRAM (0.37 GB), pinned latent cache: 2.95 GB of pinned RAM at the load, the whole "
+                           "cache (no lazy arena on this device)")
     INKLING_32768 = ("resident: every expert in VRAM (3072 copied in 7.2 s); tokens take the resident path, "
                      "a CUDA graph each")
     INKLING_262144 = ("offload: 0 of 3072 experts in VRAM (4.5 GiB), the rest fetched by the GPU from pinned "
@@ -287,13 +294,17 @@ class PlacementTests(unittest.TestCase):
 
     def test_glm_shows_its_pinned_latent_cache_and_its_expert_pool(self):
         # the figure the VmLck missed shows here too, and the GLM streaming line's "11 DSA layers in VRAM"
-        # is positions, not experts: it must not parse as one
+        # is positions, not experts: it must not parse as one.  P125g: the lazy line's "0 MiB of pinned RAM at
+        # start" is what is pinned NOW (nothing), so the declared pin is its "up to M GB" ceiling; the pre-P125g
+        # line and the eager fallback state it as a plain GB/GiB-of-pinned-RAM figure.  Same 2.95 either way.
         p32, p256 = MV.parse_placement(self.GLM_32768), MV.parse_placement(self.GLM_262144)
         self.assertIsNone(p32["pinned_declared_gib"])
         self.assertEqual(p256["pinned_declared_gib"], 2.95)
         self.assertIsNone(p256["experts_vram"])
         self.assertAlmostEqual(p32["expert_pool_gb"], 15.92 - 7.86, places=9)
         self.assertAlmostEqual(p256["expert_pool_gb"], 15.92 - 8.17, places=9)
+        self.assertEqual(MV.parse_placement(self.GLM_262144_OLD)["pinned_declared_gib"], 2.95)
+        self.assertEqual(MV.parse_placement(self.GLM_262144_FALLBACK)["pinned_declared_gib"], 2.95)
 
     def test_inkling_resident_and_offload_are_two_different_placements(self):
         self.assertEqual(MV.parse_placement(self.INKLING_32768)["experts_vram"], 3072.0)
