@@ -3884,6 +3884,19 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
             err = "verify: slot " + std::to_string(rows[t]) + " runs past its context";
             return false;
         }
+    // P124w: an elastic --batch slot (SAGUARO_ELASTIC_SLOTS) backs its K/V per `slot_cells`; a row at or past it
+    // reads VMM addresses the session has given back - the illegal memory access the mangonel crashes died of.
+    // The driver's grow / admit / idle-trim guards key on `active`/`reading` flags a different thread's window
+    // launch does not see, so catch it HERE, naming the slot, the rows' cell range and the backed window.
+    int64_t backed[kVerifyMaxT];
+    for (int t = 0; t < S; ++t) backed[t] = slots_[(size_t) rows[t]]->slot_cells;
+    if (const int past = first_row_past_backed(S, pos, backed); past >= 0) {
+        err = "verify: slot " + std::to_string(rows[past]) + " row at cell " + std::to_string(pos[past]) +
+              " reads past the " + std::to_string(backed[past]) + " cells backed for it";
+        std::fprintf(stderr, "saguaro verify: %s: a row reads past its slot's backed cells (%s)\n",
+                     bwindow_note(S, rows, pos).c_str(), err.c_str());
+        return false;
+    }
     refresh_ar();
     // --batch-mtp only (limit 0 = 0.1.39: no eviction): slot rotation creates new layouts; bound the captured graph
     // pairs, evicting the least recently used layout.  Without a limit the same eviction frees VRAM for a capture.
@@ -3983,6 +3996,37 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
     return true;
 }
 
+// P124w: one line naming the batch window a failure is reported for: this stage's device and layer range, each
+// slot's rows' cell range, and the cells that slot's session has backed (`slot_cells` / `max_cells`; a non-elastic
+// session is backed whole). Built only on a failure path, and it costs one line there: a crash then says which
+// window, which slots and which backed window it died reading, instead of only "illegal memory access".
+std::string Verifier::bwindow_note(int S, const int* rows, const int64_t* pos) const {
+    std::string s = "batch window on CUDA" + std::to_string(device_) + " layers [" + std::to_string(lb_) + "," +
+                    std::to_string(le_) + "):";
+    for (int t = 0; t < S;) {
+        const int first = t;
+        while (t < S && rows[t] == rows[first]) ++t;
+        const int sl = rows[first];
+        const SessionState* sx = sl >= 0 && sl < (int) slots_.size() ? slots_[(size_t) sl] : nullptr;
+        s += " slot " + std::to_string(rows[first]) + " cells " + std::to_string(pos[first]) + ".." +
+             std::to_string(pos[t - 1]) + " backed ";
+        if (sx == nullptr) s += "unknown";
+        else if (sx->slot_cells < 0) s += "whole(" + std::to_string(sx->max_cells) + ")";
+        else s += std::to_string(sx->slot_cells) + "/" + std::to_string(sx->max_cells);
+    }
+    return s;
+}
+
+// P124w: a never-rang layer is the illegal-access symptom for a batch window (its graph died on the GPU before the
+// doorbell). Print the same window note (slot, cell range, backed window) so the next crash says which window died
+// at which layer, not just "layer N never rang". Guarded on last_batch_: only a batch window has slot rows.
+void Verifier::note_never_rang(int64_t layer, cudaError_t q) const {
+    if (!last_batch_ || last_t_ < 1) return;
+    std::fprintf(stderr, "saguaro verify: %s: layer %lld never rang (%s)\n",
+                 bwindow_note(last_t_, last_rows_, last_pos_b_).c_str(), (long long) layer,
+                 q == cudaSuccess ? "graph finished" : cudaGetErrorString(q));
+}
+
 bool Verifier::run_slots(int S, const int32_t* tokens, const int64_t* pos, PoolMultiFn pool, void* user, int32_t* out,
                          std::string& err) {
     int rows[8] = {};
@@ -3998,7 +4042,13 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     if (!stage_batch(rows, S, 0, tokens, pos, err)) return false;
     const cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, 0)], cs_);
-    if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
+    if (le != cudaSuccess) {
+        // P124w: name the failed launch's window too (a sticky context error surfaces here as well)
+        std::fprintf(stderr, "saguaro verify: %s failed to launch (%s)\n", bwindow_note(S, rows, pos).c_str(),
+                     cudaGetErrorString(le));
+        err = std::string("verify: batch launch: ") + cudaGetErrorString(le);
+        return false;
+    }
     (void) cudaStreamQuery(cs_);
     volatile uint32_t* const seq = h_seq_;
     volatile uint32_t* const flag = h_flag_;
@@ -4045,6 +4095,7 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
                 last_flush = now;
                 const cudaError_t q = cudaStreamQuery(cs_);
                 if (q != cudaErrorNotReady && *seq < want) {
+                    note_never_rang(l, q);   // P124w: name the window that stopped ringing
                     err = "verify batch: layer " + std::to_string(l) + " never rang (" +
                           (q == cudaSuccess ? std::string("graph finished") : std::string(cudaGetErrorString(q))) + ")";
                     return false;
@@ -4181,7 +4232,13 @@ bool Verifier::batch_launch_rows(const int* rows, int S, int hbase, const int32_
     cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, hbase)], cs_);
     if (le == cudaSuccess && !defer && !batch_self_commits(rows, S))   // (else the window has kept its rows itself)
         le = cudaGraphLaunch(commit_bm_[bkey(rows, S, hbase)], cs_);   // right behind it: every row is kept
-    if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
+    if (le != cudaSuccess) {
+        // P124w: name the failed launch's window too (a sticky context error surfaces here as well)
+        std::fprintf(stderr, "saguaro verify: %s failed to launch (%s)\n", bwindow_note(S, rows, pos).c_str(),
+                     cudaGetErrorString(le));
+        err = std::string("verify: batch launch: ") + cudaGetErrorString(le);
+        return false;
+    }
     (void) cudaStreamQuery(cs_);
     if (defer) {
         DeferredWin& w = dwin_[hbase];
@@ -4398,6 +4455,7 @@ int Verifier::batch_poll(PoolMultiFn pool, void* user, std::string& err) {
             const OnDevice on_device(device_);
             const cudaError_t q = cudaStreamQuery(cs_);
             if (q != cudaErrorNotReady && *(volatile uint32_t*) h_seq_ < (uint32_t) (k + 1)) {
+                note_never_rang(lb_ + k, q);   // P124w: name the window that stopped ringing
                 err = "verify batch: layer " + std::to_string(lb_ + k) + " never rang (" +
                       (q == cudaSuccess ? std::string("graph finished") : std::string(cudaGetErrorString(q))) + ")";
                 b_running_ = false;
@@ -4421,6 +4479,7 @@ int Verifier::batch_poll(PoolMultiFn pool, void* user, std::string& err) {
         if (now - last_ring() > std::chrono::milliseconds(2)) {
             const cudaError_t q = cudaStreamQuery(cs_);
             if (q != cudaErrorNotReady && *(volatile uint32_t*) h_seq_ < (uint32_t) (b_k_ + 1)) {
+                note_never_rang(lb_ + b_k_.load(), q);   // P124w: name the window that stopped ringing
                 err = "verify batch: layer " + std::to_string(lb_ + b_k_) + " never rang (" +
                       (q == cudaSuccess ? std::string("graph finished") : std::string(cudaGetErrorString(q))) + ")";
                 b_running_ = false;
