@@ -113,3 +113,93 @@ as the plan's step 3 and the manager's gate require.
   serve/qfn_engine.py, engines/qfn/serve/server.py, serve/test_priority.py: OK.
 - Not run: `tools/card_tests/layer_pause.sh` itself - no card on this box and the plan excludes
   GPU runs; with MAJOR 2 fixed engine-side its checks are the ones that must hold on the card.
+
+---
+
+# FIX-REPORT - P125k merge round (manager FIX-FIRST of REVIEW-RESULT.md at fff608b9f, 2026-11-27)
+
+The manager's instruction: merge `saguaro/q1-p125j-layer-pause` into this branch (a merge, not a
+rebase - both are reviewed), resolving `engines/qfn/src/program/generate.cpp` keeping BOTH
+behaviours - P125j's layer-boundary stop + its pause record handling, and this branch's
+event-based park/restore waits. That is finding 1 and everything: "Do this, nothing else."
+
+## 1 - the generate.cpp conflict, hunk by hunk - FIXED (merge commit 70f67efde)
+
+Merge base d789228f0; the merged ref tip in this repo is d8e25fd95. One file conflicted, two
+hunks; everything else merged clean. Both hunks keep BOTH sides:
+
+**Hunk 1 - `if (borrow) {`** (merge-base 19931; merged generate.cpp:20242):
+- this branch (P125k) added the narrowed-wait scope for the prefix restore -
+  `ConvStreams borrow_streams; const bool borrow_own = park_own_ok() && add_main_streams(...);
+  const ConvSyncScope borrow_scope(borrow_own, &borrow_streams)` - the borrow's restores and
+  `device_sync()`s wait only on this conversation's streams plus its copy stream.
+- P125j added a comment + `drop_read_pause();` - the borrow rewrite kills the armed layer pause
+  (with a skipped park it has nothing to go on; with a real park, park_body already dropped it).
+- Kept: the scope lines, then P125j's comment and drop, inside the same block. Nothing about
+  either side's behaviour moves: `drop_read_pause` touches only host state (the ReadPause record
+  and `Prefill::clear_pause`), and the RAII scope covers the whole restore either way.
+
+**Hunk 2 - `if (incoming) {`** (merge-base 19980; merged generate.cpp:20298):
+- this branch (P125k) added the comment + `ConvStreams rest_streams; ... const ConvSyncScope
+  rest_scope(rest_own, &rest_streams)` - the incoming restore's pre-copy syncs wait on this
+  conversation's queued work only, and its post-copy wait is its own copy stream.
+- P125j added a comment + `drop_read_pause();` - the restore rewrites the session with another
+  conversation's state, so the outgoing conversation's armed pause must go.
+- Kept: the scope, then P125j's comment and drop. P125j's re-arm of an incoming paused image
+  (`incoming->paused()` / `sp.give_pause`, 20366-20383) auto-merged as-is *inside* the same
+  scope: it is host-side (the saved chunk rows are RAM), so it neither waits on nor feeds any
+  scoped sync.
+
+Nearby sites that auto-merged and were re-checked line by line (each side kept intact):
+- session-file restore (19402-19427): P125j's `drop_read_pause()` before `blocking("transfer")`,
+  P125k's `ctx_streams`/`ctx_scope` around `conversation_snapshot_restore` - both, in order.
+- the switch's park (20124): P125k's `park_streams`/`park_scope` wraps the park_current call
+  sites; P125j's neighbours (the paused-donor borrow guard at 19942, the slot-source
+  `drop_read_pause` at 20177, the park_body pause-rows block at 11090 and 11201-11216: estimate
+  += `sp.pause_rows_bytes()`, `sp.take_pause_rows` into the image, never `sdir->write` a paused
+  image) ride inside that park with no device sync at all - the rows are host RAM.
+- the cut read's checkpoint rewind (23220-23244): P125k's `cut_streams`/`cut_scope` before the
+  drain `device_sync()`, P125j's `drop_read_pause()` on the landed keep (23237).
+- the cancelled-keep chain (23148-23198) + the drop-after-keep rule (23245-23255): P125j's keep
+  branch, `pp_reached` accounting and armed-record rule in full; this branch's RDONE/stage_ms
+  edits are other lines; the DONE line carries P125j's `paused_layer=/paused_chunk=/paused_at=`
+  suffix (23402) and this branch never touched it.
+- serve: serve/server.py took P125j's grace default 5->0 (with `serve/test_priority.py` updated
+  to match) and its paused-read STOP wording - the locals it reads (`last0` 5796, `fresh` 5919)
+  are in scope at its use (5982); this branch's read-rate/stage_ms parsing is untouched.
+  `engines/qfn/serve/server.py` took P125j's DONE key parse (1666) on top of this branch's.
+- generated file: `serve/qfn_engine.py` auto-merged, and `tools/saguaro/extract_qfn_engine.py`
+  reproduces it byte-identical from the merged `engines/qfn/serve/server.py` (run after the
+  merge; the regenerated file is what the commit holds) - never hand-edited.
+- `engines/qfn/CMakeLists.txt`: P125j's `layer_pause_test` target landed beside this branch's
+  test lines.
+
+Merge-ref note: the only `saguaro/q1-p125j-layer-pause` in this repo is refs/heads at d8e25fd95
+(that branch's own worktree shares this repo and sits on the same commit). The round-5/6 P125j
+fixes the manager's message cites (the batch-lane pause capture, the grace-default gate) are not
+in this repo's refs at merge time. If the RC carries a newer P125j tip, re-merging the updated
+ref is a round of its own; this resolution keeps both sides for every hunk the ref actually has.
+
+## 2 - "the review's nits, if any are open" - nothing open, nothing changed
+
+No P125k nit list exists in the tree: the review that returned MERGE-WITH-NITS left no file behind
+(the REVIEW-RESULT.md on disk before the merge held only the manager's instruction; what the merge
+carries in REVIEW-RESULT.md / FIX-REPORT.md is P125j's own round record, whose nits belong to
+P125j's rounds). REPORT-p125k-park-sync.md's "Open questions" (ver/ver_b in the slot shape,
+multi-GPU still whole-device by the `park_own_ok` gate, the copy-stream contract `copy_done`
+rests on) are open questions the review accepted, not findings - unchanged, restated there.
+
+## 3 - build + tests (manager step 3; no GPU)
+
+- `tools/qfn/build.sh scratch/build-p125k-merge` with
+  `QFN_GGML_DIR=$PWD/../strata-main/third_party/llama.cpp` (the manager's checkout, named
+  relative to this worktree): **QFN BUILD OK 70f67efde**, ninja 179/179
+  (strata + strata_kq + strata_kq_tab, sm_75, CUDA 13.1), a new dir, nothing run on a GPU.
+- `park_policy_test` (the plan's module, this branch's 65 checks): standalone
+  (`g++ -std=c++20 -I engines/qfn/include`) and as a scratch/build-p125k-merge target -
+  **65 checks passed**, run one at a time.
+- `layer_pause_test` (the unit test P125j added): standalone and as a scratch/build-p125k-merge
+  target - **ok: 43 checks, 0 bad**, run one at a time.
+- `py_compile`: serve/server.py, serve/qfn_engine.py, engines/qfn/serve/server.py,
+  serve/test_priority.py - OK; `bash -n tools/card_tests/layer_pause.sh` - clean.
+- No card test run: no card on this box and the manager's step 3 says "No GPU runs".
