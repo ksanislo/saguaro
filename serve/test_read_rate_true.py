@@ -273,5 +273,84 @@ class StalledReadFalls(Base):
         self.assertEqual(self.live(), 0.0)
 
 
+class PeaksTellTheTruth(Base):
+    """The PEAKS half of PLAN-p124v-read-rate (ref/mangonel-peaks-shown.txt vs ref/mangonel-peaks-log.txt):
+    the Monitor showed peak_decode 94.7 tok/s ("4668 tokens") and peak_prefill 171,860.8 tok/s
+    ("859,304 tokens"), while the engine's own per-request lines on that box support 64.3 tok/s for any single
+    answer and ~2,128.9 tok/s for any single read.  Neither per-answer peak may exceed what one line supports;
+    the summed figures become their own engine-total peaks, labelled."""
+
+    def test_two_answers_at_64_tok_s_never_become_a_94_7_answer_peak(self):
+        now = self.t[0]
+        a, b = reader(RequestStat()), reader(RequestStat())
+        for st in (a, b):                               # each its own window: 320 tokens over its last 5 s
+            st.first_token = now - 10.0
+            st.base = (now - 5.0, 0)
+            st.samples.append((now, 320))
+        with self.svc.status_lock:
+            self.svc.current_requests.update({a, b})
+        m = self.svc.metrics()                          # (metrics() runs _tok_s: the live figures feed the peaks)
+        self.assertAlmostEqual(m["live"]["tok_s"], 128.0, delta=2)     # the engine total, summed, stays live
+        self.assertAlmostEqual(self.svc.totals["peak_decode"]["tok_s"], 64.0, delta=1.0)   # one answer's own
+        self.assertEqual(self.svc.totals["peak_decode"]["tokens"], 320)    # its own tokens, never the 4668 sum
+        self.assertAlmostEqual(self.svc.totals["peak_decode_engine"]["tok_s"], 128.0, delta=2)  # summed: its own
+
+    def _run_read(self, lines, rate_true, reused, n_new):
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        for line in lines:
+            eng.feed(7, line)
+            self.assertIsNone(eng.step(it))
+            self.tick(1.0)
+            self.live()                                  # (the Monitor polls ~4 a second: the readout, and the
+            #  peaks it feeds, are computed inside _prefill_tok_s - a read nobody watches records no peak)
+        p = self.svc.totals["peak_prefill"]
+        self.assertIsNotNone(p, "the readout never made a peak")
+        self.assertLessEqual(p["tok_s"], rate_true * 1.25)   # the peak never exceeds the read's true speed...
+        self.assertGreaterEqual(p["tok_s"], rate_true * 0.75)
+        self.assertLessEqual(p["tokens"], n_new)             # ...and never counts more than the tokens READ
+        self.assertGreaterEqual(p["tokens"], 512)
+        return p
+
+    def test_a_restored_read_peaks_from_only_what_it_read(self):
+        lines = [f"RHB rid=0 stage=stage done=0 new=8192 reused=50000 pass=1/8 ms={k * 1000} stage_ms={k * 1000} slot=7"
+                 for k in range(1, 41)]
+        lines += [f"RHB rid=0 stage=read done={100 * k} new=8192 reused=50000 pass=1/8 ms={40000 + k * 1000} "
+                  f"stage_ms=40000 slot=7" for k in range(1, 83)]
+        # 40 s of staging 50K restored tokens then a 100 tok/s read: the peak is ~100 tok/s over tokens read
+        # only - never the restored 50K, and never diluted toward the single digits by the staging time
+        self._run_read(lines, 100.0, 50000, 8192)
+
+    def test_a_fast_read_peaks_at_its_true_rate(self):
+        lines = [f"RHB rid=0 stage=read done={800 * k} new=64000 reused=0 pass=1/40 ms={k * 1000} stage_ms=0 slot=7"
+                 for k in range(1, 81)]
+        self._run_read(lines, 800.0, 0, 64000)
+
+    def test_two_reads_at_once_sum_into_their_own_engine_peak(self):
+        eng = ReadingEngine(self.svc, slots=(7, 8))
+        a, b = self.reading(), self.reading()
+        eng.watch(7, a)
+        eng.watch(8, b)
+        it7, it8 = eng.wait(7), eng.wait(8)
+        for k in range(1, 11):                           # 300 + 500 tok/s, 10 s: engine total 800, best read 500
+            eng.feed(7, f"RHB rid=0 stage=read done={300 * k} new=3000 reused=1000 pass=1/4 ms={k * 1000} "
+                        f"stage_ms=0 slot=7")
+            eng.feed(8, f"RHB rid=0 stage=read done={500 * k} new=5000 reused=2000 pass=1/4 ms={k * 1000} "
+                        f"stage_ms=0 slot=8")
+            self.assertIsNone(eng.step(it7, 7))
+            self.assertIsNone(eng.step(it8, 8))
+            self.tick()
+            self.live()                                  # (the Monitor poll computes the readout and its peaks)
+        per, tot = self.svc.totals["peak_prefill"], self.svc.totals["peak_prefill_engine"]
+        self.assertIsNotNone(per)
+        self.assertLessEqual(per["tok_s"], 560)          # one read's own peak: never the 800 sum
+        self.assertIsNotNone(tot)
+        self.assertLess(tot["tok_s"], 900)               # the summed figure is real (~800) - and it is the
+        self.assertEqual(tot["tokens"], 1500 + 2500)     #  engine total's own, labelled, peak (recorded as the
+        #  reads first pass the 5 s window, k=5: the equal-rate beats after it never top their own sum)
+
+
 if __name__ == "__main__":
     unittest.main()

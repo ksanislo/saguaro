@@ -293,7 +293,9 @@ def text_file_limit(context: int) -> int:
 RATE_WINDOW_S = 5.0
 READ_BEAT_STALE_S = 1.5      # P124v: an engine that beats (~4 a second) older than this is silence: a stalled
 #  read's rate then falls with it and drains to nothing past the window, instead of freezing at the last beat
-PEAK_MIN_SPAN_S = 2.0     # a peak only from an answer or read this old: younger windows read bursts as rates
+PEAK_MIN_SPAN_S = 5.0     # P124v: a peak only from an answer or read measured over at least this much time -
+#  younger windows read bursts as rates (mangonel: a 2 s gate let the summed 5 s window of two chats decode at
+#  94.7 tok/s, 1.5x any single answer's real 64.3)
 RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean so far, with the span floored here
 # A request that waited this long in the FIFO gets a line in the server window when its turn comes: with nothing else
 # logged, a queue that had stopped moving (and requests piling up behind it) was indistinguishable from a busy server.
@@ -3258,7 +3260,10 @@ class Service:
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
                        "prompt_ms": 0.0, "decode_ms": 0.0,
                        "peak_decode": None,   # the fastest answer's decode: {tok_s, tokens, time} (PEAK_MIN_TOKENS+)
-                       "peak_prefill": None}  # the fastest prompt read: {tok_s, tokens, time} (PEAK_MIN_READ_TOKENS+)
+                       "peak_prefill": None,  # the fastest prompt read: {tok_s, tokens, time} (PEAK_MIN_READ_TOKENS+)
+                       # P124v: the engine-total figures are kept SEPARATE and labelled as such (the summed rate
+                       #  of several chats at once is not one answer's or one read's speed - mangonel's peaks were)
+                       "peak_decode_engine": None, "peak_prefill_engine": None}
         # every prompt read as its own INTERVAL [stat, t_start, t_end, tokens, steps] (the drivers' read hooks fill
         # it): the window's count = in-progress reads' steps inside it + finished reads' tokens spread over their
         # overlap with it - a top-up lands ACROSS the read it belongs to, not in the window it happens to end in,
@@ -4339,18 +4344,26 @@ class Service:
             now = time.time()
             rate = sum(r.tok_s(now) for r in self.current_requests)
             n = sum((r.samples[-1] if r.samples else r.base or (0, 0))[1] for r in self.current_requests)
-            # a peak only from answers past their first PEAK_MIN_SPAN_S: a young window reads a burst as a rate
-            if all(r.first_token is not None and now - r.first_token >= PEAK_MIN_SPAN_S for r in self.current_requests):
-                self._note_peak(rate, n, now)
+            # a peak only from answers past their first PEAK_MIN_SPAN_S: a young window reads a burst as a rate.
+            # P124v: per answer and engine total are kept SEPARATE - the summed figure was mangonel's "94.7
+            # tok/s", 1.5x any single answer's real 64.3, two chats' rates added and labelled one answer's speed.
+            if all(r.first_token is not None and now - r.first_token >= PEAK_MIN_SPAN_S
+                   for r in self.current_requests):
+                for r in self.current_requests:           # each answer's own window rate: its own peak candidate
+                    self._note_peak(r.tok_s(now), (r.samples[-1] if r.samples else r.base or (0, 0))[1], now)
+                self._note_peak(rate, n, now, engine=True)
             return rate
 
-    def _note_peak(self, tok_s, tokens, when):
-        """The Monitor's peak decode (status_lock held): the highest decode rate it has shown - a running answer's live
-        rate or a finished answer's - rounded as shown (0.1 tok/s), once the answers hold PEAK_MIN_TOKENS tokens."""
+    def _note_peak(self, tok_s, tokens, when, engine=False):
+        """The Monitor's peak decode (status_lock held): the highest decode rate it has shown - a running answer's
+        live rate or a finished answer's - rounded as shown (0.1 tok/s), once the answers hold PEAK_MIN_TOKENS
+        tokens.  engine=True records the separate peak_decode_engine: the highest engine TOTAL over several chats
+        decoding at once; peak_decode itself is only ever one answer's own speed (P124v)."""
         tok_s = round(tok_s or 0.0, 1)
-        peak = self.totals.get("peak_decode")
+        key = "peak_decode_engine" if engine else "peak_decode"
+        peak = self.totals.get(key)
         if tok_s > 0 and tokens >= PEAK_MIN_TOKENS and (peak is None or tok_s > peak["tok_s"]):
-            self.totals["peak_decode"] = {"tok_s": tok_s, "tokens": tokens, "time": when}
+            self.totals[key] = {"tok_s": tok_s, "tokens": tokens, "time": when}
 
     def _tok_s_mean(self):
         """The whole-request mean since the first token (the old formula), kept so the two can be compared."""
@@ -4408,8 +4421,8 @@ class Service:
                         span_max = max(span_max, span)
                         if open_read and n >= PEAK_MIN_READ_TOKENS and span >= PEAK_MIN_SPAN_S:
                             self._note_peak_read(rate, n, now)      # this read's own readout, gated like before
-                if total > 0 and n_tot >= PEAK_MIN_READ_TOKENS and span_max >= PEAK_MIN_SPAN_S:
-                    self._note_peak_read(total, int(round(n_tot)), now)
+                if total > 0:
+                    self._note_peak_read(total, int(round(n_tot)), now, span=span_max, engine=True)
                 return total
             w0 = now - RATE_WINDOW_S
             n, t_lo = 0.0, None
@@ -4449,7 +4462,8 @@ class Service:
             span = now - t_lo
             total = n / span if span >= RATE_MIN_SPAN_S else 0.0
             if span >= PEAK_MIN_SPAN_S:
-                self._note_peak_read(total, int(round(n)), now)
+                self._note_peak_read(total, int(round(n)), now, span=span, engine=True)   # (an engine total: the
+                #  window adds the reads up; one read's own peak comes from the engine's figures or its DONE row)
             return total
 
     def _read_open(self, stat, now):
@@ -4617,11 +4631,14 @@ class Service:
                 if sum(1 for x in self.running if x.at_engine and x.first_token is None) > 1:
                     stat.read_shared = True             # (two admissions read at once: label the request's own rate)
                 if tok_s is not None:
-                    stat.read_avg = tok_s
-                    self._note_peak_read(tok_s, n_read, now)
+                    stat.read_avg = tok_s             # (the engine's own mean over the read, shown in the row)
                 if stat.read_t0 is None:
                     stat.read_t0 = now
                 stat.read_t1 = now
+                if tok_s is not None and stat.read_engine:
+                    # P124v: the read closes on the engine's OWN figures (BRA / RDONE: new tokens over read time,
+                    # staging left out) - a peak is recorded from them alone, and only over a long-enough window
+                    self._note_peak_read(tok_s, n_read, now, span=stat.read_engine[1] / 1000.0)
                 d = n_read - stat.read_pos
                 if d:
                     stat.read_pos = n_read
@@ -4645,21 +4662,36 @@ class Service:
             stat.read_prev_t, stat.read_prev_n = now, n_read
             if tok_s is not None:                       # the engine's own mean over THIS request's read (its PP line)
                 stat.read_avg = tok_s
-                self._note_peak_read(tok_s, n_read, now)
+                # P124v: only the true readout may make a peak: the engine's own pair (new_read over its own read
+                # time) recorded above, over a window of at least PEAK_MIN_SPAN_S; a chunk's wall mean (no read_ms
+                # on this line) shows in the row but never becomes the headline
+                if stat.read_eng_ms and stat.read_eng_ms > 0 and n_read == stat.read_eng_n:
+                    self._note_peak_read(tok_s, n_read, now, span=stat.read_eng_ms / 1000.0)
             if d <= 0:
                 return
             if sum(1 for x in self.running if x.at_engine and x.first_token is None) > 1:
                 stat.read_shared = True                 # two chats read at once: neither's engine clock is just its own
             stat.read_cur[4].append((now, n_read))
 
-    def _note_peak_read(self, tok_s, tokens, when):
-        """The Monitor's peak Prefill (status_lock held): the highest read rate it has shown - a live window or a
-        finished read's - rounded as shown, once a read holds PEAK_MIN_READ_TOKENS tokens (a small read's rate says
-        little).  Kept like peak_decode."""
+    def _note_peak_read(self, tok_s, tokens, when, span=None, engine=False):
+        """The Monitor's peak Prefill (status_lock held): the highest READOUT it has shown - the same true
+        per-read figure the live numbers use (P124v: the read's own tokens over its own READ time, never a
+        reused / restored / staged count and never a chunk's wall mean) - rounded as shown, over at least
+        PEAK_MIN_SPAN_S seconds (when `span` is not given: tokens / tok_s, the span the figure was taken over)
+        and PEAK_MIN_READ_TOKENS tokens (a small read's rate says little).  engine=True records the separate
+        peak_prefill_engine - the highest engine TOTAL over several reads at once; peak_prefill itself is only
+        ever ONE read's own speed (mangonel: the summed window of 859,304 tokens over a 5 s window read as
+        171,860 tok/s, ~80x the box's real ~2,100, because it added the reads up AND counted what they restored)."""
         tok_s = round(tok_s or 0.0, 1)
-        peak = self.totals.get("peak_prefill")
-        if tok_s > 0 and tokens >= PEAK_MIN_READ_TOKENS and (peak is None or tok_s > peak["tok_s"]):
-            self.totals["peak_prefill"] = {"tok_s": tok_s, "tokens": tokens, "time": when}
+        if tok_s <= 0 or tokens < PEAK_MIN_READ_TOKENS:
+            return
+        span = tokens / tok_s if span is None else span
+        if span < PEAK_MIN_SPAN_S:
+            return                                   # (a peak over a window this short is a burst, not a speed)
+        key = "peak_prefill_engine" if engine else "peak_prefill"
+        peak = self.totals.get(key)
+        if peak is None or tok_s > peak["tok_s"]:
+            self.totals[key] = {"tok_s": tok_s, "tokens": tokens, "time": when}
 
     def _wall_tick(self):
         """The totals' wall clocks (status_lock held): the seconds during which at least one prompt was being read,
@@ -5064,11 +5096,21 @@ class Service:
             ("llamacpp:requests_deferred", "gauge", "Requests waiting their turn", s.get("queued") or 0),
             ("maya:requests_total", "counter", "Requests finished", t["requests"]),
             ("maya:decode_peak_tokens_seconds", "gauge",
-             f"The fastest answer's generation throughput in tokens/s ({PEAK_MIN_TOKENS} tokens or more)",
+             f"The fastest single answer's generation throughput in tokens/s ({PEAK_MIN_TOKENS} tokens or more, "
+             f"{PEAK_MIN_SPAN_S:.0f} s or more)",
              (t.get("peak_decode") or {}).get("tok_s") or 0),
+            ("maya:decode_engine_peak_tokens_seconds", "gauge",
+             "The highest engine-total generation throughput in tokens/s, summed over several answers at once "
+             "(not one answer's speed)",
+             (t.get("peak_decode_engine") or {}).get("tok_s") or 0),
             ("maya:prefill_peak_tokens_seconds", "gauge",
-             f"The fastest prompt read throughput in tokens/s ({PEAK_MIN_READ_TOKENS} tokens read or more)",
+             f"The fastest single prompt read throughput in tokens/s ({PEAK_MIN_READ_TOKENS} tokens actually "
+             f"read or more, {PEAK_MIN_SPAN_S:.0f} s or more; reused / restored tokens never count)",
              (t.get("peak_prefill") or {}).get("tok_s") or 0),
+            ("maya:prefill_engine_peak_tokens_seconds", "gauge",
+             "The highest engine-total prompt read throughput in tokens/s, summed over several reads at once "
+             "(not one read's speed)",
+             (t.get("peak_prefill_engine") or {}).get("tok_s") or 0),
             ("maya:engine_alive", "gauge", "1 while the engine process runs",
              int(self.engine.alive()) if hasattr(self.engine, "alive") else 1),
             ("maya:loop_guard_detected_total", "counter", "Loops the loop guard saw in answers", guard["detected"]),
@@ -6619,7 +6661,10 @@ class Service:
                         self._note_peak(row["decode_tok_s"], n, started)   # (a solo engine's own decode clock)
                     elif n and ft is not None and time.time() - ft >= PEAK_MIN_SPAN_S:   # (QFN batch: its decode_ms
                         self._note_peak(n / (time.time() - ft), n, started)            # is partial - the server's clock)
-                    self._note_peak_read(pf_s, read_n, started)   # (the same for the read, from PEAK_MIN_READ_TOKENS on)
+                    self._note_peak_read(pf_s, read_n, started,   # (the same for the read, from PEAK_MIN_READ_TOKENS
+                                         span=eng_read[1] / 1000.0 if eng_read and eng_read[1] else None)   #  on,
+                                    #  over the engine's own read time when it reported one: P124v - the peak is
+                                    #  never shorter a window than PEAK_MIN_SPAN_S nor more tokens than were READ)
                     t["requests"] += 1
                     t["prompt_tokens"] += len(ids)
                     t["reused"] += last.get("reused") or 0
