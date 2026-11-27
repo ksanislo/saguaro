@@ -13,7 +13,7 @@ VRAM (code objects, kernel scratch/private segments allocated on demand) and the
 ALSO: this branch is missing ALL of dev (saguaro/qfn-first, 215 commits), incl. P124x's mortar memory rules (the
 VRAM reserve floor, give-back before swap). Every elastic card so far ran without them.
 Do, commit each:
-1. MERGE saguaro/qfn-first into this branch (a merge; resolve generate.cpp & co keeping both sides; P124x's reserve
+1. DONE (you merged it: 57fac6ad8; the manager verified: QFN builds, the serve suites and the 18 standalone QFN unit tests pass) - MERGE saguaro/qfn-first into this branch (a merge; resolve generate.cpp & co keeping both sides; P124x's reserve
    rules must apply to every elastic growth path). FIX-REPORT: each conflict and the resolution. Run the QFN unit tests
    both sides added (park_policy_test, kv_host_growth_test, vmm_grow_test, read_backing_test, the P124x tests).
 2. A RUNTIME RESERVE the elastic growth never takes (HIP and CUDA): enough for the runtime's own allocations (code
@@ -26,3 +26,5 @@ Do, commit each:
    2510 inside 392..2510) - the writer, file:line; fix at the source. db3373729 stays.
 Build ONLY QFN (tools/qfn/build.sh <new dir under scratch/>, QFN_GGML_DIR=/data/llm/strata-main/third_party/llama.cpp). No GPU.
 Card after (manager): load/speed, 40K, 546K (needle found), guard on, no OUT_OF_RESOURCES / stall.
+
+MANAGER NOTE: step 1 is done and verified - start at step 2. A mortar run of the merged build with eager loading is running (manager) to see whether P124x's rules alone stop the stall; its result goes in this file when it ends.
