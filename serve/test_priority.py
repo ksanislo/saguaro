@@ -1600,3 +1600,11 @@ class ClosingTheOtherWrappersClosesTheirRun(unittest.TestCase):
         self.assertEqual([got[0][0], got[1][0], got[-1]], ["response.created", "response.in_progress", None])
         gen.close()                                   # (`gen` stays referenced, as in _response_work's finally)
         self.assertEqual(log, ["closed"], "response_events left its run to the frame GC")
+
+
+class IdleGraceDefault(unittest.TestCase):
+    def test_the_default_grace_is_five_seconds(self):
+        from serve.server import priority_idle_seconds
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SAGUARO_PRIORITY_IDLE_S", None)
+            self.assertEqual(priority_idle_seconds(), 5.0)   # (1.2.4: 30 -> 5; 0 once reads pause between layers)

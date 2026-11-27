@@ -410,10 +410,10 @@ def priority_age_seconds() -> float:
 
 
 def priority_idle_seconds() -> float:
-    """SAGUARO_PRIORITY_IDLE_S (30): the idle rule (R122) - a low request starts, or resumes after a pause, only
+    """SAGUARO_PRIORITY_IDLE_S (5): the idle rule (R122) - a low request starts, or resumes after a pause, only
     when nothing normal or high runs or waits AND none finished in the last this many seconds (0 = no grace):
     a person's follow-up a few seconds after an answer finds the model where they left it."""
-    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 30.0)
+    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 5.0)   # (30 until 1.2.4: parks are fast now; 0 once a read can pause between layers)
 
 
 class FairLock:
