@@ -4529,8 +4529,9 @@ class Service:
                         return 0.0
                 return st.read_eng_n / max(st.read_eng_ms / 1000.0, self._read_span_s(st, now))
             # the read is over (BRA / a leg's close) but its answer has not started: its true rate ages
-            # with the wall time since it ended, and drops out once it is only history
-            ended = r[2] if r is not None else st.read_t1 or now
+            # with the wall time since it ended, and drops out once it is only history.  A leg still open
+            # with first_token set (one landed before _prefill_tok_s closed it): age from the last step.
+            ended = r[2] if r is not None and r[2] is not None else st.read_t1 or now
             gap = now - ended
             if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
                 return 0.0
