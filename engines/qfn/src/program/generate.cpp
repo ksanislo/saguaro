@@ -47,6 +47,7 @@
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/peer_experts.hpp"
+#include "strata/core/read_backing.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/layout.hpp"
 #include "strata/core/session.hpp"
@@ -16140,7 +16141,10 @@ vs.d_skip_usage = gs.d_skip_usage;
         auto stage_covers = [&](const PfPart& p, int64_t reach) {
             const int64_t have = p.sp->stage_cells();
             if (have <= 0) return true;
-            const int64_t need = strata::prefill::Prefill::stage_cells_for(*p.ses, reach);
+            // P124e (round 8, manager card): an elastic conversation's loan is sized from what it is BACKED for
+            // (a loan whose staging reaches cells that are only addressed, not mapped, is a fault waiting).
+            const int64_t need = strata::prefill::Prefill::stage_cells_elastic(*p.ses, reach,
+                                                                               strata::core::session_backed_cells(*p.ses));
             return have >= (need > 0 ? need : p.ses->qsa_states[p.ses->qsa_primary()].max_cells);
         };
         // `reach`: the furthest cell the reads on this loan go to (0: any - the K/V staging covers the whole context)
@@ -16171,7 +16175,13 @@ vs.d_skip_usage = gs.d_skip_usage;
             bool any = false;
             for (PfPart& p : pf_parts) {
                 if (p.first < 0) continue;
-                const int64_t cells = o.prefill_head_alias ? 0 : strata::prefill::Prefill::stage_cells_for(*p.ses, reach);
+                // P124e (round 8, manager card): the staging is sized from the ELASTIC STATE (backed cells + the
+                // one step the read's grow runs ahead), not from a whole-context reach: what cannot be backed
+                // must not be staged, and a smaller region is a smaller loan (the cache keeps the slots).
+                const int64_t cells = o.prefill_head_alias
+                                          ? 0
+                                          : strata::prefill::Prefill::stage_cells_elastic(
+                                                *p.ses, reach, strata::core::session_backed_cells(*p.ses));
                 if (!p.lent.empty()) {
                     if (want <= p.lent_chunk && stage_covers(p, reach)) continue;   // its current loan already covers this
                     // ONLY this participant's loan goes back: `refill` would return the other participants'
@@ -20606,12 +20616,56 @@ vs.d_skip_usage = gs.d_skip_usage;
                     ~SegPlanScope() { p = {}; }
                 } seg_plan_scope{seg_plan};
                 auto run = [&](int64_t q, int64_t r) -> bool {
-                    if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
-                    const ShareScope share_scope(read_share_set, read_share_now());
-                    pp_run_begin();   // (this request's own read clock: the pieces between two runs - the slots'
-                    const bool ok = sp.run(ids.data() + q, r - q, q, e);
-                    pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
-                    return ok;
+                    // P124e (round 8, manager card): on an elastic conversation a run never reaches a cell the
+                    // conversation has not BACKED (host copy, device state, RoPE rows - the arrays hold
+                    // addresses for the context and memory only for their backed prefix): back ahead of every
+                    // piece through the request-start fits (the give-way included) and cut the piece at the
+                    // backed / staged end.  Normally this is one piece: the fits at the request's start backed
+                    // the whole prompt (the plan's grow-ahead-need-once), and nothing here changes.
+                    while (q < r) {
+                        const int64_t staged = sp.stage_cells() > 0 ? sp.stage_cells() : o.max_context;
+                        int64_t qe = strata::core::read_piece_end(r, solo_backed_cells(), staged);
+                        if (qe <= q) {
+                            if (staged <= q && staged < r) {   // the loan's staging ends before the piece does
+                                e = "the K/V staging ends at cell " + std::to_string(staged) + ", the read reaches " +
+                                    std::to_string(r) + " (out of memory: the slots it can lend stay shorter than " +
+                                    "the read)";
+                                return false;
+                            }
+                            const int64_t req_end = std::min<int64_t>(o.max_context, n + max_new + 64);
+                            const int64_t want = std::min(staged, std::max(strata::core::read_back_cells(q, kSoloPinAhead,
+                                                                                                         req_end),
+                                                                           q + 1));
+                            if (want <= q) {
+                                e = "the read reaches past the cells this conversation can back (out of memory)";
+                                return false;
+                            }
+                            if (!solo_host_fit_r(want)) {
+                                e = std::string(strata::core::qsa_dev_pin_failed()
+                                                    ? "no VRAM is left to back the read's context"
+                                                    : "no RAM is left to back the read's context") +
+                                    " (out of memory: cell " + std::to_string(want) + ")";
+                                return false;
+                            }
+                            if (solo_vram_fit && !solo_vram_fit(req_end, want)) {
+                                e = "no VRAM is left to back the read's context (out of memory)";
+                                return false;
+                            }
+                            qe = strata::core::read_piece_end(r, solo_backed_cells(), staged);
+                            if (qe <= q) {
+                                e = "the read reaches past the cells this conversation can back (out of memory)";
+                                return false;
+                            }
+                        }
+                        if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
+                        const ShareScope share_scope(read_share_set, read_share_now());
+                        pp_run_begin();   // (this request's own read clock: the pieces between two runs - the slots'
+                        const bool ok = sp.run(ids.data() + q, qe - q, q, e);
+                        pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
+                        if (!ok) return false;
+                        q = qe;
+                    }
+                    return true;
                 };
                 // (a layer split reads its stages as a pipeline over one run's chunks: beside slots a chunk at a time, with
                 // none decoding in pieces of SAGUARO_BATCH_YIELD_CHUNKS chunks (default 8; 0 = one run) so a BYIELD is taken)

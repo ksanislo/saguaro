@@ -7,6 +7,7 @@
 #endif
 #include "strata/prefill/warm_policy.hpp"
 #include "strata/prefill/kv_prefix_keep.hpp"
+#include "strata/core/read_backing.hpp"
 #include <atomic>
 #if defined(__cpp_lib_atomic_wait)
 #define STRATA_ATOMIC_WAIT 1   // #1488: std::atomic::wait / notify_all are a GCC 11 library feature; GCC 10 spins instead
@@ -1958,10 +1959,21 @@ int64_t Prefill::stage_cells_for(const core::SessionState& ss, int64_t reach) {
         const char* e = std::getenv("SAGUARO_STAGE_HEADROOM");
         return e == nullptr || std::atoi(e) != 0;
     }();
-    const int64_t want = headroom ? std::min(full, reach + std::max<int64_t>(65536, reach / 4)) : reach;
-    const int64_t base = 262144, step = 131072;
-    return want <= base ? std::min(full, base) : std::min(full, (want + step - 1) / step * step);
+    return strata::core::stage_grid_cells(reach, full, headroom);
 }
+int64_t Prefill::stage_cells_elastic(const core::SessionState& ss, int64_t reach, int64_t backed) {
+    // P124e (round 8, manager card): on an elastic conversation the loan is sized from the state: what is
+    // BACKED now plus the one step the read's grow runs ahead of its pieces (core::read_backing.hpp) - the
+    // headroom may never promise cells whose host copy / follow state / RoPE rows are not mapped.
+    const int64_t full = ss.qsa_states[ss.qsa_primary()].max_cells;
+    if (reach <= 0 || stage_reach_off()) return 0;
+    static const bool headroom = [] {
+        const char* e = std::getenv("SAGUARO_STAGE_HEADROOM");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return strata::core::stage_cells_elastic(reach, backed, full, headroom);
+}
+
 
 void Prefill::set_session(core::SessionState& ss) { if (impl_ != nullptr) impl_->ss = &ss; }
 core::SessionState& Prefill::session() const { return *impl_->ss; }
