@@ -2139,6 +2139,10 @@ bool rope_map(RopeGrow& r, int64_t cells, const std::function<strata::core::VmmC
 bool qsa_rope_grow(const QsaState& st, int64_t cells) {
     // P124e (round 4): the relief it may ask runs threads that take the rope lock (the give path's low-water
     // check counts the RoPE chunks), so nothing is held across it: measure, get the chunks, then map.
+    // P124e (round 7, manager card): the shortfall runs the card's give-before-map order (vmm_grow_room, the
+    // follow pools' and the scratch's own path) - the old loop asked the relief per refused chunk; now the
+    // driver's FIRST refusal asks the expert cache once for the whole shortfall and every chunk is in hand
+    // before the map is tried.
     RopeGrow* r = nullptr;
     int64_t need = 0;
     uint64_t G = 0;
@@ -2152,20 +2156,15 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
         dev = r->cos.device();
     }
     std::vector<strata::core::VmmChunk> got;
+    strata::core::VmmRoomStat room;
     int64_t from_budget = 0;
-    if (need > 0) from_budget = qsa_slot_budget_take(dev, need, got);   // (what the budget has; a solo card has none)
-    // P124e (round 4): the rest from the driver, its relief (the card's expert cache) asked once when it says no -
-    // the same source the follow pools grow from.  The budget's own chunks go back if the whole grow cannot run.
-    for (int64_t i = from_budget; i < need; ++i) {
-        strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
-        if (h == 0) {
-            vram_relief(dev, (uint64_t) (need - i) * G);
-            h = strata::core::vmm_chunk_new(dev);
-        }
-        if (h == 0) break;
-        got.push_back(h);
-    }
-    if ((int64_t) got.size() < need) {
+    if (!strata::core::vmm_grow_room_pooled(
+            need, G,
+            [&](int64_t n2, std::vector<strata::core::VmmChunk>& out) { return qsa_slot_budget_take(dev, n2, out); },
+            [&] { return (strata::core::GrowChunk) strata::core::vmm_chunk_new(dev); },
+            [&](uint64_t bytes) { return vram_relief(dev, bytes); }, true, got, room, &from_budget)) {
+        const strata::core::OnDevice on(dev);
+        report_vmm_grow_failure(dev, "grown", need - from_budget, G, room);   // (it said nothing at all before)
         for (size_t i = (size_t) from_budget; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);
         for (size_t i = 0; i < (size_t) from_budget; ++i) qsa_slot_budget_give(dev, got[i]);
         return false;
@@ -2175,6 +2174,7 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
     size_t i = 0;
     const int64_t had = r->cells;
     if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) {
+        report_vmm_grow_failure(dev, "mapped", need, G, room);   // P124e round 7: the rope map names its refusal too
         for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);   // (never handed to the map)
         return false;
     }
@@ -2213,21 +2213,49 @@ void qsa_set_rope_yarn(const strata::kernels::RopeScaling* yarn) {
 }
 
 bool qsa_rope_yarn_fit(const QsaState& st, int64_t cells) {
-    std::lock_guard<std::mutex> lk(g_rope_mu);
-    RopeGrow* r = st.cos_tab != nullptr ? yarn_of(st.cos_tab) : nullptr;
-    if (r == nullptr) return !g_rope_rows;
-    if (rope_target(*r, cells) <= r->cells) return true;
-    const int dev = r->cos.device();
-    const int64_t need = rope_need(*r, cells);
+    // P124e (round 7, manager card): the YaRN rows took room ONLY from the slot budget (and when the card had no
+    // budget, map_range made fresh chunks with no relief asked): a conversation crossing 262144 on a full card
+    // died at "no VRAM for the YaRN RoPE rows" without the expert cache ever being asked to give way.  Now the
+    // same path as every other growth allocation (vmm_grow_room_pooled): the budget's chunks, then the driver's,
+    // the cache giving way for the WHOLE shortfall BEFORE the map - and, like qsa_rope_grow, measure / room /
+    // map as three steps, since the relief's give path counts the RoPE chunks through this very lock.
+    RopeGrow* r = nullptr;
+    int64_t need = 0;
+    uint64_t G = 0;
+    int dev = -1;
+    {
+        std::lock_guard<std::mutex> lk(g_rope_mu);
+        r = st.cos_tab != nullptr ? yarn_of(st.cos_tab) : nullptr;
+        if (r == nullptr) return !g_rope_rows;
+        if (rope_target(*r, cells) <= r->cells) return true;
+        need = rope_need(*r, cells);
+        G = r->cos.granularity();
+        dev = r->cos.device();
+    }
     std::vector<strata::core::VmmChunk> got;
-    if (qsa_slot_budget_chunks(dev, nullptr, nullptr) > 0 && qsa_slot_budget_take(dev, need, got) < need) {
-        for (const strata::core::VmmChunk h : got) qsa_slot_budget_give(dev, h);
+    strata::core::VmmRoomStat room;
+    int64_t from_budget = 0;
+    if (!strata::core::vmm_grow_room_pooled(
+            need, G,
+            [&](int64_t n2, std::vector<strata::core::VmmChunk>& out) { return qsa_slot_budget_take(dev, n2, out); },
+            [&] { return (strata::core::GrowChunk) strata::core::vmm_chunk_new(dev); },
+            [&](uint64_t bytes) { return vram_relief(dev, bytes); }, true, got, room, &from_budget)) {
+        const strata::core::OnDevice on(dev);
+        report_vmm_grow_failure(dev, "grown", need - from_budget, G, room);
+        for (size_t i = (size_t) from_budget; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);
+        for (size_t i = 0; i < (size_t) from_budget; ++i) qsa_slot_budget_give(dev, got[i]);
         return false;
-    }   // (a card without a slot budget maps fresh chunks)
+    }
     const strata::core::OnDevice on(dev);
+    std::lock_guard<std::mutex> lk(g_rope_mu);
     size_t i = 0;
     const int64_t had = r->cells;
-    if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) return false;
+    if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) {
+        report_vmm_grow_failure(dev, "mapped", need, G, room);
+        for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);   // (never handed to the map)
+        return false;
+    }
+    for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);       // (the map needed fewer than measured)
     std::fprintf(stderr, "saguaro: CUDA%d's YaRN RoPE table covers %lld positions now (was %lld)\n", dev,
                  (long long) r->cells, (long long) had);
     return true;

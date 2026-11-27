@@ -1,6 +1,7 @@
 #pragma once
-// vmm_grow.hpp - P124e (round 6, manager card): the ORDER and the WORDING of a device-state grow (layer.cpp's
-// follow pools and block-score scratch - the arrays a streamed conversation keeps on the card).
+// vmm_grow.hpp - P124e (round 6, manager card; round 7: every growth allocation): the ORDER and the WORDING of a
+// device-state grow (layer.cpp's follow pools, block-score scratch, RoPE table and YaRN rows - the arrays a
+// streamed conversation keeps on the card and grows as its conversation grows).
 //
 // The order: the chunks a grow needs are TAKEN from the driver and HELD before any mapping is tried.  Probing
 // one chunk at a time (make, free, make, ...) proved only that ONE chunk fits at a time: with the card nearly
@@ -53,6 +54,22 @@ inline bool vmm_grow_room(int64_t need, uint64_t gran, Make make, GiveWay give_w
         st.made = (int64_t) got.size();
     }
     return true;
+}
+
+/// The same room for a grow that first helps itself to the card's slot budget (P124e round 7, manager card: the
+/// RoPE table and the YaRN rows - the two context arrays the budget had been the ONLY source of, so a card whose
+/// budget ran dry failed the grow without ever asking the expert cache to give way).  `budget(want, got)` appends
+/// what the pool holds (up to `want`) and returns how many it took; the SHORTFALL then runs exactly
+/// vmm_grow_room's order: hold every chunk, the first refusal asks the relief once for the whole shortfall, and
+/// the map starts after the cache has given way.  false: the room never arrived - `got` holds the pool's chunks
+/// at its front (`*from_pool` says how many, the caller gives those back to the pool and frees the rest).
+template <class Budget, class Make, class GiveWay>
+inline bool vmm_grow_room_pooled(int64_t need, uint64_t gran, Budget budget, Make make, GiveWay give_way,
+                                 bool may_relief, std::vector<GrowChunk>& got, VmmRoomStat& st,
+                                 int64_t* from_pool) {
+    const int64_t from = need > 0 ? budget(need, got) : 0;
+    if (from_pool != nullptr) *from_pool = from;
+    return need - from <= 0 || vmm_grow_room(need - from, gran, make, give_way, may_relief, got, st);
 }
 
 /// The grow's failure line (round 6's list, and never "no error", never a RAM message for a VRAM failure).
