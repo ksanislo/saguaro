@@ -66,6 +66,8 @@ inline bool resumes(const Point& p, int64_t c0, int64_t n, int64_t C) {
 /// "X MiB of chunk rows kept" line show).  Saturates instead of wrapping.  Pure.
 inline uint64_t state_bytes(int64_t tokens, int64_t row_floats) {
     if (tokens <= 0 || row_floats <= 0) return 0;
+    if (row_floats > (int64_t) (std::numeric_limits<uint64_t>::max() / 4))
+        return std::numeric_limits<uint64_t>::max();   // the row's own byte count would wrap (or zero)
     const uint64_t per_row = (uint64_t) row_floats * 4;
     if ((uint64_t) tokens > std::numeric_limits<uint64_t>::max() / per_row)
         return std::numeric_limits<uint64_t>::max();

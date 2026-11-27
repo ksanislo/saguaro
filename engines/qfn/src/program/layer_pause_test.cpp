@@ -136,6 +136,12 @@ int main() {
         eq((long long) edge, (long long) (((uint64_t) (1LL << 62) - 1) * 4), "the largest fitting count: exact");
         const uint64_t over = strata::program::layer_pause::state_bytes(1LL << 62, 1);         // exactly 2^64
         eq((long long) over, -1 /* (long long) UINT64_MAX */, "one past the edge (2^64): saturates");
+        // a row so wide its own x4 wraps BEFORE the guard could divide by it (2^62 floats = 2^64 bytes):
+        // the row_floats clamp catches it, so the guard below never sees a wrapped (or zero) per_row
+        const uint64_t wide = strata::program::layer_pause::state_bytes(1, 1LL << 62);
+        eq((long long) wide, -1 /* (long long) UINT64_MAX */, "a 2^62-float row: saturates, no wrapped per_row");
+        const uint64_t maxrow = strata::program::layer_pause::state_bytes(1, (1LL << 62) - 1);  // 4 x (2^62 - 1)
+        eq((long long) maxrow, (long long) (((uint64_t) (1LL << 62) - 1) * 4), "the widest countable row: exact");
     }
 
     std::printf("%s: %d checks, %d bad\n", bad ? "FAILED" : "ok", checks, bad);
