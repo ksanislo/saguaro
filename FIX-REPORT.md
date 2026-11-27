@@ -6,6 +6,20 @@ read's K/V from the pause to the resume, with file:line, and where it is lost. S
 fake test and the honest continue line) follow in their own commits; the finding -> what-changed table is added
 with the last commit.
 
+## 0. The findings, and what each one got
+
+The review is one FIX-FIRST finding with three numbered fix items; it lists no separate nits, and the cheap
+half of the third item (the honest line) shipped with its tests. Engine lines below are src/ik2/ik2_main.cu as
+it now stands; the line-driver and Service ones are serve/server.py.
+
+| # | Finding (REVIEW-RESULT) | What changed / why not |
+|---|--------------------------|------------------------|
+| 1 | "trace the paused read's K/V from the pause to the resume in the ik2 driver/engine (file:line) and show where it is lost" | Section 1 below (this file, committed as fix 1): the K/V is lost inside the engine at the STOP - the cancelled branch rolled back to the last snapshot, a first prompt has none (p_ms arms only past `i >= L + 64`, old :10807), `reset()` dropped every read token, the interrupting conversation overwrote the rows, and the numberless continue line hid it. |
+| 2 | "Keep it: the resume must continue at 32,768 (the engine's reused count on the resumed request shows it)" | Fix 2 (engine): the cancelled branch keeps the conversation at `read_pos` - the chunk boundary its passes ran to - and snapshots there (now :10888-10900); a different conversation parks the kept read whole (`park_active(), reset()`, :10729-10735) instead of reading over its rows; the read's own request back matches its end live or unparks it, so its PP lines (field 5) and its DONE (field 8) report cached = the cut position - the reused figure, growing across cuts as the card script wants. keep_n=0 shapes (KEEP=0, KV-streaming, KV-Q4) keep the old rollback; --parallel is untouched (its reader STOP still slot_resets and the driver never cuts a multi read). |
+| 3a | "A fake-engine test that fails when the resumed read starts at 0" | Fix 3 (serve/test_priority.py): `test_an_ik2_read_cut_keeps_everything_it_read` drives the fixed fake straight and asserts the resume starts exactly at the cut (fails at 0, or short of it); `test_an_ik2_solo_read_steps_aside_for_a_normal_and_continues_at_the_cut` pins the race: figure > 0, on a chunk boundary, every chunk read exactly once. `Ik2LostRead` models the pre-fix card engine and pins what the SERVER must do with it (below). |
+| 3b | "make the server log 'continues' only when the engine actually reports kept tokens" | Fix 3 (serve/server.py): the PP parse keeps the engine's reuse field as `progress_reuse` (None when the line has no field - GLM/MM3/DS4 lines untouched - so a real 0 is never confused with "no report"); the resumed-read line prefers `reused` (QFN's RESUME), then it, and prints the engine's own figure, "0 of N reused" included (the P124b rule, serve/test_lost_read's shapes unchanged); the numberless "continues" stays only for engines that report no figure at all AND now waits for the read's first report - the quiet-10 s heartbeat that preceded the card run's first PP (and let it log "continues" over a reuse 0) no longer claims anything. |
+| 3c | "Card test again after (lost_read.sh)" | Owed to the manager, said plainly: this box has no card (the engine does not build here - braces balanced against HEAD; the build and lost_read.sh on the live gpu01 config need mangonel). The card line it must now show: "the low prompt read continued: M of 86,237 tokens reused" with M > 0 growing at each cut (the engine's own PP/DONE figure, not the numberless wording the script already rejects). |
+
 ## 1. Where the K/V of the paused read goes (finding 1: the trace)
 
 The read is a solo saguaro-ik2 `GEN`; the card's prompt is a NEW conversation's FIRST prompt (~86,237 tokens in

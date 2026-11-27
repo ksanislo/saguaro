@@ -79,9 +79,11 @@ Its READY says only `stop` (solo) or `stop multi=N` (--parallel) - no `pause`, n
   last user message's start `p_ms` (:10798-10809, taken at :10860-10866). So:
   - a read cut **inside the last user message** keeps everything before it (the snapshot) -
     the resume re-reads only that message;
-  - a read cut **before the snapshot** keeps only what the conversation already held at the
-    request's start - for the FIRST prompt of a new conversation (nothing held, no snapshot)
-    the read starts from 0 again when it comes back;
+  - a read cut **before the snapshot** keeps only what the conversation already held at the request's start -
+    before the review fix, for the FIRST prompt of a new conversation (nothing held; and `p_ms` arms only when
+    its `user_token` passes `i >= L + 64`, so a card-shaped template's message start under 64 tokens never
+    armed it) the read reset to 0 and came back reading the whole prompt again - the lost_read.sh finding;
+    the fix (section 2) keeps the stopped read at its chunk boundary instead;
   - the request never gets *wrong* results: the next GEN re-finds its resume point from the
     prefix + picture-sig match and the snapshots (:10676-10786), and its `DONE ... cancel`
     reports the `cached` figure of its own start (:10886). No re-read of what a snapshot holds.
@@ -113,15 +115,16 @@ What this means per mode, with what the engine really keeps:
   the resume continues from there - no prompt re-read.
 - **Read, solo**: the flag given. The engine sees STOP only *between* chunk passes - a chunk
   pass is never split, so a mid-read stop is always a between-chunks stop (said here per the
-  plan). Resume continues from the latest snapshot (the last message's start once past it,
-  else the conversation as it was at the request's start); the K/V held at that point is not
-  re-read. **Where a mid-read stop loses work**: a read cut before any snapshot of this
-  request was taken - the first prompt of a new conversation before its `p_ms` snapshot - comes
-  back and reads again from 0; nothing breaks (the engine's prefix match recomputes honestly),
-  the read is just not further along, and the log line keeps the numberless wording ("continues
-  from where the engine kept it") - the driver never claims a reused figure the engine did not
-  report (the engine reports none over the pipe: no RESUME line, and PP's `cached` is its
-  start's figure).
+  plan). The review fix (the lost_read.sh finding, FIX-REPORT.md): the cancelled read KEEPS what
+  it read - the conversation stays at the chunk boundary its passes ran to, with a snapshot taken
+  there (the conv states and the sliding visits' windows; the full visits' rows stay in the cache),
+  and the request coming back continues from exactly there, its PP lines and DONE reporting
+  `cached` = the cut position as its own reused figure. A different conversation arriving parks
+  the kept read whole (`park_active()` + reset, the new-conversation leg's own handling) instead
+  of rolling back over its rows; the parked copy unparks whole when the read's request comes back.
+  Where work is still lost honestly: keep_n=0 shapes (SAGUARO_IK2_KEEP=0, KV-streaming, KV-Q4) keep
+  the pre-fix rollback, and a parked read the keep limits drop (SAGUARO_IK2_KEEP / _KEEP_GB)
+  re-reads from 0 - the continue line then carries the engine's real 0, never the old claim.
 - **Read, --parallel**: deliberately NOT given (`if not self.multi`). The engine's
   `STOP <rid>` on a reading request slot_resets its slot - "a reader stopped: nothing of its
   prompt is kept" (ik2_main.cu:10494-10499) - so cutting it would lose the read, the exact
@@ -135,22 +138,26 @@ Hy4 and MM3 are untouched (serve/server.py:1526-1530, :1560-1561 unchanged); no 
 
 New fake ik2 driver `Ik2Read` (serve/test_priority.py) models saguaro-ik2 solo as the line
 driver sets it up (`READY ... stop`, no PAUSE, INFO `engine_kind=ik2`): a `PP` tick per chunk;
-a close (the driver's STOP) is seen only between chunk passes; the engine rolls the read back
-to the latest snapshot it kept (one every 2nd chunk here - the real engine's is the last user
-message's start), never below what the conversation already held; no reused figure over the
-pipe. New tests:
+a close (the driver's STOP) is seen only between chunk passes; and - after the review fix - the
+read is KEPT at the boundary it stopped at, its PP reuse figure naming it. `Ik2LostRead` models
+the pre-fix card engine (cut read rolled back to its last snapshot, a first prompt's being 0).
+Tests (as the review fix left them):
 
-- `ReadsPreempt.test_an_ik2_solo_read_steps_aside_for_a_normal_and_continues_at_its_snapshot`
+- `ReadsPreempt.test_an_ik2_solo_read_steps_aside_for_a_normal_and_continues_at_the_cut`
   - the low read pauses for a waiting NORMAL one, the normal answers first, the low answer
-  arrives whole; the resume starts at the snapshot (> 0, on a chunk boundary, not at 0),
-  the chunks the snapshot held were read exactly once, later ones at most twice; the pause
-  line names the prompt tokens, the continue line keeps its numberless wording.
+  arrives whole; the resume starts exactly where the read stopped (> 0, on a chunk boundary,
+  not at 0), every chunk read EXACTLY once; the continue line carries the engine's own figure.
 - `ReadsPreempt.test_a_high_request_goes_first_and_the_ik2_read_continues` - same race with a
-  HIGH request: its answer ends before the low read's, which continues from its snapshot.
-- `ReadsPreempt.test_an_ik2_read_cut_rolls_back_to_the_kept_snapshot` - the fake's engine
-  semantics without a race: cut after chunk 3 -> back to chunk 2's snapshot (not 0, nothing
-  half-read kept); the resume goes on from there; the snapshot's chunks read once, the dropped
-  chunk exactly twice.
+  HIGH request: its answer ends before the low read's, which continues from its cut with that
+  figure on the line.
+- `ReadsPreempt.test_an_ik2_read_cut_keeps_everything_it_read` - the fake's engine semantics
+  without a race, THE test the card run needed: cut after chunk 3 -> kept exactly at 3 chunks
+  (no rollback, no half chunk); the resume starts there and reports it; every chunk once. It
+  fails when the resumed read starts at 0.
+- `ReadsPreempt.test_an_ik2_lost_read_reports_zero_never_a_claim` - the card's engine shape
+  (`Ik2LostRead`): a resume from 0 with reuse 0 prints "continued: 0 of N tokens reused" and
+  never the numberless "continues" claim (fix 3b: the line logs "continues" only where the
+  engine reports kept tokens, or reports no figure at all).
 - `ReadsPreempt.test_an_ik2_request_that_never_waits_is_unchanged` - alone on an idle server:
   one engine call, every chunk exactly once, no `priority:` line.
 - `ServicePreempts.test_a_low_ik2_answer_steps_aside_and_resumes_from_its_token` - the
@@ -166,23 +173,30 @@ Results (`/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_priority`):
 
 - before the change: 68 tests, 1 failure - only `test_another_line_engine_is_not_given_it`
   (the ik2 solo leg), exactly the behavior the task changes.
-- after: **74 tests, OK** (93 s); the three race-carrying classes re-run 3x: 36 tests OK each
-  time. No ik2 driver's own test module exists (serve/test_inkling2_frontend.py is the chat
-  template's, not the driver's), so serve.test_priority is the whole run the plan names.
-- `py_compile serve/server.py` clean.
+- after the task: 74 tests, OK. After the review fix: **75 tests, OK** (97 s); the race-carrying
+  class re-run 3x: green each time. No ik2 driver's own test module exists (serve/
+  test_inkling2_frontend.py is the chat template's, not the driver's), so serve.test_priority
+  is the whole run the plan names.
+- `py_compile serve/server.py` clean; the extractor reproduces serve/qfn_engine.py
+  byte-identically (untouched).
 
 ## 4. Open questions / owed
 
 - The card test after (manager, mangonel inkling-pairs or mortar's Inkling config): a low
-  answer steps aside for a normal one and resumes with no re-read. Not run here (no card).
+  answer steps aside for a normal one and resumes with no re-read - and, after the review,
+  `lost_read.sh` again on the live Inkling gpu01 config: each cut must log
+  "the low prompt read continued: M of 86,237 tokens reused" with M > 0 growing (the engine's
+  own PP/DONE figure). Not run here (no card; the engine does not build on this box either -
+  the card host builds it with the run).
 - Whether --parallel Inkling reads should ever step aside needs an engine change (the
   `STOP <rid>` reader path would have to keep the slot's kept prefix instead of
   `slot_reset`, ik2_main.cu:10494-10499); out of scope, the driver deliberately does not cut
   them.
-- The continue line for a resumed ik2 read stays numberless. The engine does print its
-  `cached` figure on PP lines, so a follow-up could surface it as the reused figure; left
-  alone (the P124b wording rule: never claim a figure the engine did not report as its
-  resume).
+- Resolved by the review fix: the continue line for a resumed ik2 read is no longer numberless.
+  The driver keeps the engine's PP reuse field (`progress_reuse`, serve/server.py) apart from the
+  no-field case (None), and the line carries the engine's own figure - 0 included, never the old
+  claim (the P124b wording rule now extends to engines that report their figure on PP rather than
+  on a RESUME line).
 - docs/SETTINGS.md's priority section still lists only QFN/GLM as the read-keeping engines
   (it already skipped hy4/mm3/ds4 from P124i/P124j/P124u); left untouched per the plan, same
   as those cards.
