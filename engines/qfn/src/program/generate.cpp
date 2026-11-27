@@ -19702,6 +19702,22 @@ vs.d_skip_usage = gs.d_skip_usage;
             // (a layer split borrows stage by stage: each stage image's K/V up to there and the checkpoint's parts;
             // a batch slot that holds a longer start of this prompt wins as before)
             bool borrow = parked.tokens > std::max(resume, slot_tokens) && conversations.borrows(parked);
+            // P125j: a parked conversation whose read is PAUSED between two layers has its own cells from
+            // the pause token to its paused chunk's end written only for the layers below the pause, and its
+            // pause record and rows stay behind with it - a borrow to parked.tokens there would hand the
+            // borrower half-written cells it treats as fully read, and it decodes over them silently wrong.
+            // Borrowing up to the pause token is fine (everything below it is written for every layer);
+            // deeper is not: the image then goes the whole-adopt way below, which caps the same way.
+            if (borrow) {
+                const strata::core::SavedConversation* donor_img = conversations.find(parked.serial);
+                if (donor_img != nullptr && donor_img->paused() && parked.tokens > donor_img->pause_pos) {
+                    std::fprintf(stderr, "saguaro serve: conversation cache: cannot borrow %lld tokens from a parked "
+                                         "conversation whose read is paused at token %lld (its cells past that are "
+                                         "only partly written): taking it whole instead\n",
+                                 (long long) parked.tokens, (long long) donor_img->pause_pos);
+                    borrow = false;
+                }
+            }
             if (fetched && from_disk > std::max({resume, slot_tokens, parked.tokens})) {
                 // straight to the cards, not through the cache: its K/V are views into the file (no RAM copy), so
                 // this works with parking off too (low RAM)
@@ -20081,14 +20097,36 @@ vs.d_skip_usage = gs.d_skip_usage;
                 adopt_msg_tail(checks);   // (one parked with a message checkpoint)
                 // P125j: a parked conversation can come back WITH a read paused between two layers of a
                 // chunk: the record becomes the live conversation's again and the saved rows go back into
-                // the prompt path, so the next request of that prompt goes on at the saved layer.
+                // the prompt path, so the next request of that prompt goes on at the saved layer.  That is
+                // only sound when this adoption lands exactly at the paused chunk's END - the one place the
+                // session's state is only continued, never trusted past the pause.  A prompt that branches
+                // INSIDE the paused chunk would sit on cells written for the layers below the pause alone:
+                // the resume then starts again at the pause's first token, which reads that chunk over all
+                // of its layers (the pause itself is dead for it - its tokens differ from the chunk's).
                 if (incoming->paused()) {
-                    read_pause.pos = incoming->pause_pos;
-                    read_pause.layer = incoming->pause_layer;
-                    read_pause.tokens = incoming->pause_tokens;
-                    read_pause.ids = incoming->pause_ids;
-                    sp.give_pause(read_pause.pos, read_pause.layer, read_pause.tokens,
-                                  std::move(incoming->pause_rows));
+                    const int64_t pause_end = incoming->pause_pos + incoming->pause_tokens;
+                    if (incoming_tokens == pause_end) {
+                        read_pause.pos = incoming->pause_pos;
+                        read_pause.layer = incoming->pause_layer;
+                        read_pause.tokens = incoming->pause_tokens;
+                        read_pause.ids = incoming->pause_ids;
+                        sp.give_pause(read_pause.pos, read_pause.layer, read_pause.tokens,
+                                      std::move(incoming->pause_rows));
+                    } else if (incoming_tokens > incoming->pause_pos) {
+                        std::fprintf(stderr, "saguaro serve: conversation cache: this prompt branches inside the "
+                                             "parked conversation's paused chunk (paused at token %lld, it shares "
+                                             "%lld): continuing from the pause's first token instead\n",
+                                     (long long) incoming->pause_pos, (long long) incoming_tokens);
+                        incoming_tokens = incoming->pause_pos;
+                        // the conversation is trusted only as deep as every layer wrote: a park of a longer
+                        // `live` would snapshot the partly-written cells into an image that no longer says it
+                        // is paused (its pause died with the diverging branch) - the same cap on the live
+                        // length and the checkpoints, and the read past there rewrites every layer anyway.
+                        live.resize((size_t) incoming->pause_pos);
+                        live_imgs = imgs_below(live_imgs, incoming->pause_pos);
+                        for (auto it = checks.begin(); it != checks.end();)
+                            it = (int64_t) it->ids.size() > incoming->pause_pos ? checks.erase(it) : it + 1;
+                    }
                 }
                 cvec_cached = incoming->cvec;
                 resume = incoming_tokens;
