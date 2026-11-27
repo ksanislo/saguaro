@@ -20,7 +20,9 @@ namespace strata::program::layer_pause {
 
 /// Where a pause goes on.  All -1 / 0 tokens: no pause (the STOP stays a plain between-chunk cancel).
 struct Point {
-    int64_t chunk = -1;    ///< the paused chunk's first token, counted from the run's start
+    int64_t chunk = -1;    ///< the paused chunk's first token, counted from the START OF THE RUN THAT
+                           ///< paused - a log label; run-relative figures do not carry across runs (a
+                           ///< continuation starts inside the old run's chunk grid), so nothing matches on it
     int64_t layer = -1;    ///< the first layer NOT yet run for this chunk
     int64_t tokens = 0;    ///< the chunk's token count (the saved rows' row count)
 };
@@ -42,15 +44,17 @@ inline Point pause_point(int64_t c0, int64_t layer_done, int64_t LB, int64_t LE,
     return p;
 }
 
-/// Whether the run about to be made (tokens [0, n) of the same prompt, chunks of the same `C`) is the one
-/// the pause saved in `p` goes on: the pause sits on this run's chunk grid at `c0` and its chunk is whole
-/// in both runs (the same `min(C, n - c0)`).  The tokens themselves the caller compares; a mismatch is
-/// never wrong, only slower - the chunk is then read again from its first layer, which rewrites the
-/// session's cells with the same values (the PLE history advance over the same tokens is idempotent).
-/// Pure.
+/// Whether the run about to be made (`n` tokens in chunks of the same `C`) can go ON with this pause
+/// rather than read the chunk again: the chunk its rows were saved for must be WHOLE in this run -
+/// `c0` is where that chunk starts IN THIS RUN (the caller has already matched the pause's ABSOLUTE
+/// first token against its own `pos0 + c0`, and compares the chunk's tokens themselves), and the saved
+/// row count must be what this run reads there, `min(C, n - c0)`.  A `p` from another run's grid is
+/// never wrong here, only unapplied: the chunk is then read again from its first layer, which rewrites
+/// the session's cells with the same values (the PLE history advance over the same tokens is
+/// idempotent).  `p.chunk` is the run-relative label of the run that PAUSED and takes no part - a
+/// continuation starts inside that grid (its own c0 is 0 at the paused chunk).  Pure.
 inline bool resumes(const Point& p, int64_t c0, int64_t n, int64_t C) {
-    if (p.chunk < 0 || p.tokens <= 0 || n <= 0 || C <= 0) return false;
-    if (c0 != p.chunk) return false;
+    if (p.tokens <= 0 || c0 < 0 || n <= 0 || C <= 0) return false;
     const int64_t left = n - c0;
     if (left <= 0) return false;
     const int64_t want = left < C ? left : C;

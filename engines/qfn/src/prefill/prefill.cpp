@@ -3227,7 +3227,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         bool lp_resume = false;
         int64_t l_from = LB;
         if (lp_on && pause_.tokens > 0 && pause_.pos0 == pos0 + c0 && pause_.layer > LB && pause_.layer < LE &&
-            strata::program::layer_pause::resumes({c0, pause_.layer, pause_.tokens}, c0, n, C) &&
+            strata::program::layer_pause::resumes({pause_.chunk, pause_.layer, pause_.tokens}, c0, n, C) &&
             pause_.rows.size() == (size_t) T * D &&
             cudaMemcpyAsync(m.R, pause_.rows.data(), pause_.rows.size() * sizeof(float),
                             cudaMemcpyHostToDevice, m.cs) == cudaSuccess &&
