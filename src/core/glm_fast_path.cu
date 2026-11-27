@@ -10029,8 +10029,6 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
     }
     for (Glm5Model* m : parts)   // elastic: the slot's positions backed first
         if (!m->seq_grow(m->seq_index(), n, err)) return false;
-    for (Glm5Model* m : parts)   // P125g: the slot's granules registered before its rows are copied into them
-        if (m->kv_ != nullptr && !kv_pin(m->kv_, n, err)) return false;
     const Glm5Geometry& g = g_;
     const int64_t run = (int64_t) g.d_inner() * g.kda_head_dim + (int64_t) 3 * g.d_inner() * (g.d_conv - 1);
     const int64_t rows2 = (int64_t) 2 * (g.idx_kpool - 1) * g.idx_key;   // a DSA layer's open pool: ik, ig rows
@@ -10054,6 +10052,9 @@ bool Glm5Model::slot_load(const std::string& path, int64_t n_pos, std::string& e
             return false;
         }
     }
+    for (Glm5Model* m : parts)   // P125g: the slot's granules registered before its rows are copied into them -
+        if (m->kv_ != nullptr && !kv_pin(m->kv_, n, err)) return false;   //  once the parts proved ready, so a
+                                                                          //  refused load does not hold the pins
     // the part that runs layer il now (the NextN block: the one that carries it), and il's place among its KDA layers
     // and its DSA layers
     const auto owner = [&](int il) -> Glm5Model* {
@@ -10342,8 +10343,6 @@ bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::
         err = "not a slot of this model";
         return false;
     }
-    for (Glm5Model* m : halves)   // P125g: the slot's granules registered before its rows are copied into them
-        if (m->kv_ != nullptr && !kv_pin(m->kv_, n, err)) return false;
     for (Glm5Model* m : halves) {
         if (m->fast_ == nullptr) {
             err = "no fast path";
@@ -10370,6 +10369,9 @@ bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::
                 return false;
             }
         }
+        // P125g: this part's granules registered once its layout proved right (a slot of another model, or one
+        // this engine cannot lay out, must not leave the pins held) and before any of its rows is written
+        if (m->kv_ != nullptr && !kv_pin(m->kv_, n, err)) return false;
         cudaSetDevice(m->dev_);
         cudaStreamSynchronize(m->fast_->cs);
         if (m->snap_ == nullptr && n_rec > 0 &&
