@@ -5,6 +5,7 @@ started Saguaro server - one server per quant, the same set and flags for all of
 
     python3 tools/quality_score.py http://127.0.0.1:8080 --set gpqa-diamond --set-file gpqa.jsonl
     python3 tools/quality_score.py http://127.0.0.1:8080 --set agentic --set-file agent.jsonl --limit 2 --key-file ~/.saguaro_key
+    python3 tools/quality_score.py http://127.0.0.1:8080 --set agentic          # the built-in five tool-call tasks
 
 Every question is one normal chat request: thinking ON (chat_template_kwargs enable_thinking), temperature 0,
 a max_tokens cap (--max-tokens, default 8192) and a per-question timeout (--timeout, default 600 s). The runner
@@ -19,7 +20,9 @@ The question set comes from a LOCAL file (--set-file): a JSON array or one JSON 
                 ("id" optional; "answer" may also be the choice's text)
   agentic       {"id": "t1", "question": "...", "tools": [the tool schemas, OpenAI form],
                  "expect": {"name": "calc", "arguments": {"expr": "2 + 2"}}}
-NO copyrighted question text ships with Saguaro: the user points at their own file.
+NO copyrighted question text ships with Saguaro: the user points at their own file. --set agentic with no
+--set-file uses the built-in example set below (five tool-call tasks, written for this), so that path is
+testable out of the box.
 """
 from __future__ import annotations
 
@@ -77,6 +80,49 @@ def load_set(path: str | Path) -> list[dict]:
     for i, q in enumerate(questions):
         q.setdefault("id", f"q{i + 1}")
     return questions
+
+
+def _fn(name: str, desc: str, props: dict, required: list) -> dict:
+    return {"type": "function", "function": {"name": name, "description": desc,
+                                             "parameters": {"type": "object", "properties": props,
+                                                           "required": required}}}
+
+
+BUILTIN_AGENTIC_SET = [   # five tool-call tasks, written for this file - no copyrighted text; --set agentic alone uses these
+    {"id": "calc-sum",
+     "question": "You have a calculator tool. Work out 17*23 with it: call calc with exactly that expression "
+                 "as expr, and put nothing else in the call.",
+     "tools": [_fn("calc", "Evaluate one arithmetic expression.",
+                   {"expr": {"type": "string", "description": "the expression, e.g. 17*23"}}, ["expr"])],
+     "expect": {"name": "calc", "arguments": {"expr": "17*23"}}},
+    {"id": "file-stat",
+     "question": "Report how big /srv/data/report.csv is on this machine. Call the file tool with the path "
+                 "exactly as written.",
+     "tools": [_fn("file_stat", "Report size, line count and modified time of one file.",
+                   {"path": {"type": "string", "description": "absolute path of the file"}}, ["path"])],
+     "expect": {"name": "file_stat", "arguments": {"path": "/srv/data/report.csv"}}},
+    {"id": "weather-celsius",
+     "question": "Get today's weather for Rotterdam in Celsius: call the weather tool with the city and the "
+                 "unit, exactly those two arguments.",
+     "tools": [_fn("get_weather", "Current weather for one city.",
+                   {"city": {"type": "string", "description": "city name"},
+                    "units": {"type": "string", "enum": ["celsius", "fahrenheit"]}},
+                   ["city", "units"])],
+     "expect": {"name": "get_weather", "arguments": {"city": "Rotterdam", "units": "celsius"}}},
+    {"id": "json-get",
+     "question": "The file cfg.json has a top-level key \"retries\". Read just that key: call the json tool "
+                 "with the file path and the key exactly as written here.",
+     "tools": [_fn("json_get", "Read one top-level key of a JSON file.",
+                   {"path": {"type": "string"}, "key": {"type": "string"}}, ["path", "key"])],
+     "expect": {"name": "json_get", "arguments": {"path": "cfg.json", "key": "retries"}}},
+    {"id": "search-recent",
+     "question": "Find the newest 5 documents matching retry policy: call the search tool with that exact "
+                 "query and the limit as a number.",
+     "tools": [_fn("search_docs", "Search the document store.",
+                   {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+                   ["query", "limit"])],
+     "expect": {"name": "search_docs", "arguments": {"query": "retry policy", "limit": 5}}},
+]
 
 
 # ------------------------------------------------------------------ answer extraction
@@ -265,7 +311,9 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds per question")
     a = ap.parse_args()
-    if a.set_file:
+    if a.set_name == "agentic" and not a.set_file:
+        questions = [dict(q) for q in BUILTIN_AGENTIC_SET]        # the built-in five, so the tool-call path runs anywhere
+    elif a.set_file:
         try:
             questions = load_set(a.set_file)
         except (OSError, ValueError) as e:
@@ -273,7 +321,8 @@ def main() -> int:
             return 2
     else:
         print("--set-file is needed: Saguaro ships no copyrighted question text (GPQA-Diamond is CC BY 4.0 - "
-              "take your own copy and point --set-file at it).", file=sys.stderr)
+              "take your own copy and point --set-file at it); --set agentic with no file runs the built-in "
+              "five tool-call tasks.", file=sys.stderr)
         return 2
     kind = a.set_name or ("agentic" if any(q.get("expect") is not None for q in questions) else "gpqa-diamond")
     bad = [q["id"] for q in questions
