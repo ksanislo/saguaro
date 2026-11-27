@@ -104,6 +104,9 @@ bool Glm5Model::rows_alloc(std::string& err) {
     int64_t attn_ctx = max_ctx_;   // (the longest context a sequence has: its completed pools' scores)
     for (const SeqCtx& c : seq_) attn_ctx = std::max(attn_ctx, c.max_ctx);
     const int64_t attn_pools = attn_ctx / g.idx_kpool + 1;
+    // P125i (GLM memory report, row J): the ascore rows are carved at a sub-batch grid of pools a row and grown on
+    // use (rows_dsa) - R x attn_pools floats at load was R x 32 KB at 32K ctx and R x 4 MB at 1M
+    const int64_t ascore_n0 = glmfast::glm_score_rows_start(attn_pools, g.idx_kpool);
     const auto f32 = [&](int64_t n) { return (float*) take((size_t) n * sizeof(float)); };
     const auto q8 = [&](int64_t n) { return take((size_t) n / 32 * kQ8); };
     const auto carve = [&] {
@@ -154,8 +157,9 @@ bool Glm5Model::rows_alloc(std::string& err) {
             S->aslot = (int*) take((size_t) g.n_sel_max() * sizeof(int));
             S->apart = (float*) take_all(gf::mla_rows_part_floats(g.n_head, g.kv_lora) * attn_tokens * sizeof(float));
             S->apart_tokens = attn_tokens;
-            S->ascore_n = attn_pools;
-            S->ascore = f32(attn_pools);
+            S->ascore_n = ascore_n0;
+            S->ascore = f32(ascore_n0);
+            S->ascore_max = attn_pools;   // (the side buffer's growth cap, rows_dsa)
         }
     };
     carve();   // the sizes
@@ -177,7 +181,7 @@ bool Glm5Model::rows_alloc(std::string& err) {
                              "the rows' %zu MB\n", dev_, attn_tokens,
                      (size_t) ((2 * R * g.n_head * g.kv_lora * sizeof(float) + 2 * R * g.n_sel_max() * sizeof(int) +
                                 gf::mla_rows_part_floats(g.n_head, g.kv_lora) * attn_tokens * sizeof(float) +
-                                R * attn_pools * sizeof(float)) >> 20),
+                                R * ascore_n0 * sizeof(float)) >> 20),
                      at >> 20);
     if (cudaHostAlloc((void**) &S->tok_h, R * sizeof(int), cudaHostAllocDefault) != cudaSuccess ||
         cudaEventCreateWithFlags(&S->ev_done, cudaEventDisableTiming) != cudaSuccess) {
@@ -196,6 +200,7 @@ void Glm5Model::rows_destroy() {
     if (S == nullptr) return;
     cudaSetDevice(dev_);
     if (S->arena) cudaFree(S->arena);
+    if (S->ascore_x) cudaFree(S->ascore_x);
     if (S->tok_h) cudaFreeHost(S->tok_h);
     if (S->ev_done) cudaEventDestroy(S->ev_done);
     delete S;
@@ -548,12 +553,38 @@ bool Glm5Model::rows_dsa(int il, RowSeq* rw, int n, std::string& err) {
     const bool small = attn && rows_small_on();   // (SAGUARO_GLM_ROWS_SMALL: the rows' scores in one launch too)
     gf::DsaScoreRows sc;
     int n_sc = 0;
+    // P125i (GLM memory report, row J, review fix 1/2): the ascore carve holds a sub-batch grid of pools a row; rows
+    // with more completed pools score into the side buffer, whose stride doubles toward the longest sequence's pool
+    // count (all the rows share it: a verify window's rows of one conversation pass their pools one after the other).
+    // The buffer is grown ONCE for the whole call, ahead of the loop: the rows capture their score pointers at row
+    // time and the launches read them after it (dsa_score_rows / dsa_select_rows), so a mid-loop growth would free
+    // and re-stride the buffer the rows ahead point at.  Allocate before freeing, as score_rows does: a failed
+    // growth leaves the old buffer and its stride in place, nothing captured, and the step fails with the reason.
+    if (attn) {
+        int pools_max = 0;
+        for (int i = 0; i < n; ++i) pools_max = std::max(pools_max, (int) ((rw[i].p + 1) / g.idx_kpool));
+        if (pools_max > S->ascore_n && pools_max > S->ascore_xn) {
+            const int64_t xn = glmfast::glm_score_rows_grow(S->ascore_xn, pools_max, S->ascore_max);
+            float* nx = nullptr;
+            if (cudaMalloc(&nx, (size_t) xn * (size_t) rows_max() * sizeof(float)) != cudaSuccess) {
+                cudaGetLastError();
+                err = "glm rows: the indexer scores of " + std::to_string(xn) + " pools a row did not allocate";
+                return false;
+            }
+            cudaFree(S->ascore_x);
+            S->ascore_x = nx;
+            S->ascore_xn = xn;
+        }
+    }
     for (int i = 0; i < n; ++i) {
         const int64_t p = rw[i].p;
         const int pool_done = (int) ((p + 1) / g.idx_kpool);
         const float* pooled = rw[i].state + (*rw[i].dsa_pool)[(size_t) il];
         const bool all = pool_done <= g.top_pools_max() && gf::dsa_select_all_on();   // (as fast_dsa)
-        float* const score = attn ? S->ascore + (size_t) i * S->ascore_n : F->score;
+        float* score = F->score;
+        if (attn)
+            score = pool_done > S->ascore_n ? S->ascore_x + (size_t) i * (size_t) S->ascore_xn
+                                            : S->ascore + (size_t) i * (size_t) S->ascore_n;
         if (pool_done > 0 && !all && small) {
             sc.iq[n_sc] = rows(S->iq, (int64_t) g.idx_heads * g.idx_key, i);
             sc.pooled[n_sc] = pooled;

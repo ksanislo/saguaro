@@ -707,6 +707,7 @@ Glm5Model::~Glm5Model() {
     if (!el_.empty()) el_destroy();   // (every sequence's reservation, state_ among them)
     else if (state_) cudaFree(state_);
     if (sc_) cudaFree(sc_);
+    if (sc_score_x_) cudaFree(sc_score_x_);
     if (d_pos_) cudaFree(d_pos_);
     if (pool_) cudaFree(pool_);
     if (dev_xq_) cudaFree(dev_xq_);
@@ -816,7 +817,8 @@ bool Glm5Model::load(const std::string& gguf_path, int64_t max_ctx, std::string&
     sc_qabs = take((int64_t) g_.kv_lora * g_.n_head);
     sc_iq = take((int64_t) g_.idx_heads * g_.idx_key);
     sc_iw = take(g_.idx_heads);
-    sc_score = take(max_pools);
+    sc_score_cap_ = glmfast::glm_score_rows_start(max_pools, g_.idx_kpool);   // (P125i: grown on use, see score_rows)
+    sc_score = take(sc_score_cap_);
     sc_cells = take(g_.n_sel_max());
     sc_attn = take((int64_t) g_.v_head * g_.n_head);
     sc_gate = take(ff_max);
@@ -1737,7 +1739,7 @@ static std::vector<int> glm_search_bounds(const std::string& pack_dir, int64_t m
     // elastic pool a fixed amount, without it one whole context's (per DSA layer)
     double el_card = 0.0;
     if (const char* ev = getenv("SAGUARO_GLM_ELASTIC"); fast && kv_cells == 0 && ev != nullptr && std::atoi(ev) != 0) {
-        const double ring = (double) std::min<int64_t>(max_ctx, 8192 + 64);
+        const double ring = (double) std::min<int64_t>(max_ctx, glmfast::kScoreGridPositions);
         const double grow = 4.0 * (lat + (double) g.idx_key * max_pools);
         const char* kv = getenv("SAGUARO_GLM_ELASTIC_KV_GB");
         const char* pv = getenv("SAGUARO_GLM_ELASTIC_POOL");
@@ -2401,6 +2403,28 @@ bool Glm5Model::forward_pipeline(const std::vector<int32_t>& tokens, std::vector
     return true;
 }
 
+// P125i (GLM memory report, row H): the reference path step's indexer score row - one entry a completed pool.  The
+// arena carve holds a sub-batch grid of pools (sc_score_cap_, glm_score_rows_start); once the completed pools pass
+// it a side buffer doubles toward the context's max_pools, its bytes counted into sc_bytes_ so the activations
+// figure follows the longest context actually decoded, not --max-context.
+bool Glm5Model::score_rows(int64_t pools, float*& out, std::string& err) {
+    const int64_t cap_now = sc_score_x_ != nullptr ? sc_score_xcap_ : sc_score_cap_;
+    if (pools <= cap_now) {
+        out = sc_score_x_ != nullptr ? sc_score_x_ : sc_ + sc_score;
+        return true;
+    }
+    const int64_t cap = glmfast::glm_score_rows_grow(cap_now, pools, max_ctx_ / g_.idx_kpool);
+    float* nx = nullptr;
+    GM_CHECK(cudaMalloc(&nx, (size_t) cap * sizeof(float)), err);
+    if (sc_score_x_ != nullptr) sc_bytes_ -= (uint64_t) sc_score_xcap_ * sizeof(float);
+    cudaFree(sc_score_x_);
+    sc_score_x_ = nx;
+    sc_score_xcap_ = cap;
+    sc_bytes_ += (uint64_t) cap * sizeof(float);
+    out = sc_score_x_;
+    return true;
+}
+
 bool Glm5Model::step_layers(int64_t p, std::string& err) {
     const Glm5Geometry& g = g_;
     float* const S = state_;
@@ -2515,14 +2539,16 @@ bool Glm5Model::step_layers(int64_t p, std::string& err) {
             // selection runs whenever pools exist OR the tail is on; only tail-off with no pools
             // has nothing to attend to
             if (pool_done > 0 || g.idx_select_tail) {
+                float* score = nullptr;   // (P125i: the growable score row - a score a completed pool)
+                if (!score_rows(pool_done, score, err)) return false;
                 if (pool_done > 0)
                     maya::kernels::glm_dsa_score(A + sc_iq, S + dsa_pool_[(size_t) il], A + sc_iw, g.idx_key,
-                                                   g.idx_heads, 1, (int) pool_done, A + sc_score, nullptr);
+                                                   g.idx_heads, 1, (int) pool_done, score, nullptr);
                 const int top_pools = (int) std::min<int64_t>(g.top_pools_max(), pool_done);
                 const int n_sel = g.idx_kpool * top_pools + (g.idx_select_tail ? g.idx_kpool - 1 : 0);
                 const int p32 = (int) p;
                 GM_CHECK(cudaMemcpy(d_pos_, &p32, sizeof(int), cudaMemcpyHostToDevice), err);
-                maya::kernels::glm_dsa_select(A + sc_score, (int) pool_done, g.idx_kpool, top_pools,
+                maya::kernels::glm_dsa_select(score, (int) pool_done, g.idx_kpool, top_pools,
                                                 g.idx_select_tail, 1, n_sel, d_pos_, (int*) (A + sc_cells),
                                                 nullptr);
                 maya::kernels::glm_mla_attention(A + sc_qabs, lat, (const int*) (A + sc_cells),
@@ -3719,7 +3745,8 @@ bool maya::core::Glm5Model::load_pack(const std::string& pack_dir, int64_t max_c
     sc_qabs = take((int64_t) g_.kv_lora * g_.n_head);
     sc_iq = take((int64_t) g_.idx_heads * g_.idx_key);
     sc_iw = take(g_.idx_heads);
-    sc_score = take(max_pools);
+    sc_score_cap_ = glmfast::glm_score_rows_start(max_pools, g_.idx_kpool);   // (P125i: grown on use, see score_rows)
+    sc_score = take(sc_score_cap_);
     sc_cells = take(g_.n_sel_max());
     sc_attn = take((int64_t) g_.v_head * g_.n_head);
     sc_gate = take(ff_max);

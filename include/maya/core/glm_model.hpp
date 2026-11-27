@@ -1278,6 +1278,14 @@ private:
     int64_t sc_score = 0, sc_cells = 0, sc_attn = 0, sc_gate = 0, sc_up = 0, sc_h = 0, sc_dn = 0;
     int64_t sc_moe = 0, sc_sh = 0, sc_ffn = 0, sc_mixer = 0, sc_head = 0, sc_logits = 0;
     int64_t sc_ids = 0, sc_rw = 0;
+    // P125i (GLM memory report, row H): sc_score holds one indexer score per completed pool, so it is carved at
+    // glm_score_rows_start(max_pools) pools (src/core/glm_memory.hpp) - a sub-batch grid, not the whole
+    // --max-context - and a step whose completed pools pass the carve grows a side buffer, doubling toward
+    // max_pools; its bytes move into sc_bytes_ as it does, keeping the VRAM line honest.
+    int64_t sc_score_cap_ = 0, sc_score_xcap_ = 0;
+    float* sc_score_x_ = nullptr;
+    /// The step's score row in `out`: the arena carve while it holds `pools`, else the grown side buffer
+    bool score_rows(int64_t pools, float*& out, std::string& err);
 };
 
 /// What a part with these layer kinds lends the prompt path for a chunk of T tokens, its prestage buffer aside
