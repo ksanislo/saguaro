@@ -5269,9 +5269,10 @@ std::vector<Glm5Model::VramReport> Glm5Model::vram_report() const {
     std::vector<VramReport> out;
     int cur = 0;
     cudaGetDevice(&cur);
-    // PLAN-context-panel, output only: the pinned host K/V this engine allocated for KV streaming (0 when it does
-    // not stream) - the engine's figure, carried on every part's line; this engine keeps no conversations parked
-    // in RAM outside its slots, so every line's `parked` is 0
+    // PLAN-context-panel, output only: the pinned host K/V this engine holds for KV streaming NOW (0 when it does
+    // not stream) - P125g: the granules written so far, read again every time the line is re-printed, so a
+    // re-printed line follows the growing and the giving-back; the engine's figure, carried on every part's line;
+    // this engine keeps no conversations parked in RAM outside its slots, so every line's `parked` is 0
     const uint64_t host_room = kv_host_bytes();
     for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         const FastState* F = m->fast_;
@@ -5288,7 +5289,7 @@ std::vector<Glm5Model::VramReport> Glm5Model::vram_report() const {
         cudaGetLastError();
         r.weights = m->w_arena_bytes_;
         r.kv = m->state_bytes_;
-        r.kv_ram = m->kv_ != nullptr ? m->kv_->host_bytes : 0;
+        r.kv_ram = m->kv_ != nullptr ? m->kv_->pinned_now() : 0;   // P125g: what it holds pinned now
         r.act = m->sc_bytes_ + (F != nullptr ? F->arena_bytes + F->scratch_bytes : 0);
         r.drafter = m->mtp_arena_bytes_ + (m->dflash_ ? m->dflash_->bytes() : 0);
         if (F != nullptr) {
@@ -5325,7 +5326,7 @@ std::vector<std::array<uint64_t, 5>> Glm5Model::vram_fingerprint() const {
         std::array<uint64_t, 5> r;
         r[0] = m->elastic() ? m->el_held() : m->state_bytes_;
         r[1] = m->elp_ != nullptr ? m->el_pool_mapped() : (F != nullptr ? F->pool_bytes : 0);
-        r[2] = m->kv_ != nullptr ? m->kv_->host_bytes : 0;
+        r[2] = m->kv_ != nullptr ? m->kv_->pinned_now() : 0;   // P125g: the same bytes as the VRAM line's kv_ram
         r[3] = m->prefill_borrow_bytes();
         r[4] = m->vision_lend_bytes();
         out.push_back(r);

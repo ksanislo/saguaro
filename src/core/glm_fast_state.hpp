@@ -1032,7 +1032,8 @@ struct Glm5Model::FastState {
 
 // KV streaming (Glm5Model::kv_stream_setup): per DSA layer of this part (the NextN block's too), its latent cache in
 // pinned host memory - the authoritative copy, position order - and the residency map of its VRAM slots, which are
-// state_ + dsa_lat_[il] (slots * page rows).
+// state_ + dsa_lat_[il] (slots * page rows).  Since P125g the copy lives in a GranuleArena: the whole range is
+// reserved at the load and only the granules a conversation has written are pinned (host_bytes stays the ceiling).
 struct Glm5Model::KvStream {
     int64_t slots = 0;     // VRAM pages a layer
     int page = 4;          // positions a page: one indexer pool
@@ -1052,6 +1053,9 @@ struct Glm5Model::KvStream {
     maya::core::GranuleArena arena;
     std::vector<uint64_t> pin_slabs;
     uint64_t slab_bytes = 0;
+    // what the arena holds pinned NOW (the granules written so far), or the whole cache on the eager fallback -
+    // the figure the INFO kv_ram_bytes, the VRAM lines and the Context card carry
+    uint64_t pinned_now() const { return arena.empty() ? host_bytes : arena.pinned_bytes(); }
 };
 
 // KV streaming's two hooks for a DSA attention at decode (the token path, the verify window, the rows of several

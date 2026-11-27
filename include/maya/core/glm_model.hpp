@@ -155,7 +155,9 @@ public:
         // (PLAN-context-panel, output only) the K/V budget fields the Monitor's Context panel aggregates: kv_room
         // is what this part can hold for chat state - the sequence state it holds now plus, with the elastic
         // context on, the expert pool's room the contexts can still back themselves out of (the fixed carve alone
-        // without it); kv_ram_room is the pinned host K/V the engine allocated for KV streaming - its own figure,
+        // without it); kv_ram_room is the pinned host K/V the engine holds for KV streaming NOW (P125g: the cache
+        // granules written so far - it grows as a conversation writes and goes back when it resets, parks or ends,
+        // so a re-printed line follows it; the ceiling it may grow to is the load line's figure) - its own figure,
         // the same on every part's line, 0 when it does not stream; parked: this engine parks nothing in RAM
         // outside its slots, so 0.
         uint64_t kv_room = 0, kv_ram_room = 0, parked = 0;

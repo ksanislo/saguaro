@@ -1001,9 +1001,17 @@ Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::
         k::kv_stream_reset(m, nullptr);
     }
     if (cudaDeviceSynchronize() != cudaSuccess) return fail("KV streaming: the residency maps did not reset");
-    std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM (%.2f "
-                         "GB), the latent cache in %.2f GB of pinned RAM\n", dev_, (long long) cells, (long long) ctx,
-                 ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9, (double) K->host_bytes / 1e9);
+    // P125g step 4 (PLAN-p125g): the line names what is PINED NOW at the load and what one conversation at this
+    // context can grow it to - the arena starts at 0 MiB, the old whole-max allocation started at %.2f GB.  The
+    // eager fallback (no lazy arena) has it all pinned at the load, as it always did, and says so the same way.
+    // tools/mem_vs_ctx.py reads the "… of pinned RAM" figure as the engine's declared pin: it says what is pinned
+    // now, like the INFO context= line's kv_ram_bytes.
+    const uint64_t pin0 = K->pinned_now();
+    std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM "
+                         "(%.2f GB), pinned latent cache grows with use: %llu MiB of pinned RAM at start, up to "
+                         "%.2f GB\n", dev_, (long long) cells, (long long) ctx,
+                 ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9, (unsigned long long) (pin0 >> 20),
+                 (double) K->host_bytes / 1e9);
     return K;
 }
 
@@ -1091,7 +1099,7 @@ Glm5Model::KvStreamStats Glm5Model::kv_stream_stats() const {
                 r.misses += c.misses;
                 r.overflow = r.overflow || c.overflow;
             }
-            r.host_gb += (double) K->host_bytes / 1e9;
+            r.host_gb += (double) K->pinned_now() / 1e9;   // P125g: what it holds pinned now, not what it can grow to
             r.block_bytes = K->page * K->row_bytes;
         }
     }
@@ -1114,7 +1122,7 @@ uint64_t Glm5Model::kv_host_bytes() const {   // the same walk as kv_stream_stat
     for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         std::vector<const KvStream*> ks = {m->kv_};
         for (const SeqCtx& c : m->seq_) ks.push_back(c.kv);
-        for (const KvStream* K : ks) if (K != nullptr) n += K->host_bytes;
+        for (const KvStream* K : ks) if (K != nullptr) n += K->pinned_now();   // pinned now (P125g), not the ceiling
     }
     return n;
 }
