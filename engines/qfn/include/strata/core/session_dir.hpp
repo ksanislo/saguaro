@@ -123,6 +123,13 @@ public:
     void begin_exit();
     // Write every queued image now and wait until they are on disk.
     void flush();
+    // The same, but waited for only until `deadline`, logged at start and at its end or timeout (`what` names the
+    // phase: "exit").  false: writes were still queued or running when the deadline passed - drop_queued() gives up
+    // on them so the exit is never blocked by them.
+    bool flush_until(std::chrono::steady_clock::time_point deadline, const char* what);
+    // The save ran out of time: forget the queued writes and cancel the running one (it stops at its next block).
+    // What is on disk stays what the last turn left; the next turn save of a dropped one is written whole.
+    void drop_queued();
     size_t files() const;
     uint64_t bytes() const;
 

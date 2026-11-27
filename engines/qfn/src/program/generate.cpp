@@ -23220,12 +23220,14 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
         }
         if (sdir) {   // --session-dir: the active conversation too, then everything queued, before the engine ends
+            std::fprintf(stderr, "saguaro serve: session dir: saving the live conversation and %zu slot(s) at exit\n",
+                         bs.size());
             sdir->begin_exit();
             park_current(0);
             for (int b = 0; b < (int) bs.size(); ++b) persist_slot(b, false, {}, true, "the engine ends");   // after it: they supersede it
-            sdir->flush();
-            std::fprintf(stderr, "saguaro serve: session dir: %zu file(s), %llu MiB on disk at exit\n", sdir->files(),
-                         (unsigned long long) (sdir->bytes() >> 20));
+            if (sdir->flush_until(std::chrono::steady_clock::now() + std::chrono::duration<double>(10.0), "exit"))
+                std::fprintf(stderr, "saguaro serve: session dir: %zu file(s), %llu MiB on disk at exit\n",
+                             sdir->files(), (unsigned long long) (sdir->bytes() >> 20));
         }
         save_profile("exit");   // #477: QUIT, or the server closed stdin
 #if defined(STRATA_GPU_METAL)

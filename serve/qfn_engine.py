@@ -2703,26 +2703,39 @@ class StrataEngine:
     def close(self):
         """End the engine process: STOP + QUIT first (the engine frees its memory itself - unpinning tens of GB can take
         a while; ENGINE_QUIT_WAIT_S), then terminate (ENGINE_TERM_WAIT_S), then kill (ENGINE_KILL_WAIT_S).  Raises
-        EngineStuck when it still runs after all three."""
+        EngineStuck when it still runs after all three.  Each wait prints one line when it starts and one when the
+        engine ended or the wait ran out: a slow exit says where it was (P125a's 6-minute shutdown was silent)."""
         if self.proc is None:
             return
+        t0 = time.monotonic()
         try:
             if self.proc.poll() is None:
                 try:
                     # STOP first: a request still running ends at its next step instead of being waited for (the
                     # engine reads stdin on its own thread; QUIT behind a long answer would sit in its queue)
+                    print(f"[saguaro] stopping the engine: STOP + QUIT, waiting up to {ENGINE_QUIT_WAIT_S:.0f} s for "
+                          f"it", flush=True)
                     self.proc.stdin.write("STOP\nQUIT\n")
                     self.proc.stdin.flush()
                     self.proc.stdin.close()  # Windows' detached stdin reader must see EOF before shutdown
                     self.proc.wait(timeout=ENGINE_QUIT_WAIT_S)
+                    print(f"[saguaro] the engine ended on QUIT after {time.monotonic() - t0:.1f} s", flush=True)
                 except (OSError, ValueError, subprocess.TimeoutExpired):
+                    print(f"[saguaro] QUIT did not end the engine after {time.monotonic() - t0:.1f} s: terminate, "
+                          f"waiting up to {ENGINE_TERM_WAIT_S:.0f} s", flush=True)
                     self.proc.terminate()
                     self.proc.wait(timeout=ENGINE_TERM_WAIT_S)
+                    print(f"[saguaro] the engine ended on terminate after {time.monotonic() - t0:.1f} s", flush=True)
         except subprocess.TimeoutExpired:
+            print(f"[saguaro] terminate did not end the engine after {time.monotonic() - t0:.1f} s: killing, waiting "
+                  f"up to {ENGINE_KILL_WAIT_S:.0f} s", flush=True)
             self.proc.kill()
             try:
                 self.proc.wait(timeout=ENGINE_KILL_WAIT_S)
+                print(f"[saguaro] the engine was killed and reaped after {time.monotonic() - t0:.1f} s", flush=True)
             except subprocess.TimeoutExpired:
+                print(f"[saguaro] the engine still runs {ENGINE_KILL_WAIT_S:.0f} s after SIGKILL: it is still "
+                      f"releasing GPU/RAM (EngineStuck)", flush=True)
                 raise EngineStuck("Strata is still releasing GPU/RAM; retry unloading after it exits") from None
         except OSError:
             pass

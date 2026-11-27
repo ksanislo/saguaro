@@ -1528,6 +1528,13 @@ void FileExpertSource::close() {
     io_stop();
     inputs_.clear();
     if (complement_arena_ != nullptr) {
+        // P125d: releasing tens of GiB of page-locked RAM is driver work of seconds to minutes and cannot be bounded
+        // in userspace - log it so the next slow exit says where the minute went
+        const auto t_pin = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "saguaro serve: releasing %.1f GiB of pinned experts (%s)\n",
+                     (double) complement_bytes_ / 1073741824.0,
+                     complement_pinned_ && !complement_registered_ ? "cudaFreeHost" :
+                     complement_registered_ ? "cudaHostUnregister + unlock + free" : "free");
         if (complement_pinned_ && !complement_registered_) (void) cudaFreeHost(complement_arena_);
         else {
             if (complement_registered_) (void) cudaHostUnregister(complement_arena_);
@@ -1535,6 +1542,8 @@ void FileExpertSource::close() {
                 strata::platform::unlock_resident((uint8_t*) complement_arena_ + complement_lock_off_, complement_locked_);
             std::free(complement_arena_);
         }
+        std::fprintf(stderr, "saguaro serve: pinned experts released in %.0f ms\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_pin).count());
     }
     if (xstage_ != nullptr) {
         if (xstage_pinned_) (void) cudaFreeHost(xstage_);
