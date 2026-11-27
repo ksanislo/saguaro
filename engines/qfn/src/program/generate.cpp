@@ -35,6 +35,7 @@
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/park_policy.hpp"
 #include "strata/core/park_release.hpp"
+#include "strata/core/resident_policy.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/foresight_swap.hpp"
@@ -6418,6 +6419,47 @@ int main(int argc, char** argv) {
     }
     strata::core::ArenaExpertSource arena_src;
     strata::core::ExpertSource* srcp = nullptr;
+    // P124x (a): the resident tier keeps a real margin beside it (resident_policy.hpp).  `--resident-budget-gib`
+    // names what the tier may pin; the shared K/V pool (the live streamed K/V and the parked conversations, one
+    // budget), the turn-save captures it bounds and the host's own working set - OS, harness, and the page cache
+    // the file tier reads through - have to fit in what is left.  On a 96 GB host the asked 68 GiB reached 89 GiB
+    // of RSS, 2-5 GiB of swap and 100k+ major faults before the aborts (mortar, 2026-11-24); a budget that keeps
+    // the margin is untouched, one that does not is cut to it, said.  SAGUARO_RESIDENT_BUDGET_CAP=0 keeps the
+    // asked budget as it is (every rule here has its knob, review N2): an operator who measured the box wins.
+    static const bool resident_cap_off = [] { const char* v = std::getenv("SAGUARO_RESIDENT_BUDGET_CAP");
+                                              return v != nullptr && std::atoi(v) == 0; }();
+    if (o.resident_budget > 0 && !resident_cap_off) {
+        const uint64_t host_total = strata::platform::total_physical_memory();
+        const uint64_t kv_pool = strata::core::qsa_kv_bytes_per_cell(g) *
+                                 (uint64_t) std::max<int64_t>(0, g.n_qsa_layers()) * (uint64_t) o.max_context *
+                                 (uint64_t) std::max(o.batch, 1);
+        const uint64_t cap = strata::core::resident::budget_cap(host_total, kv_pool);
+        if (host_total > 0 && o.resident_budget > cap) {
+            if (cap == 0)
+                // the tightest hosts: there is no budget that fits.  Said loudly and the asked figure kept -
+                // clamping to zero would silently flip the box out of the resident mode its setup named (N2)
+                std::fprintf(stderr, "saguaro generate: resident budget: this %.2f GiB host has no room for any tier beside "
+                                     "its K/V pool and captures (%.2f GiB) and the host's own margin (%.2f GiB): "
+                                     "--resident-budget-gib %.2f is kept as asked, but a host this full swaps every expert "
+                                     "read - shrink --max-context/--batch, or give the box more RAM (P124x)\n",
+                             (double) host_total / 1073741824.0,
+                             (double) strata::core::resident::runtime_bytes(kv_pool) / 1073741824.0,
+                             (double) strata::core::resident::host_margin_bytes(host_total) / 1073741824.0,
+                             (double) o.resident_budget / 1073741824.0);
+            else {
+                std::fprintf(stderr, "saguaro generate: resident budget: %.2f GiB of this host's %.2f GiB are kept for the tier, "
+                                     "not the %.2f GiB asked (--resident-budget-gib): the K/V pool and its captures take %.2f "
+                                     "GiB beside it and the host keeps %.2f GiB for itself, its other programs and the file "
+                                     "tier's page cache - a host with no margin swaps every expert read (P124x; "
+                                     "SAGUARO_RESIDENT_BUDGET_CAP=0 keeps the asked budget)\n",
+                             (double) cap / 1073741824.0, (double) host_total / 1073741824.0,
+                             (double) o.resident_budget / 1073741824.0,
+                             (double) strata::core::resident::runtime_bytes(kv_pool) / 1073741824.0,
+                             (double) strata::core::resident::host_margin_bytes(host_total) / 1073741824.0);
+                o.resident_budget = cap;
+            }
+        }
+    }
     if (o.mmap_experts) {
         // FileExpertSource maps the pack's experts.bin: a canonical pack has it; a native (IQ) pack has it when
         // built with `tools/iq_pack.py --experts-bin` (the per-layer blob sizes of its layout, PR #121).  The low-RAM
