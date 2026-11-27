@@ -90,3 +90,4 @@ build-vision.bat
 /data/golden/
 /third_party/metal-cpp/
 /third_party/metal-cpp_*.zip
+/.python/
