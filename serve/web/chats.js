@@ -510,6 +510,9 @@ export async function answer(resumeJob = null) {
     for (;;) {
       if (controller.signal.aborted) throw new DOMException("stopped", "AbortError");
       if (Date.now() - t0 > 600000) throw gone;
+      // P125n: behind llama-swap a reconnect is an upstream request - it would load a model the card let go. Wait the
+      // gate out instead (the server keeps a running answer for strata_resume; an unloaded one the next message starts).
+      if (unloaded()) { await sleepOrVisible(5000); continue; }
       try {
         const r2 = await fetch(`v1/strata/stream?id=${encodeURIComponent(jobId)}&from=${nRecv}`,
                                {headers: headers(false), signal: controller.signal});
@@ -619,8 +622,9 @@ export function cancelEdit(clear = true) {
 export function stopAnswer() {
   const b = S.busy;
   if (!b) return;
-  // the server runs a dropped answer on, so Stop says so explicitly (then the stream ends with it)
-  if (b.job) fetch("v1/strata/cancel", {method: "POST", headers: headers(true), body: JSON.stringify({id: b.job})}).catch(() => {});
+  // the server runs a dropped answer on, so Stop says so explicitly (then the stream ends with it); P125n: while the
+  // llama-swap gate is closed nothing runs on the server to cancel, and the POST would be an upstream request waking it
+  if (b.job && !unloaded()) fetch("v1/strata/cancel", {method: "POST", headers: headers(true), body: JSON.stringify({id: b.job})}).catch(() => {});
   b.controller.abort();
 }
 
