@@ -1577,7 +1577,8 @@ bool qsa_slots_grow(const std::vector<const QsaState*>& states, int64_t cells) {
                     b.free.pop_back();
                     return h;
                 })) {
-                std::fprintf(stderr, "saguaro: elastic slots: mapping %zu chunks on CUDA%d failed\n", fresh.size(), dev);
+                std::fprintf(stderr, "saguaro: elastic slots: mapping %zu chunks on CUDA%d failed: %s\n", fresh.size(), dev,
+                             strata::core::vmm_last_error());   // P124e round 6: the driver's words, never "no error"
                 for (const int64_t c : fresh)   // never mapped and not cleared
                     if (const strata::core::VmmChunk h = p.range.unmap(c)) b.free.push_back(h);
                 return false;
@@ -1668,16 +1669,19 @@ void report_vmm_grow_failure(int dev, const char* what, int64_t chunks, uint64_t
                                                                  fb, tb, room.relief_ask, room.relief_got);
     std::fprintf(stderr, "saguaro: %s\n", line.c_str());
 }
-// Maps the chunks `cells` cells need in every follow array, from the driver's own fresh chunks, and fills them
-// (-1 / the ring formula).  With the pool's lock held - and NEVER the relief caller: the relief hook runs on a
-// thread that takes this very lock through the slot budget, so the room is probed OUTSIDE the lock first
-// (`follow_room`).  false: the driver refused (what landed stays landed - a page table never reads past its
-// live blocks, so half a grow is harmless; nothing is stepped down).  `room` says what the probe asked the
-// card's relief and what it gave - the failure line names it (P124e round 6: never "no error").
-bool follow_map_locked(SlotPool& p, int64_t cells, const strata::core::VmmRoomStat& room) {
+// Maps the chunks `cells` cells need in every follow array and fills them (-1 / the ring formula).  With the
+// pool's lock held - and NEVER the relief caller: the relief hook runs on a thread that takes this very lock
+// through the slot budget, so the room is TAKEN OUTSIDE the lock first (`follow_room`), and every chunk this
+// maps comes from `got`, already in hand (P124e round 6: the cache has given way before the map is tried).
+// false: the driver refused (what landed stays landed - a page table never reads past its live blocks, so half
+// a grow is harmless; nothing is stepped down).  `room` says what the relief was asked and what it gave - the
+// failure line names it (P124e round 6: never "no error").
+bool follow_map_locked(SlotPool& p, int64_t cells, std::vector<strata::core::VmmChunk>& got,
+                       const strata::core::VmmRoomStat& room) {
     const uint64_t G = p.range.granularity();
     const int dev = p.range.device();
     const strata::core::OnDevice on(dev);
+    size_t gi = 0;
     for (size_t ai = 0; ai < p.arr.size(); ++ai) {
         if (!follow_array(p.arr[ai])) continue;
         const auto& a = p.arr[ai];
@@ -1687,7 +1691,7 @@ bool follow_map_locked(SlotPool& p, int64_t cells, const strata::core::VmmRoomSt
         for (int64_t c = c0; c < c1; ++c)
             if (!p.range.mapped(c)) fresh.push_back(c);
         if (fresh.empty()) continue;
-        if (!p.range.map_range(c0, c1, [] { return (strata::core::VmmChunk) 0; })) {
+        if (!p.range.map_range(c0, c1, [&] { return gi < got.size() ? got[gi++] : (strata::core::VmmChunk) 0; })) {
             report_vmm_grow_failure(dev, "mapped", (int64_t) fresh.size(), G, room);
             for (const int64_t c : fresh)   // what the probe promised but the map still could not take
                 if (const strata::core::VmmChunk h = p.range.unmap(c)) strata::core::vmm_chunk_free(h);
@@ -1700,28 +1704,26 @@ bool follow_map_locked(SlotPool& p, int64_t cells, const strata::core::VmmRoomSt
     }
     return true;
 }
-// Can `dev` hand out `n` chunks of G bytes right now?  Asks the card's relief ONCE for the shortfall (the expert
-// cache giving way, the plan's take-from-experts in VRAM) and retries.  NO layer lock may be held: the relief's
-// give path takes the slot budget's lock.  Chunks are probed and given straight back; the map re-takes them.
-// P124e round 6: `st` records what the relief was asked and what it gave, for the failure line.
-bool follow_room(int dev, int64_t n, uint64_t G, bool may_relief, strata::core::VmmRoomStat* st = nullptr) {
+// The room a grow needs, TAKEN and HELD before the mapping is tried (P124e round 6, manager card - the card's
+// order, in vmm_grow.hpp).  Probing one chunk at a time (make, free, make, ...) proved only that ONE chunk fits
+// at a time: with the card nearly full it promised GiBs it did not have, never asked the relief for room (a
+// single chunk always fit), and the map then failed mid-run - the 546K conversation, "could not be mapped: no
+// error".  Now every chunk is in hand before the map starts, and the driver's first refusal asks the card's
+// relief ONCE for the whole remaining shortfall (the expert cache's coldest residents first, the plan's
+// take-from-experts in VRAM).  NO layer lock may be held: the relief's give path takes the slot budget's lock.
+// false: the room never arrived; `got` holds the chunks made anyway (the caller frees them) and `st` says what
+// was asked and given, for the failure line.
+bool follow_room(int dev, int64_t n, uint64_t G, bool may_relief, std::vector<strata::core::VmmChunk>& got,
+                 strata::core::VmmRoomStat& st) {
     const strata::core::OnDevice on(dev);
-    for (int64_t i = 0; i < n; ++i) {
-        strata::core::VmmChunk h = strata::core::vmm_chunk_new(dev);
-        if (h == 0 && may_relief) {
-            const uint64_t ask = (uint64_t) (n - i) * G;
-            const uint64_t gave = vram_relief(dev, ask);
-            if (st != nullptr) { st->relief_ask += ask; st->relief_got += gave; }   // (the amounts the line names)
-            h = strata::core::vmm_chunk_new(dev);
-        }
-        if (h == 0) return false;
-        strata::core::vmm_chunk_free(h);
-    }
-    return true;
+    return strata::core::vmm_grow_room(
+        n, G, [&] { return (strata::core::GrowChunk) strata::core::vmm_chunk_new(dev); },
+        [&](uint64_t bytes) { return vram_relief(dev, bytes); }, may_relief, got, st);
 }
 }  // namespace
 
-// The grow, in its three steps (measure - probe/relief, lock-free - map), so no lock is carried into the relief.
+// The grow, in its three steps (measure - take the room + relief, lock-free - map), so no lock is carried into
+// the relief, and the relief has run before the map is tried (P124e round 6).
 bool qsa_follow_grow_at(const QsaState& st, int64_t cells) {
     if (st.follow_elastic < 0 || !g_follow_live.load()) return true;
     int64_t need = 0;
@@ -1739,16 +1741,22 @@ bool qsa_follow_grow_at(const QsaState& st, int64_t cells) {
         g_dev_failed.store(false);
         return true;
     }
-    strata::core::VmmRoomStat room;   // what the relief was asked and what it gave, for the failure line
-    if (!follow_room(dev, need, G, true, &room)) {
+    // P124e (round 6, manager card): the chunks are TAKEN and HELD first - the expert cache gives way (coldest
+    // first) at the driver's first refusal, for the whole shortfall - and only then is the map tried.  A room
+    // that never arrives says so here (it said nothing at all before), and the caller's ERR says VRAM, not RAM.
+    std::vector<strata::core::VmmChunk> got;
+    strata::core::VmmRoomStat room;
+    if (!follow_room(dev, need, G, true, got, room)) {
         const strata::core::OnDevice on(dev);
-        report_vmm_grow_failure(dev, "grown", need, G, room);   // (P124e round 6: it said NOTHING here before)
+        report_vmm_grow_failure(dev, "grown", need, G, room);
+        for (const strata::core::VmmChunk h : got) strata::core::vmm_chunk_free(h);
         g_dev_failed.store(true);
         return false;
     }
     std::lock_guard<std::mutex> lk(g_slot_mu);
     SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
-    const bool ok = p.follow && follow_map_locked(p, cells, room);
+    const bool ok = p.follow && follow_map_locked(p, cells, got, room);
+    for (const strata::core::VmmChunk h : got) strata::core::vmm_chunk_free(h);   // (what the map never took)
     g_dev_failed.store(!ok);
     return ok;
 }
@@ -1823,7 +1831,8 @@ bool qsa_follow_start(const QsaState& st) {   // (init: the driver's own room, n
     if (st.follow_elastic < 0) return true;
     std::lock_guard<std::mutex> lk(g_slot_mu);
     SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
-    return follow_map_locked(p, follow_start_cells());
+    std::vector<strata::core::VmmChunk> none;   // (the load's start step maps the driver's fresh chunks, as ever)
+    return follow_map_locked(p, follow_start_cells(), none, strata::core::VmmRoomStat());
 }
 uint64_t qsa_follow_trim(const QsaState& st, int64_t cells) {
     if (st.follow_elastic < 0 || !g_follow_live.load()) return 0;
@@ -1852,7 +1861,8 @@ bool qsa_follow_back_whole(const QsaState& st) {
     if (st.follow_elastic < 0) return true;
     std::lock_guard<std::mutex> lk(g_slot_mu);
     SlotPool& p = *g_slot_pools[(size_t) st.follow_elastic];
-    return !p.follow || follow_map_locked(p, st.max_cells);
+    std::vector<strata::core::VmmChunk> none;   // (the fallback takes the driver's chunks itself, as it always did)
+    return !p.follow || follow_map_locked(p, st.max_cells, none, strata::core::VmmRoomStat());
 }
 bool qsa_dev_pin_failed() { return g_dev_failed.load(); }
 uint64_t qsa_follow_reserved_bytes(const QsaState& st) {
@@ -1891,13 +1901,17 @@ struct ScoresPool {
 };
 std::vector<std::unique_ptr<ScoresPool>> g_scores_pools;
 std::mutex g_scores_mu;
-bool scores_grow_locked(ScoresPool& sp, int64_t cells, const strata::core::VmmRoomStat& room = strata::core::VmmRoomStat()) {
+// Maps the scratch's first `cells`-worth of chunks from `got` - the chunks follow_room took and held BEFORE the
+// map is tried (P124e round 6).  With the scratch's lock held; `room` is for the failure line.
+bool scores_grow_locked(ScoresPool& sp, int64_t cells, std::vector<strata::core::VmmChunk>& got,
+                        const strata::core::VmmRoomStat& room) {
     const uint64_t G = sp.range.granularity();
     const strata::core::OnDevice on(sp.range.device());
     const int64_t c1 = (int64_t) (((uint64_t) std::max<int64_t>(cells, 1) * sp.unit + G - 1) / G);
     int64_t fresh = 0;
     for (int64_t c = 0; c < c1; ++c) fresh += !sp.range.mapped(c);
-    if (!sp.range.map_range(0, c1, [] { return (strata::core::VmmChunk) 0; })) {
+    size_t gi = 0;
+    if (!sp.range.map_range(0, c1, [&] { return gi < got.size() ? got[gi++] : (strata::core::VmmChunk) 0; })) {
         report_vmm_grow_failure(sp.range.device(), "mapped", fresh, G, room);   // P124e round 6: named, not silence
         g_dev_failed.store(true);
         return false;
@@ -1923,10 +1937,14 @@ int32_t qsa_scores_make(int64_t cells) {
     // P124e (round 5, manager card): addresses for --max-context plus the start step - accounted.
     const strata::core::DeviceNote scores_note("the block-score scratch (addresses for --max-context and the start step)",
                                                (uint64_t) cells * 4ull);
-    if (!sp->range.reserve((uint64_t) cells * (uint64_t) sp->unit) ||
-        !follow_room(sp->range.device(), scores_need_locked(*sp, follow_start_cells()), sp->range.granularity(),
-                     false) ||
-        !scores_grow_locked(*sp, follow_start_cells())) return -1;
+    std::vector<strata::core::VmmChunk> got;
+    strata::core::VmmRoomStat room;   // (the load's room: the relief is not asked yet - nothing to give way for)
+    const bool ok = sp->range.reserve((uint64_t) cells * (uint64_t) sp->unit) &&
+                    follow_room(sp->range.device(), scores_need_locked(*sp, follow_start_cells()),
+                                sp->range.granularity(), false, got, room) &&
+                    scores_grow_locked(*sp, follow_start_cells(), got, room);
+    for (const strata::core::VmmChunk h : got) strata::core::vmm_chunk_free(h);   // (what the map never took)
+    if (!ok) return -1;
     std::lock_guard<std::mutex> lk(g_scores_mu);
     g_scores_pools.push_back(std::move(sp));
     return (int32_t) g_scores_pools.size() - 1;
@@ -1949,15 +1967,19 @@ bool qsa_scores_grow(int32_t i, int64_t cells) {
         dev = sp.range.device();
     }
     if (need == 0) return true;
+    std::vector<strata::core::VmmChunk> got;
     strata::core::VmmRoomStat room;
-    if (!follow_room(dev, need, G, true, &room)) {
+    if (!follow_room(dev, need, G, true, got, room)) {   // (P124e round 6: the cache gives way before the map)
         const strata::core::OnDevice on(dev);
-        report_vmm_grow_failure(dev, "grown", need, G, room);   // P124e round 6: the scratch's room failing says so too
+        report_vmm_grow_failure(dev, "grown", need, G, room);   // the scratch's room failing says so too
+        for (const strata::core::VmmChunk h : got) strata::core::vmm_chunk_free(h);
         g_dev_failed.store(true);
         return false;
     }
     std::lock_guard<std::mutex> lk(g_scores_mu);
-    return scores_grow_locked(*g_scores_pools[(size_t) i], cells, room);
+    const bool ok = scores_grow_locked(*g_scores_pools[(size_t) i], cells, got, room);
+    for (const strata::core::VmmChunk h : got) strata::core::vmm_chunk_free(h);   // (what the map never took)
+    return ok;
 }
 uint64_t qsa_scores_trim(int32_t i, int64_t cells) {
     if (i < 0 || !g_follow_live.load()) return 0;
@@ -1977,7 +1999,8 @@ uint64_t qsa_scores_trim(int32_t i, int64_t cells) {
 bool qsa_scores_back_whole(int32_t i, int64_t cells) {
     if (i < 0) return true;
     std::lock_guard<std::mutex> lk(g_scores_mu);
-    return scores_grow_locked(*g_scores_pools[(size_t) i], cells);
+    std::vector<strata::core::VmmChunk> none;   // (the fallback takes the driver's chunks itself, as it always did)
+    return scores_grow_locked(*g_scores_pools[(size_t) i], cells, none, strata::core::VmmRoomStat());
 }
 uint64_t qsa_scores_reserved_bytes(int32_t i) {
     if (i < 0) return 0;
@@ -2704,7 +2727,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         // P124e (round 5, manager card): what the START STEP really costs - the load's accounting table says it.
         const uint64_t start_bytes = (uint64_t) follow_need_locked(fp, follow_start_cells()) * fp.range.granularity();
         const strata::core::DeviceNote start_note("the streamed states' context device state: the start step (backed)", start_bytes);
-        if (!follow_map_locked(fp, follow_start_cells())) {
+        std::vector<strata::core::VmmChunk> none2;   // (the load's start step maps the driver's fresh chunks, as ever)
+        if (!follow_map_locked(fp, follow_start_cells(), none2, strata::core::VmmRoomStat())) {
             std::fprintf(stderr, "saguaro: KV streaming: backing a state's first context cells failed\n");
             return 0;
         }
