@@ -17538,7 +17538,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                                 (long long) done,
                                 (long long) n, ms,
                                 ms > 0.0 ? 1000.0 * (double) (done - jp->resume) / ms : 0.0,
-                                (long long) std::max<int64_t>(0, done - jp->resume), ms, adm_stage_ms(*jp));
+                                (long long) std::max<int64_t>(0, done - jp->resume), ms,
+                                (double) jp->stage_us.load(std::memory_order_relaxed) / 1000.0);
                     std::fflush(stdout);
                     strata::core::progress_at("reading a prompt into a batch slot, done up to token", done);
                     strata::core::progress_beat();
@@ -17617,6 +17618,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 const int b = j.r.slot;
                 j.queued = true;
                 j.t_read = Clock::now();
+                j.host_t.store(0, std::memory_order_relaxed);   // P124v: the host-point chain starts with this run
+                j.host_staged.store(-1, std::memory_order_relaxed);
                 if (!j.prog_begun) {   // U5b: this read's shared progress figure
                     j.prog.reset(j.resume, j.n, g.n_layers);
                     j.prog_begun = true;
