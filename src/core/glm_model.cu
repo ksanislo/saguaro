@@ -858,8 +858,11 @@ void Glm5Model::reset() {
         if (synced) kv_unpin(kv_);
     } else {
         cudaMemset(state_, 0, state_bytes_);
-        cudaStreamSynchronize(0);
-        kv_unpin(kv_);   // P125g: the same, after the legacy stream's zeroing landed
+        // P125g (give-back): the same as the fast branch's rule - an engine that cannot say the device is idle
+        // must not unregister memory under it, so the give-back waits for the sync to report success (cudaMemset
+        // is synchronous, so this rarely has anything to wait for; the asymmetry with the fast branch was the bug).
+        const bool synced = cudaStreamSynchronize(0) == cudaSuccess;
+        if (synced) kv_unpin(kv_);
     }
     pos_ = 0;
     mtp_hx_pos_ = -1;   // (head_x holds no position of the new sequence)
