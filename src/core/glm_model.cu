@@ -850,11 +850,16 @@ void Glm5Model::reset() {
         cudaMemsetAsync(state_, 0, state_bytes_, fast_->cs);
         kv_stream_reset_maps();   // (the zeroed slots hold no block now - on the same stream)
         if (fast_->md.route_err_d != nullptr) cudaMemsetAsync(fast_->md.route_err_d, 0, sizeof(int), fast_->cs);
-        if (cudaStreamSynchronize(fast_->cs) == cudaSuccess && fast_->route_error_h)
-            *fast_->route_error_h = 0;   // a failed route belongs to the previous request
+        const bool synced = cudaStreamSynchronize(fast_->cs) == cudaSuccess;
+        if (synced && fast_->route_error_h) *fast_->route_error_h = 0;   // a failed route belongs to the previous request
+        // P125g (give-back): the conversation's pinned host copy goes back with it - the slots are zeroed and the
+        // maps reset above and the sync waited for that, so nothing on the device names those pages now.  What the
+        // next conversation writes is registered again, granule by granule, by kv_pin.
+        if (synced) kv_unpin(kv_);
     } else {
         cudaMemset(state_, 0, state_bytes_);
         cudaStreamSynchronize(0);
+        kv_unpin(kv_);   // P125g: the same, after the legacy stream's zeroing landed
     }
     pos_ = 0;
     mtp_hx_pos_ = -1;   // (head_x holds no position of the new sequence)
@@ -1043,6 +1048,14 @@ bool Glm5Model::kv_pin(KvStream* K, int64_t end_pos, std::string& err) {
     return true;
 }
 
+// P125g (give-back): unregister every granule of K's host copy and hand the pages to the kernel - the conversation
+// that wrote them reset, parked or ended.  The addresses stay, so the layers' rows still point where they always
+// did, and the next writer's kv_pin re-registers (zero-filled) what it names.  The caller synced the device first:
+// nothing in flight names these pages (reset's stream sync, seq_release's and kv_pinned_release's).
+void Glm5Model::kv_unpin(KvStream* K) {
+    if (K != nullptr && !K->arena.empty() && K->arena.pinned_bytes() > 0) K->arena.release(kv_pinner());
+}
+
 // the first sequence's stream (the only one without SAGUARO_GLM_SEQS); the prompt path's staging copy is sized for it,
 // the longest context of them all
 bool Glm5Model::kv_stream_setup(int64_t cells, std::string& err) {
@@ -1104,6 +1117,27 @@ uint64_t Glm5Model::kv_host_bytes() const {   // the same walk as kv_stream_stat
         for (const KvStream* K : ks) if (K != nullptr) n += K->host_bytes;
     }
     return n;
+}
+
+// P125g (give-back, parking): every part's bound conversation's pinned host copy, given back now.  The serve loop
+// calls this once a conversation's state has landed in a slot: from then on the slot is the live copy, the host
+// arena's granules would only be held for a conversation that is not running, and its return re-pins what it
+// restores (slot_load's hook, then the per-position ones).  A part whose stream sync fails keeps its pins - an
+// engine that cannot say the device is idle must not unregister memory under it.
+void Glm5Model::kv_pinned_release() {
+    int cur = 0;
+    cudaGetDevice(&cur);
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        if (m->kv_ == nullptr || m->kv_->arena.empty() || m->kv_->arena.pinned_bytes() == 0) continue;
+        cudaSetDevice(m->dev_);
+        if (m->fast_ != nullptr && cudaStreamSynchronize(m->fast_->cs) != cudaSuccess) {
+            cudaGetLastError();
+            continue;
+        }
+        cudaDeviceSynchronize();   // (a parked context is idle: this waits for nothing of its own; other contexts'
+        kv_unpin(m->kv_);          //  work on the card touches their own arenas, never this one)
+    }
+    cudaSetDevice(cur);
 }
 
 bool Glm5Model::forward(const std::vector<int32_t>& tokens, std::vector<float>& logits_out,

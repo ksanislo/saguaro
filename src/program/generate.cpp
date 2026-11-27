@@ -1631,6 +1631,7 @@ static int glm_pack_generate(const Options& o) {
             slots.back().data = buf;
             slots.back().img = snap_img_hash;
             snap_in_slot = true;
+            model.kv_pinned_release();   // P125g: parked and in RAM - its pinned K/V granules go back, the slot is the copy
             uint64_t total = 0;
             for (const auto& s : slots) total += s.bytes;
             size_t evicted = 0;
@@ -1685,6 +1686,7 @@ static int glm_pack_generate(const Options& o) {
         slots.push_back({snap_tokens, path, bytes, ++slot_clock});
         slots.back().img = snap_img_hash;
         snap_in_slot = true;
+        model.kv_pinned_release();   // P125g: parked and on disk - its pinned K/V granules go back, the slot is the copy
         uint64_t total = 0;
         for (const auto& s : slots) total += s.bytes;
         size_t evicted = 0;

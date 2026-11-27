@@ -10341,6 +10341,8 @@ bool Glm5Model::slot_load(const std::vector<uint8_t>& data, int64_t n_pos, std::
         err = "not a slot of this model";
         return false;
     }
+    for (Glm5Model* m : halves)   // P125g: the slot's granules registered before its rows are copied into them
+        if (m->kv_ != nullptr && !kv_pin(m->kv_, n, err)) return false;
     for (Glm5Model* m : halves) {
         if (m->fast_ == nullptr) {
             err = "no fast path";

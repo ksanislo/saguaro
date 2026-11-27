@@ -705,6 +705,9 @@ public:
     // writes past its committed position (the verify window's rows, the draft chain's).  A no-op for a stream on the
     // eager whole-max arena; false with err when the driver refuses (out of pinned RAM: the WSL ~1 GB cap).
     static bool kv_pin(KvStream* K, int64_t end_pos, std::string& err);
+    // ... and the give-back of one stream's pins (its conversation reset, parked or released).  The caller must
+    // have nothing in flight that touches the arena: a sync of the part (its stream, or the whole card) first.
+    static void kv_unpin(KvStream* K);
     uint64_t kv_stage_bytes_ = 0;                            // the prompt path's staging copy (the first sequence's)
     uint64_t slot_image(const std::function<uint8_t*(uint64_t, bool&)>& alloc, std::string& err, double* ms);
     void kv_stream_reset_maps();                             // nothing resident (reset, slot_load)
@@ -770,8 +773,15 @@ public:
     /// The latent cache's bytes of ONE position over every DSA layer of this model and its split parts, at the
     /// K/V dtype in use (FP16's kv_lora*2, INT8's record, or F32 on the reference path).  The server's context card.
     uint64_t kv_bytes_token() const;
-    /// ... and the pinned host latent caches allocated now, summed over the parts and the bound sequences (0: not streaming).
+    /// ... and the pinned host latent caches held NOW, summed over the parts and the bound sequences (0: not
+    /// streaming).  P125g: the cache grows with what a conversation writes (GranuleArena), so this is its current
+    /// size, not what the context allows - the Context card's and the VRAM line's honest figure, re-read when re-printed.
     uint64_t kv_host_bytes() const;
+    /// P125g: the bound conversations' pinned host copies, every part, given back now (each part's stream synced
+    /// first; a part whose sync failed keeps its pins).  PARKING: called when a conversation's state has been saved
+    /// to a slot, so its host copy costs pinned RAM for nothing until it comes back (the hooks re-pin what it
+    /// restores).  Nothing else in the engine's life gives a still-bound conversation back.
+    void kv_pinned_release();
     /// ... and its block reads since the start, every part summed: those the selections named, those read from RAM
     struct KvStreamStats {
         uint64_t lookups = 0, misses = 0;
