@@ -11347,7 +11347,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             solo_prog.report_full(pos);
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
                       (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
-                      pp_stage_ms(), pos, 0);   // (chunk 0: done= just moved piece by piece; no unit in flight here)
+                       pp_stage_ms(), -1, 0);   // (chunk 0: done= just moved piece by piece; no unit in flight here,
+                                                //  so no unit's first token: pos0=-1, NOT the piece's end `pos`)
         };
         // #471: the position the prompt pass has read up to (a chunk's or a window's end): what a request cancelled
         // mid-read reports as read, instead of the whole prompt
