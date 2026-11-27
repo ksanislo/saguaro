@@ -36,6 +36,7 @@
 #include "strata/core/park_policy.hpp"
 #include "strata/core/park_release.hpp"
 #include "strata/core/resident_policy.hpp"
+#include "strata/core/vram_policy.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/foresight_swap.hpp"
@@ -1859,12 +1860,9 @@ bool launch_blocking() {
 /// #2065: the VRAM free when the current request began (-1 before the first); the stall report prints it, because a
 /// card this full is the one measured cause of a window that never finishes (the driver pages GPU memory).
 std::atomic<int64_t> g_req_vram_free_mib{-1};
-constexpr int64_t kVramSafeMib =
-#ifdef _WIN32
-    1024;   // WDDM pages instead of failing (docs/DETAILS.md, the sysmem fallback): the line #2065 fell below
-#else
-    512;
-#endif
+// WDDM pages instead of failing (docs/DETAILS.md, the sysmem fallback): the line #2065 fell below.  P124x: the
+// one source of the figure - vram_policy.hpp's floor is what the expert cache now also sizes against.
+constexpr int64_t kVramSafeMib = strata::core::vram::safe_floor_mib();
 
 void stall_report(std::FILE* f, uint64_t layers_during) {
     strata::core::Progress& p = strata::core::progress();
@@ -6862,6 +6860,48 @@ int main(int argc, char** argv) {
                 o.vram_reserve_mib = kWddmAutoReserveMib;
             }
 #endif
+        }
+        // P124x (b): the same paging shape on Linux/ROCm, and the same lesson as #1376: the reserve the cache is
+        // sized against is spent by what the engine allocates after the cache (the window captures, the per-slot
+        // MTP heads, the driver's slack), and the engine's own #2065 line - kVramSafeMib, the "LOW:" the stall
+        // report prints - was a label with nothing sizing against it.  The mortar box kept the given 700 MiB,
+        // reached 416-432 MiB free at request start ten of its eleven aborts, and the driver paged GPU memory into
+        // a host RAM the expert tier had already filled.  On auto sizing, a ROCm DISCRETE card of 15 GiB and up
+        // (the #1709 figure) keeps at least the floor plus the measured slack (vram_policy.hpp); an integrated
+        // APU is left alone - its "total VRAM" is a window into system RAM (GTT), the #1709 threshold was measured
+        // on discrete cards, and the UMA block above sizes for that different shape (review N3).  A bigger reserve
+        // is kept as it is, a given one included - a reserve this side of the floor is what ended the engine, so
+        // this floor, unlike #496's, does not step back for `--vram-reserve-mib` below it.  The cache size changes
+        // no output bit.
+        {
+            const int asked = o.vram_reserve_mib;
+            size_t fb_now = 0, tb_now = 0;
+            const uint64_t total_vram = cudaMemGetInfo(&fb_now, &tb_now) == cudaSuccess ? tb_now : 0;
+            cudaDeviceProp rsv_p{};
+            int rsv_dev = 0;
+            const bool rsv_integrated = cudaGetDevice(&rsv_dev) == cudaSuccess &&
+                                        cudaGetDeviceProperties(&rsv_p, rsv_dev) == cudaSuccess && rsv_p.integrated != 0;
+            (void) cudaGetLastError();
+#if defined(STRATA_USE_HIP)
+            const bool hip_backend = true;
+#else
+            const bool hip_backend = false;
+#endif
+            const int floored = strata::core::vram::hip_auto_reserve_mib(hip_backend,
+#ifdef _WIN32
+                                                                         true,
+#else
+                                                                         false,
+#endif
+                                                                         rsv_integrated, total_vram, asked);
+            if (floored > asked) {
+                std::fprintf(stderr, "saguaro generate: expert cache auto: the reserve stays at least %d MiB on this ROCm "
+                                     "card, not the %d MiB %s: the window captures and the drafter's heads take about half "
+                                     "of it after the cache, and below the 512 MiB paging line the driver pages GPU memory "
+                                     "to a full host RAM and windows never finish (#2065, P124x); --expert-cache N sizes "
+                                     "the cache by hand\n", floored, asked, o.vram_reserve_given ? "it was asked for" : "it is the default");
+                o.vram_reserve_mib = floored;
+            }
         }
         const int64_t prefill_mib = owned_prefill_mib();
         // the draft layer's head and logits are allocated when it binds, after this: 0.1.27's CJK subset made them
