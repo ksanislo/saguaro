@@ -41,4 +41,34 @@ inline bool elastic_start(bool fits_all, bool fits_committed, bool streaming_tak
            !two && !q4 && !parallel && !tp;
 }
 
+// ---- P125o (a2 / a3): the committed K / V in chunks of positions.  The elastic global K / V is one address range
+// over the whole ceiling (src/ik2/ik2_vmm.hpp) with physical chunks behind the first committed positions; a request
+// commits the chunks covering its positions before its first pass (host-side, a chunk at a time - a3), and the
+// kernels keep addressing rows by absolute position, so the CUDA graphs over the stable base pointer stay valid.
+// The arithmetic is here; the driver calls live beside it.
+
+// positions a chunk covers before the granule rounds its bytes up (ref/REPORT-p125b-ik2-vram.md (a2): 4096)
+constexpr int kKvChunkPos = 4096;
+
+inline size_t align_up(size_t b, size_t g) { return g > 1 ? (b + g - 1) / g * g : b; }
+
+// the positions one committed chunk covers: the wanted rows' bytes rounded up to the granule (a granule of 0:
+// no VMM, the exact rows).  The rounding only ever makes a chunk bigger, so chunks stay whole and contiguous.
+inline int kv_rows_per_chunk(int want, size_t row_bytes, size_t gran) {
+    if (row_bytes == 0 || want <= 0) return 0;
+    const size_t r = align_up((size_t) want * row_bytes, gran) / row_bytes;
+    return (int) (r == 0 ? 1 : r);
+}
+
+// the chunk holding a position, and the chunks covering n positions.  The commit order is the position order:
+// a request walks committed .. chunks_for(its last position) - 1, ascending, so a position's rows are never
+// touched before the chunk holding them has physical pages.
+inline int kv_chunk_of(int pos, int rows_per_chunk) {
+    return pos <= 0 || rows_per_chunk <= 0 ? 0 : pos / rows_per_chunk;
+}
+inline int kv_chunks_for(int n_positions, int rows_per_chunk) {
+    if (rows_per_chunk <= 0) return 0;
+    return n_positions <= 0 ? 0 : (n_positions + rows_per_chunk - 1) / rows_per_chunk;
+}
+
 }  // namespace ik2plan
