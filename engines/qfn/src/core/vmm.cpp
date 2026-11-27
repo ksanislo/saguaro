@@ -1,4 +1,5 @@
 #include "strata/core/vmm.hpp"
+#include "strata/core/vmm_exit.hpp"   // P124e round 9 (manager card): do not call a torn-down runtime at exit
 
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
 #include <cuda.h>
@@ -50,6 +51,10 @@ const Api& api() {
                resolve("cuMemCreate", a.create) && resolve("cuMemRelease", a.release) && resolve("cuMemMap", a.map) &&
                resolve("cuMemUnmap", a.unmap) && resolve("cuMemSetAccess", a.access);
         (void) resolve("cuGetErrorString", a.err_str);   // optional: the failure line names the driver's words with it
+        // P124e (round 9, manager card): arm the exit watch HERE - long after the runtime's own atexit teardown is
+        // registered, so the LIFO runs it first: once the process is leaving, release() and vmm_chunk_free() below
+        // let their chunks go instead of calling into a runtime that may already be gone (the round-8 core).
+        vmm_arm_exit_watch();
     });
     return a;
 }
@@ -152,7 +157,10 @@ VmmChunk vmm_chunk_new(int dev) {
 }
 
 void vmm_chunk_free(VmmChunk h) {
-    if (h != 0 && api().ok) api().release((CUmemGenericAllocationHandle) h);
+    // P124e round 9: at exit the physical chunk is the kernel's to reclaim - the CUDA runtime may already be
+    // gone by the time a static pool lets its chunks go (the driver entry points outlive it, its internals do not).
+    if (h == 0 || vmm_exiting()) return;
+    if (api().ok) api().release((CUmemGenericAllocationHandle) h);
 }
 
 bool VmmRange::reserve(uint64_t bytes, int dev) {
@@ -175,6 +183,10 @@ bool VmmRange::reserve(uint64_t bytes, int dev) {
 
 void VmmRange::release() {
     if (base_ == 0) return;
+    // P124e round 9 (manager card): the static pool vectors run their destructors in __run_exit_handlers AFTER
+    // the runtime tore itself down - the round-8 core is exactly this function's unmap/free calls landing on a
+    // null pointer inside the runtime.  At exit, drop the bookkeeping and leave the range to the kernel.
+    if (vmm_exiting()) { base_ = 0; h_.clear(); return; }
     for (int64_t i = 0; i < chunks(); ++i) vmm_chunk_free(unmap(i));
     api().free_va((CUdeviceptr) base_, (size_t) ((uint64_t) h_.size() * gran_));
     base_ = 0;
@@ -270,6 +282,11 @@ const Api& api() {
     static Api& a = *new Api;   // never destroyed: the K/V pools and the cache release their chunks from static destructors
     static std::once_flag once;
     std::call_once(once, [] {
+        // P124e (round 9, manager card): arm the exit watch at the first VMM use - here that is long after the
+        // HIP runtime registered its own teardown, so atexit's LIFO runs ours first: the static pool vectors'
+        // ~VmmRange must then skip hipMemUnmap/hipMemRelease/hipMemAddressFree (the round-8 SIGSEGV was exactly
+        // that call into a torn-down libamdhip64).
+        vmm_arm_exit_watch();
         const char* off = std::getenv("SAGUARO_HIP_VMM");
         if (off != nullptr && off[0] == '0') {
             std::snprintf(a.why, sizeof a.why, "SAGUARO_HIP_VMM=0 turned the HIP virtual memory off");
@@ -323,7 +340,8 @@ VmmChunk vmm_chunk_new(int) {
 }
 
 void vmm_chunk_free(VmmChunk h) {
-    if (h != 0 && api().ok) (void) hipMemRelease((hipMemGenericAllocationHandle_t) (uintptr_t) h);
+    if (h == 0 || vmm_exiting()) return;   // (round 9: at exit the runtime may already be gone - see vmm_exit.hpp)
+    if (api().ok) (void) hipMemRelease((hipMemGenericAllocationHandle_t) (uintptr_t) h);
 }
 
 bool VmmRange::reserve(uint64_t bytes, int) {   // (one device under HIP)
@@ -342,6 +360,10 @@ bool VmmRange::reserve(uint64_t bytes, int) {   // (one device under HIP)
 
 void VmmRange::release() {
     if (base_ == 0) return;
+    // P124e round 9 (manager card): this is the function the round-8 core died in - a static pool's ~VmmRange,
+    // run by __run_exit_handlers after the HIP runtime tore itself down (#3 here, #4 ~vector<ScoresPool>).
+    // At exit the addresses and chunks are the kernel's; leave them and return with no HIP call.
+    if (vmm_exiting()) { base_ = 0; h_.clear(); return; }
     const Api& a = api();
     for (int64_t i = 0; i < chunks(); ++i) vmm_chunk_free(unmap(i));
     (void) hipMemAddressFree((void*) (uintptr_t) base_, (size_t) ((uint64_t) h_.size() * a.gran));

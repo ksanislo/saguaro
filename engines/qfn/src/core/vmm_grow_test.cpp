@@ -22,6 +22,7 @@
 // needs arrives the same way: qsa_slots_grow only remaps chunks the budget holds, and the budget is filled by
 // the same give() that serves the relief.
 #include "strata/core/vmm_grow.hpp"
+#include "strata/core/vmm_exit.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -299,6 +300,18 @@ int main() {
         check(t.find("the driver call gave no code") != std::string::npos, "it says the call recorded nothing");
         check(t.find("was never asked") != std::string::npos, "and that the cache was never asked");
         check(t.find("RAM") == std::string::npos, "still no RAM wording");
+    }
+
+    // ROUND 9 - THE EXIT ORDER (manager card B: the SIGSEGV after SIGTERM was a static pool's ~VmmRange calling
+    // into a HIP runtime that __run_exit_handlers had already torn down).  The decision the guarded release() /
+    // vmm_chunk_free() make is this flag; the atexit handler that sets it is armed once, at the first VMM use,
+    // and atexit's LIFO runs it BEFORE the runtime's own teardown.  (Last checks here: the flag stays set.)
+    {
+        check(!vmm_exiting(), "nothing is exiting while the engine runs");
+        vmm_arm_exit_watch();
+        vmm_arm_exit_watch();   // (armed exactly once: the second call registers nothing)
+        vmm_mark_exiting();     // (what the process's atexit list calls)
+        check(vmm_exiting(), "from the handler on, a pool destructor must not call the runtime again");
     }
 
     std::printf("vmm_grow_test: %d checks OK\n", checks);
