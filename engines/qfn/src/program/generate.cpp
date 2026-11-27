@@ -20625,13 +20625,20 @@ vs.d_skip_usage = gs.d_skip_usage;
                     ConvCheckpoint::PromptPlan& p;
                     ~SegPlanScope() { p = {}; }
                 } seg_plan_scope{seg_plan};
-                auto run = [&](int64_t q, int64_t r) -> bool {
+                auto run = [&](int64_t q0r, int64_t r, std::string& e, int64_t* stop_at = nullptr) -> bool {
+                    if (stop_at != nullptr) *stop_at = -1;
+                    int64_t q = q0r;
                     // P124e (round 8, manager card): on an elastic conversation a run never reaches a cell the
                     // conversation has not BACKED (host copy, device state, RoPE rows - the arrays hold
                     // addresses for the context and memory only for their backed prefix): back ahead of every
                     // piece through the request-start fits (the give-way included) and cut the piece at the
                     // backed / staged end.  Normally this is one piece: the fits at the request's start backed
                     // the whole prompt (the plan's grow-ahead-need-once), and nothing here changes.
+                    // P124e (round 9, manager card): the error is a parameter, because the PIPED-CONCURRENT reader
+                    // (below) runs this SAME loop with its own - a read thread that bypassed it grew past the
+                    // backed cells with only prefill's refusal gate between it and an unmapped page.  And a run
+                    // that its stop_at_chunk ended early (the concurrent reader's BYIELD / VLEND) returns with
+                    // the cells past the stop NOT read: q must never advance past them.
                     while (q < r) {
                         const int64_t staged = sp.stage_cells() > 0 ? sp.stage_cells() : o.max_context;
                         int64_t qe = strata::core::read_piece_end(r, solo_backed_cells(), staged);
@@ -20673,10 +20680,21 @@ vs.d_skip_usage = gs.d_skip_usage;
                         const bool ok = sp.run(ids.data() + q, qe - q, q, e);
                         pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
                         if (!ok) return false;
+                        // P124e (round 9, manager card): Prefill::stop_at_chunk (live only for the concurrent reader:
+                        // a BYIELD or a pending lend) ended this run at its next chunk - the piece did NOT finish and
+                        // the cells past the stop were never read.  Hand the run back as "stopped, not failed" with
+                        // the stop cell reported ABSOLUTE (this piece started at q: the stopped_at() a caller adds
+                        // to the segment's start would point inside an earlier piece once the loop has moved on);
+                        // advancing q to qe here would skip the rest of the prompt silently.
+                        if (const int64_t s = sp.stopped_at(); s >= 0) {
+                            if (stop_at != nullptr) *stop_at = q + s;
+                            return true;
+                        }
                         q = qe;
                     }
                     return true;
                 };
+                auto run1 = [&](int64_t q, int64_t r) -> bool { return run(q, r, e); };
                 // (a layer split reads its stages as a pipeline over one run's chunks: beside slots a chunk at a time, with
                 // none decoding in pieces of SAGUARO_BATCH_YIELD_CHUNKS chunks (default 8; 0 = one run) so a BYIELD is taken)
                 static const int64_t yield_chunks = [] {
@@ -20907,6 +20925,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         std::atomic<bool> lend_yield{false};   // review 4b: a pending lend asks this read to stop at its next chunk
                         bool read_ok = true;
                         std::string read_err;
+                        int64_t read_stop = -1;   // (round 9: the piece loop's stop cell, absolute; -1: the run finished)
                         in_prompt_read = true;
                         sp.stop_at_chunk = [&] {
                             return want_yield.load(std::memory_order_acquire) >= 0 ||
@@ -20915,10 +20934,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                         const ShareScope share_scope(read_share_set, read_share_now());   // (after the reader's join)
                         std::thread reader([&] {
                             conc_thread_cpus();
-                            try {   // (an exception leaving a std::thread ends the process: a failed read instead)
-                                if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
-                                pp_run_begin();   // (the read's own thread runs it: its time is this request's
-                                read_ok = sp.run(ids.data() + q0, b0 - q0, q0, read_err);
+                             try {   // (an exception leaving a std::thread ends the process: a failed read instead)
+                                // P124e (round 9, manager card): the CONCURRENT read runs the same elastic piece
+                                // loop as every other read (its backed cut, its back-ahead fits and its stop
+                                // handling - here the stop is reported through read_stop, absolute; the plain
+                                // sp.run below bypassed all of it, leaving only prefill's refusal gate between a
+                                // long read and an unmapped cell).  The loop keeps the read's own clock (the
+                                // pp_run pair is inside it).
+                                read_ok = run(q0, b0, read_err, &read_stop);
                             } catch (const std::exception& x) {
                                 read_ok = false;
                                 read_err = std::string("the prompt read failed: ") + x.what();
@@ -20926,7 +20949,6 @@ vs.d_skip_usage = gs.d_skip_usage;
                                 read_ok = false;
                                 read_err = "the prompt read failed";
                             }
-                            pp_run_end();   //  read time; pumping the slots between the rounds is not)
                             done.store(true, std::memory_order_release);
                             { std::lock_guard<std::mutex> lk(in_mu); }   // (the loop below may be waiting on in_cv)
                             in_cv.notify_all();
@@ -20993,7 +21015,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                             e = "a pipelined batch window failed";
                             return false;
                         }
-                        const int64_t q = read_ok && sp.stopped_at() >= 0 ? q0 + sp.stopped_at() : b0;
+                        // round 9: the stop cell comes from the piece loop (absolute) - the bare stopped_at() is
+                        // relative to the LAST sp.run, which once the loop has backed ahead is no longer q0's run
+                        const int64_t q = read_ok && read_stop >= 0 ? read_stop : b0;
                         const double read_ms = std::chrono::duration<double, std::milli>(Clock::now() - tc).count();
                         std::string per;
                         for (int k = 0; k < n_pipe; ++k) {
@@ -21103,11 +21127,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                 }
                 int64_t piece = piece_now();
-                if (piece <= 0) return run(a0, b0);
+                if (piece <= 0) return run1(a0, b0);
                 for (int64_t q = a0; q < b0;) {
                     const int64_t r = std::min(b0, q + piece);
                     const auto tq = Clock::now();
-                    if (!run(q, r)) return false;
+                    if (!run1(q, r)) return false;
                     const double piece_ms = std::chrono::duration<double, std::milli>(Clock::now() - tq).count();
                     if (pr_on && r < b0) pr_prev_piece_ms = piece_ms;
                     const int64_t piece_tokens = r - q;
@@ -23069,6 +23093,18 @@ vs.d_skip_usage = gs.d_skip_usage;
             if (o.lookup_chain > 0)
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
+            // P124e (round 9, manager card): the card's run 1 was "[saguaro] done: 0 tokens ... (length, cancel=
+            // False)" three and a half seconds after the staging line - a 546K read cannot end in that time, and
+            // the engine said nothing.  An answer with no tokens and no reason is the one end that must not be
+            // silent: say where the read got, how far decode reached and what the card backed.  (The DONE line
+            // carries the same numbers to the server, but nothing on it says WHY a zero is a clean end.)
+            if (produced_n == 0 && !cancelled && yielded_at < 0 && std::strcmp(finish, "length") == 0)
+                std::fprintf(stderr, "saguaro serve: the request ends with no tokens and no reason: the read reached "
+                                     "%lld of %lld cells, the decode %lld, max_new %lld, the staging holds %lld "
+                                     "cells, the conversation is backed to %lld%s\n",
+                             (long long) pp_reached, (long long) n, (long long) p, (long long) max_new,
+                             (long long) (sp.stage_cells() > 0 ? sp.stage_cells() : o.max_context),
+                             (long long) solo_backed_cells(), pl_ran ? ", the pipelined decode ran" : "");
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s chunk=%lld "
                         "experts_streamed=%lld\n",

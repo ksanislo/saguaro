@@ -1635,8 +1635,13 @@ namespace {
 bool follow_array(const strata::core::SlotArray& a) { return !a.kv || a.fill != 0; }
 int64_t follow_units_cells(const SlotPool& p, const strata::core::SlotArray& a, int64_t units) {
     if (units <= 0) return 0;
+    // P124e (round 9, manager card): the pooled-rows answer is the EXACT inverse of the need's `cells / idx_block +
+    // 2` (slot_sizing.hpp): U units index every cell c with c / idx_block + 2 <= U, i.e. c <= (U-1) * idx_block - 1.
+    // The old (U-2) * idx_block under-reported a mapped row's last block by idx_block - 1 cells - enough for the
+    // read's piece loop to refuse cells the request-start fit had just backed, and for the gate to name a cell
+    // lower than the grow had promised.
     return a.kv ? std::min<int64_t>(units, a.units) * p.page_size      // the page table: units are pages
-                : (units - 2) * p.idx_block;                           // pooled rows: row r holds cells < r * 4
+                : (units - 1) * p.idx_block - 1;                       // pooled rows: row r holds cells < (r+1) * 4
 }
 // The start every conversation holds at load: the host copies' step (SAGUARO_KV_HOST_STEP, 32768 cells by default).
 int64_t follow_start_cells() {
