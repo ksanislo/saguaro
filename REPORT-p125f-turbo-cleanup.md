@@ -108,3 +108,81 @@ chats only").  What each layer left behind, marked LIVE / DEAD (nothing reads it
   Turbo to its default, switching off restores what it was"), models.py:1084-1088 (the TURBO_LIVE_DEFAULT
   block), test_models.py:526-528 (QfnTurbo's class doc) and :582 (turbo_live_before),
   test_new_engines_ui.py:242 (assertNotIn("qfn", M.TURBO_LIVE_DEFAULT)).
+
+## Step 2: what went, what was said instead (commit 0bb4163e4)
+
+- `serve/turbo_live.py`: `turbo_badge` gone (the badge has always been `turbo-core.js` turboBadge's own words;
+  the server sends the dict raw on the monitor rows).  `serve/web/turbo-core.js`: the twin's comment follows.
+- `serve/server.py`: the set_turbo live half (the `live is not None` block, `turbo_live_before`, the `was` read
+  feeding it) and its `Service.turbo_live_before` init gone; `set_turbo` and `turbo_skip_supported` docstrings
+  say what is true (the button never touches the live half - PLAN-p124s; skip applies everywhere, the QFN
+  `INFO turbo_skip=1` fact now only hides the choice for a pre-s1 QFN build).
+- `serve/models.py`: `TURBO_LIVE_DEFAULT` and the `live_before` param/write in `turbo_enable` gone (the comment
+  keeps the why: c3844c07d, PLAN-p124s); `delete()` sweeps `<stem>.turbo.json` beside `.prev` and
+  `.shared-settings.json`, for the config and its maya- shadow (left, a deleted model's panel choice would
+  re-switch Turbo on for a later model under the same name).
+- `serve/web/turbo.js`: the button tooltip no longer recites 7092f3936's fixed feature list - the button says
+  its own on/off state (the one place for it), the dialog says what this model changes from the server's plan
+  rows, and the TurboLive panel below stays the one place for the app's own chats' live options.
+  `serve/web/turbo.css`: `.turbo__state` (both rules) gone - no element ever carried it.
+- Old sidecar name: none ever existed (git log -S `turbo.json`: `<stem>.turbo.json` since d79062341), so the
+  read-once-then-rename clause had nothing to apply to; one name is kept.
+- `docs/SETTINGS.md`: new `## Turbo` section where the models.py header points - the two halves, the exact
+  `TURBO_ENV` / `TURBO_DRAFT` / context values, the Maya-XS cap exception, the `"turbo"` note, the sidecar and
+  its delete, and "an API request gets Turbo only from its own field"; phrased so test_turbo.py's
+  `count("changes the answers - Turbo") == 2` still reads true.
+  `docs/DIVERGENCE.md` QFN entry 15: what S1 made true (skip applies via `turbo_skip_of` /
+  `strata/program/turbo_skip.hpp`, `INFO turbo_skip=1` at generate.cpp:12707, said-once refusals for what
+  still runs exact; no "this engine applies only drop" line left).
+- Tests follow in the same commit: test_models.py (QfnTurbo doc, the live_before line, the panel's sidecar
+  asserted untouched across a button flip), test_new_engines_ui.py (no `TURBO_LIVE_DEFAULT` attribute).
+
+## Step 3: tests (commit a162404a0)
+
+- `serve/test_turbo_live.py` PageSide `test_the_page_turbo_state_round_trips_to_the_wire` (node): bolt on ->
+  drop 2 + skip RAM -> the dict the body carries every turn -> read back whole next turn -> both picked off ->
+  nothing sent; and the server's half reads the same dict (`normalize_turbo` as-is, `turbo_keys` =
+  ` turbo_drop=2 turbo_skip=ram`, badge `-2 experts · VRAM only`, off = the exact line).
+- `serve/test_turbo_live.py` `ButtonAndLiveApart`: a glm run config and a real sidecar through HTTP -
+  `set_turbo(True)` writes the config note (no `live_before`, no `TURBO_LIVE_DEFAULT` to write one) and nothing
+  else: the panel's `{"drop": 1, "skip": "ssd"}` and its sidecar byte-identical across the switch on and off;
+  **nothing an API request sees changes** - `/v1/chat/completions` without its own field reaches the engine
+  with `turbo` None and an empty `turbo_keys` line with the button on and with it off, while the app's own
+  `strata_resume` request still takes the panel's.  (The P124s guards -
+  `test_the_api_never_borrows_the_pages_turbo`, the EngineLine exactness - still pass untouched.)
+- `serve/test_models.py` `test_off_the_list_only`: the deleted model now leaves no `<stem>.turbo.json`.
+
+## Files touched
+
+serve/turbo_live.py, serve/models.py, serve/server.py, serve/web/turbo.js, serve/web/turbo-core.js,
+serve/web/turbo.css, serve/test_models.py, serve/test_new_engines_ui.py, serve/test_turbo_live.py,
+docs/SETTINGS.md, docs/DIVERGENCE.md.  serve/qfn_engine.py untouched by hand and needed no re-extract (the QFN
+driver sources engines/qfn/serve/server.py, which references none of the removed names - grep says so).
+
+## Tests run (each module one at a time, /opt/llm/saguaro/.venv/bin/python 3.13.5, node 22)
+
+| module | before | after |
+| --- | --- | --- |
+| serve.test_turbo | 24 OK | 24 OK |
+| serve.test_turbo_live | 14 OK | 16 OK (+2 new) |
+| serve.test_models | 64 OK | 64 OK (three tests reworded/extended) |
+| serve.test_new_engines_ui | 38 OK | 38 OK |
+| serve.test_dashboard | - | 85 OK (renders the Turbo rows/button under node) |
+| serve.test_server | - | 179 OK |
+| serve.test_priority | - | 67 OK (the set_one Turbo test) |
+| serve.test_model_api | - | 28 OK (models.delete through the page's API) |
+
+## Open questions
+
+1. The chat's bolt shows only the chat's own Turbo; a chat that merely inherits the panel's choice looks
+   exact until its first answer badge appears. Showing the inherited state in the chip would need
+   `/api/turbo/options` folded into the chip - a feature, left alone here.
+2. `turbo_on` / `turbo_of` in serve/turbo_live.py stay a near-twin pair (dict vs sampling wrappers, both
+   read); consolidating one into the other would only shorten one line - left.
+3. `serve/web/chat-view.js` sets classes `turbo-chip` / `turbo-menu` no stylesheet defines (hooks from P5).
+   Harmless; a design pass should either style them or drop the hooks.
+4. The `/api/turbo` info fields `since` and `one_at_a_time` have no page reader (`since` lives in the
+   config's turbo note for people, `one_at_a_time` describes what `plan: {}` means); left as diagnostics.
+5. A model deleted while its server still runs keeps its in-memory `turbo_default` until the next start (the
+   sidecar file now goes with the config).  Out of the cleanup's line; say if the page's Delete should also
+   reset the live panel.
