@@ -1,141 +1,80 @@
-# REVIEW-RESULT — P124k DS4 keepread (engine part), round 2, diff 856af24ab..d2a96ae46
+# REVIEW-RESULT — P124k DS4 keepread, round 3 (card-test follow-up), diff 856af24ab..3637f9901
 
-**MERGE-WITH-NITS** — the round-1 HIGH (finding 1) is fixed and verified: the keep point is taken by
-progress (`keep_at`), clear of picture spans, and the whole range builds and tests green here. The
-keep's landing logic, the OFF path, multi, locks/stdout and the file discipline all check out.
-What is left: two redundant-snapshot nits, two wording nits in the docs, and the accepted infos.
+**FIX-FIRST (small)** — the engine's keep WORKS on the card (cut at 24,576 kept live at 32,768, resumed read
+51,164, no second whole read). What fails is the SERVER's continue line and the shared card script: DS4's resumed
+read gets the numberless line because the engine's own figure never reaches the attribute the line reads, and
+`tools/card_tests/lost_read.sh` greps a wording it can never see and waits its full 600 s before saying so.
+The P124k diff itself is unchanged since the round-2 review (MERGE-WITH-NITS) and needs nothing; both fixes sit
+in the P124u/candidate territory, not in this worktree's diff.
 
 ## Findings by severity
 
-### 1. NIT — the landing's `checkpoint(0)` re-snapshots a point that already stands there.
-`src/ds4/ds4_main.cpp:1870` takes `m.checkpoint(0)` unconditionally when the branch keeps. Between
-runs the live landing can be the keep point the last run just left (`ckpt` already at `keep`), and a
-mid-run landing onto `ck[0]` itself re-snaps the same state after `restore()` reloaded it
-(`src/ds4/ds4_model.cu:11275-11305` keeps the point it restored from). One extra `snap_into`
-(`check_bytes()` MB of D2H + stream syncs, `src/ds4/ds4_model.cu:11161-11183`) per stopped read —
-bounded, stop-path-only, no correctness impact. A cheap guard would be `m.checkpoint(0)` only when
-the restored/live point is not already `ck[0]`'s position; not worth API churn.
+### 1. HIGH — the resumed read's continue line carries no figure for DS4: the engine's number is parsed but
+never wired to the line. `Service._sliced` asks `getattr(self.engine, "reused", None)` (serve/server.py:5704; the
+identical block at saguaro/rc124-cand:serve/server.py:5813) — but that attribute exists only on the QFN driver
+(serve/qfn_engine.py:684, set at :2504 from the engine's `RESUME` line, reset per call at :1782/:2430/:2743).
+The `StrataEngine` driver that runs DS4 never sets it (no `self.reused` anywhere in serve/server.py): its DONE's
+reused field lands in `self.last["reused"]` only (serve/server.py:1852; cand :1866), and RESUME lines are merely
+routed for the multi PP base, never parsed into the attribute (serve/server.py:1694-1705). The engine already
+reports the truth over the pipe — the stopped branch's DONE carries the kept position as f[8]
+(src/ds4/ds4_main.cpp:1877) — so the line falls to the numberless branch (serve/server.py:5709-5710): the card
+run printed `the low prompt read continues from where the engine kept it` (manager's extract
+scratch/card-r1-engine.txt:15, 11:16:42) while the same run's engine lines say `kept live at 32768 tokens` (:3)
+and the resumed request read only the rest: `prompt 83932 tokens = 32768 reused + 51164 read` (:55). This is
+exactly the gap the P124u report left open on the candidate (commit d6dab3fd0, open question "the DONE's reused
+figure never reaching the continue line"). Fix constraints (P124b's honesty rule, serve/test_lost_read.py:65-79 —
+a lost read must log 0, an engine that reports nothing keeps the numberless line, serve/test_priority.py:715):
+the figure must be that read's own — either the DS4 engine emits `RESUME <n>` (the convention the pipe already
+has: src/program/generate.cpp:2118, :3900 are its only emitters today; src/ds4 emits none) and the StrataEngine
+parses it into `.reused` with a per-call reset, or a fallback to the last DONE is scoped strictly to engines whose
+STOPPED-read DONE carries the keep — GLM's and ik2's cancelled DONE carries the base, not a kept read, and must
+keep the numberless line. Server change → run the affected modules: `serve.test_lost_read`, `serve.test_priority`.
 
-### 2. NIT — at a cut position ≥ `keep_at` the same state is snapshotted twice.
-`m.mark(sh)` at `src/ds4/ds4_main.cpp:1819` stores the point in `mk`, and the keep block at
-`:1832-1836` then stores the identical state again in `ck[0]` (`mark_room` dedups only inside `mk`,
-`src/ds4/ds4_model.cu:11206-11213`). One extra snapshot per requested cut that crosses a step
-boundary. Cost-only, and it buys the `restorable()` shortcut for spans-dodged cases; noted only.
+### 2. HIGH — `tools/card_tests/lost_read.sh` cannot see DS4's line and burns its full timeout when it is
+missing. It counts the literal `'prompt read continued'` (saguaro/rc124-cand:tools/card_tests/lost_read.sh:188,
+:191), extracts M only from the figured wording (`prompt read continued: M of N tokens reused`, :196-198), and
+polls 600 s before failing (:187-191) — the manager's run matches: last real work at 11:18:18
+(scratch/card-r1-engine.txt:57), the script's SIGTERM at 11:26:33 (:58), ~8 min of idle cards. The fix has a trap
+the manager's wording alone walks into: greping only `continues from where the engine kept it` (the today-wording)
+leaves the script's per-resume `M > 0` assertions (:196-205) with no figure to parse — accept the figured line
+(which after fix 1 DS4 gets, and QFN already had), accept the numberless line as a fallback that SKIPS the M>0
+check with a NOTE, and fail fast (~60 s) when neither comes. Note the file is not in this worktree at all: it
+arrives from P124r (candidate commits e5f683c24..a6f1c2ef2); this HEAD tracks only serve/test_lost_read.py, so
+fix 2 lands on that line too.
 
-### 3. NIT — REPORT §4 says the resumed check reads the DONE; the script reads the stderr summary.
-`REPORT-p124k-ds4-keep-read.md:114-116`: "must show the engine's own `prompt N tokens = K reused`
-with 0 < K < N **on its DONE**". DONE goes to the engine's stdout (server log); the script greps the
-engine's stderr request-summary line `prompt %zu tokens = %zu reused + ...`
-(`src/ds4/ds4_main.cpp:2076`, `:2404`; greps at `scratch/card-test-ds4-keep-read.sh:129,166`). Same
-number (`from` of the resumed request), right decision — the sentence just names the wrong line,
-the class of error finding 3 was about. One-word fix in a follow-up doc touch.
+### 3. INFO — the round-3 brief overstates the server gap, and that changes the fix. The DS4 path does log both
+priority lines: the pause line printed verbatim (scratch/card-r1-engine.txt:4, printed at serve/server.py:5871-5873;
+cand :5983) and the continue line printed too, in its numberless wording (:15). What is missing is only the figure
+on the continue line (finding 1) — the fix is wiring, not new lines. And the keep's own numbers are right: the cut
+was seen at 24,576 = 3 × the 8192 default step and landed live at 32,768 = 4 × step (a between-runs stop, the
+`read_stop_landing` live case, src/ds4/ds4_marks.hpp:128-144), the total engine read was one pass, not two (:3,
+:55). P124k's own card check would have PASSED on this very evidence — its greps are engine-stderr only, `stopped
+while reading the prompt` / `kept live at N tokens` / `prompt N tokens = K reused` with 0 < K < N
+(scratch/card-test-ds4-keep-read.sh:152-175); it was the shared P124r script's server-log expectation that failed.
 
-### 4. NIT — REPORT §4:118-119 says `REPORT-*.md` "is ignored in this worktree": `.gitignore` has
-no such pattern (only `scratch/` at line 20, `*.log`); the REPORT was added plainly. The
-force-add reality applies to `REVIEW-RESULT.md` (main checkout's `.git/info/exclude:42`), not to it.
+### 4. INFO — the P124k diff needs nothing for this. `git show --stat 3637f9901` touches only REVIEW-RESULT.md, so
+the code at HEAD is byte-identical to what round 2 verified (landing correctness, OFF-path, multi, locks/stdout,
+file discipline — that text survives at `git show 3637f9901:REVIEW-RESULT.md`, its nits 1-4 and infos unchanged by
+the card run). This worktree's serve/server.py is the base file — the whole range `git diff --name-only
+856af24ab..HEAD` carries no `serve/`, and here `keeps_stopped_read` still defaults False (serve/server.py:1464)
+with a READY parse that does not know `keepread` (:1516-1523); the gate itself is P124u on the candidate
+(cand serve/server.py:1529-1530, the word-not-the-name rule). Fixes 1+2 therefore go to that line/branch; the
+Ds4Read fake P124u step 3 added (candidate test_priority, "keeps the read ... no figure over the pipe") is the one
+fix 1 must update.
 
-### 5. INFO — round-1 finding 5 (steps 2+3 in one commit, `70464b721`) stands unfixed by design
-(`FIX-REPORT.md` §Finding 5): rewriting reviewed history. Accepted as recorded; future steps commit
-per numbered item.
+## Commands run for this round (one at a time, the plan's module only)
 
-### 6. INFO — default-on before the gate: the run cap and the lost marks-inside shortcut cost every
-*uninterrupted* read too (`:1754-1757`, `:1768`), while nothing can cut a DS4 read until the gate
-task (`serve/server.py:5740-5743` with `keeps_stopped_read=False`, `:1464`). Disclosed as open q.3;
-the cap is load-bearing (a mid-run stop falls back at most one step, `:1754-1755` comment) and the
-card script measures it (`SAGUARO_DS4_KEEP_READ=0` A/B, `scratch/card-test-ds4-keep-read.sh:17-18`).
-If the card A/B shows a chunk-path cost that matters, flipping the default until the gate lands is
-the one-line answer — the READY word already follows the setting (`:757-766`).
+- `g++ -std=c++17 -Wall -Wextra -O1 tests/ds4_marks_test.cpp -o scratch/ds4_marks_test_r3` + run →
+  `ds4_marks_test: ok`, no warnings; the round-2 build-dir binary (`scratch/build-p124k/ds4_marks_test`, newer
+  than every source) also runs ok. No CUDA rebuild needed: the sources have not moved since it was built. No GPU,
+  no serve test run (the plan names only the C++ module; the affected serve modules belong to the fix, finding 1).
+- Evidence reads at the candidate: `tools/card_tests/lost_read.sh` and `serve/server.py` from `saguaro/rc124-cand`
+  (HEAD is an ancestor of that branch, so the manager's card exe is this code plus the gate) — copies left in
+  `scratch/review_lost_read_cand.sh`, `scratch/review_server_cand.py` (scratch/ is ignored). Manager's extract:
+  `scratch/card-r1-engine.txt`.
+- Hygiene re-check: the diff's added lines carry no paths outside the repo and no secrets (the only hits are the
+  script dropping `api_key` and the sanctioned `/opt/llm/saguaro/.venv/bin/python`); `serve/qfn_engine.py` and
+  `engines/qfn/serve/server.py` untouched in the range → no extractor owed; the ten code/report commits and this
+  review carry no Co-Authored-By/Claude-Session/Assisted-by lines.
 
-## Round-1 findings — fix verification (the fix commits, one per finding)
-
-- **Finding 1 (HIGH) — FIXED (73e5666cf), verified.** The checkpoint is by progress, not run end:
-  `Prompt::keep_at` (`src/ds4/ds4_main.cpp:1476-1478`), started at `from + keep_step` (`:1662`), and
-  `:1832-1836` takes `checkpoint(0)` where the read first stands at or past it, then steps it on —
-  the `took == n` condition is gone, so a windows-path run of 16 no longer pays a snapshot
-  (`feed_unit()`'s 16: the path a Stop can never fall inside anyway — `feed_windows` polls no cancel,
-  only `forward_chunks` does, `src/ds4/ds4_model.cu:22174-22183`). A run that *yielded* is a whole
-  state (`set_yield` keeps its chunks read, `src/ds4/ds4_model.hpp:272-275`), so checkpointing at a
-  yield's end is valid. The run cap stays (`:1756-1757`) — that is what bounds the mid-run fallback
-  to one step behind `run_start`.
-- **Finding 2 (LOW) — FIXED (94568bc49), verified.** `splits_span` is shared
-  (`src/ds4/ds4_marks.hpp:120-126`), used by `read_stop_landing` itself (`:138-144`) and by the keep
-  block (`src/ds4/ds4_main.cpp:1832-1833`); the spans are built once before the loop from the read's
-  pictures and the state's held ones (`:1740-1744`) — the same list the landing weighs (`:1858`), so
-  a point skipped for splitting a span does not hide the deeper ones. `keep_at` not advanced on a
-  skip (`:1835` only runs with the checkpoint), so the first clear run end takes the point.
-  Boundary tests at `tests/ds4_marks_test.cpp:190-193`.
-- **Finding 3 (NIT) — FIXED (3ba3a058b), verified.** The READY grep is gone; the script now reports
-  `SAGUARO_DS4_KEEP_READ` as the engine really gets it — config copy's `env` first, the exported one
-  as fallback (`scratch/card-test-ds4-keep-read.sh:77-85`), which matches `child_env` precedence
-  (`serve/server.py:2954-2966`: `dict(os.environ)` then config wins). PASS/FAIL rests on the
-  behaviour greps, all engine-stderr lines (`:153,157,170` — `stopped while reading the prompt`
-  `src/ds4/ds4_main.cpp:1887`, `kept live at N tokens` `:1871-1873`).
-- **Finding 4 (NIT) — FIXED (74f24e568), verified.** `tests/ds4_marks_test.cpp:218` asks
-  `cv.restorable(16384)` at the run's own start, as the engine does
-  (`m.restorable(mid ? P.run_start : P.done)`, `src/ds4/ds4_main.cpp:1857`); REPORT §4 names the real
-  `FRACS` default (`.50 .65 .80`, script `:26`).
-
-## Checked and good (with evidence)
-
-- **Landing correctness.** Mid-run stops never ask for the stopped run's consumed count
-  (`src/ds4/ds4_marks.hpp:140`, `mid ? -1 : done`) — right per `set_cancel`'s contract
-  (`src/ds4/ds4_model.hpp:263-265`) and `fed()` standing at the full n on a cancelled feed
-  (`src/ds4/ds4_model.cu:24352` vs the `fed_n = took` only on success, `:22234`); a cancelled run
-  commits no tokens and no `inner` marks (`:22224-22230` returns before `:22392-22395`). The live
-  shortcut is taken only between runs and verified against `m.pos()` (`src/ds4/ds4_main.cpp:1859-1860`);
-  a mid-run landing always goes through `restore()`, which reloads, rewinds `pos` and drops the
-  points past it (`src/ds4/ds4_model.cu:11295-11303`), so a chunk-halt's dirty rows cannot survive. Every candidate is a stored point ≤ `pos` holding the
-  conversation's own tokens (`latest_point`'s `≤ limit && ≤ pos`, `src/ds4/ds4_marks.hpp:24-29`;
-  invariant `src/ds4/ds4_model.cu:1705-1708`), and after `prompt_begin` all stored points agree with
-  this prompt's prefix (reset/restore/slot paths: `src/ds4/ds4_main.cpp:1540-1592`, restore clears
-  points past pos). No landing → fall-through to the pre-change branch, byte-for-byte the old
-  behaviour (`:1882-1894`). `held` re-hang mirrors `prompt_end`'s at `keep` (`:1862-1869` vs
-  `:1919-1925`); held spans are all ≤ `from`, so `≤ keep` matches what the kept state really holds.
-- **Feature OFF unchanged.** With `SAGUARO_DS4_KEEP_READ=0`: READY strings identical to base
-  (`:767-770` vs `856af24ab:750-752`), the run-cap min gains `(size_t)-1` (`:1756-1757`), the
-  marks-inside condition reduces to the old one (`:1768`), the keep block and the stopped-keep
-  branch are `keep_read`-guarded; `keep_at`/`run_start` are inert writes. With keep ON and
-  `SAGUARO_DS4_KEEP_READ_STEP=0` the read shape is the old one too (every new condition keys on
-  `keep_step > 0`) while the branch keeps off marks/base — consistent with READY saying `keepread`.
-  The OFF path emits no new line anywhere.
-- **--parallel / solo / reader thread.** One change in `prompt_piece` covers all
-  (`:1931` solo, `:2439` multi with the per-rid tag), checkpoints/marks travel with their
-  conversation on bind (`ck`/`mk` moved in park/unpark, `src/ds4/ds4_model.cu:11087-11102`); the new
-  model calls (`checkpoint(0)` between runs, `restorable`/`restore` in the branch) sit exactly where
-  `mark()`/`feed()` already sat — inside the reader's exclusive sections between a run's start and
-  end (`src/ds4/ds4_main.cpp:2262`), the serve loop gated out (DS4_READER gate, `:2153`).
-- **Locks/threads/stdout.** No new lock, no nested acquire: `stop_now` → `Lines::stopped` takes only
-  `Lines::mu` (`src/ds4/ds4_main.cpp:175-179`), held nowhere across a model call; the branch prints
-  one DONE with the per-rid tag, `end_note()` before it, `fflush` after — the other DONE paths'
-  pattern (`:1876-1878` vs `:1889-1892`); field layout unchanged (`reused` stays f[8] of the 11-field
-  DONE, parsed at `serve/server.py:1852`).
-- **Generated file discipline.** The whole range touches only `src/ds4/ds4_main.cpp`,
-  `src/ds4/ds4_marks.hpp`, `tests/ds4_marks_test.cpp`, the REPORT, the FIX-REPORT and the scratch
-  script; `serve/`, `engines/qfn/serve/server.py` and `serve/qfn_engine.py` are untouched
-  (`git diff --stat`), so no `tools/saguaro/extract_qfn_engine.py` run was owed, as the reports say.
-  `keepread` is inert to today's server (READY words pass through, `serve/server.py:1515-1523`) and
-  the DS4 gate stays shut until the follow-up task.
-- **Tests really exercise the change.** `read_stop_landing` covers live/stored/base/mid/span cases
-  (`tests/ds4_marks_test.cpp:197-210`) and `splits_span` its boundaries (`:190-193`); the
-  stopped-branch case replays the engine's own calls on the Conv mock, whose `restorable` mirrors
-  `best_check` (`:67-71`) — kept point, continue in place, read only the rest (`:211-226`).
-- **Hygiene.** Script writes only under `scratch/ds4-keep-read/`, strips `api_key`, owns its
-  session/slot dirs and engine log (`scratch/card-test-ds4-keep-read.sh:43-60`); the only external
-  path is the sanctioned `/opt/llm/saguaro/.venv/bin/python` (same as the base's card scripts); no
-  secrets in the diff; the ten commits carry no `Co-Authored-By`/`Claude-Session`/`Assisted-by`
-  trailers; `SAGUARO_DS4_KEEP_READ` parses like the existing `*_AUTO` settings (garbage reads as off
-  — the conservative direction, READY follows).
-
-## Commands run for this round (one at a time, as the plan names)
-
-- `g++ -std=c++17 -Wall -Wextra -O1 tests/ds4_marks_test.cpp` (output into `scratch/`) + run →
-  `ds4_marks_test: ok`, no warnings.
-- `ninja -C scratch/build-p124k maya-ds4 ds4_marks_test` → EXIT 0 (the build regenerated its build-id
-  and recompiled `ds4_main.cpp` warning-free, relinked `saguaro-ds4`; cache confirms
-  `/usr/local/cuda-13.1/bin/nvcc`, arch 75); `./scratch/build-p124k/ds4_marks_test` → ok; `strings`
-  on the engine shows `READY %lld stop%s` / ` multi=%d%s`, `keepread`, both env names.
-- `bash -n scratch/card-test-ds4-keep-read.sh` → clean. No GPU run; no serve test module beyond the
-  plan's named one was run (none is affected: `serve/` untouched).
-
-Only REVIEW-RESULT.md was written (force-added: it sits in the main checkout's info/exclude);
-nothing else edited or committed; the tree was clean before and is clean after.
+Only REVIEW-RESULT.md was written; nothing else edited or committed.
