@@ -182,6 +182,10 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(read_backing_test src/core/read_backing_test.cpp)
   target_include_directories(read_backing_test PRIVATE include)
   add_test(NAME read_backing_test COMMAND read_backing_test)
+  # P124e (round 10): the give-way crossing guard SAGUARO_DEBUG_SLOT_GUARD (header-only, CPU)
+  add_executable(slot_give_guard_test src/core/slot_give_guard_test.cpp)
+  target_include_directories(slot_give_guard_test PRIVATE include)
+  add_test(NAME slot_give_guard_test COMMAND slot_give_guard_test)
   # ... carried out on a real conversation cache and session folder
   add_executable(park_release_test src/core/park_release_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
                  src/core/conversation_file.cpp)
