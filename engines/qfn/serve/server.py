@@ -900,12 +900,18 @@ FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed ou
                   "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
 
 # PLAN-p124x (d): a timed-out window is fatal only when its GPU waits did NOT drain. The engine releases the
-# window's waits itself on its 20 s per-layer timeout; when the GPU finishes right after (the #267 note the
-# engine prints, released_note in verify.cpp), no spin kernel is left and the verifier re-arms: the request ends
-# with this error, the engine stays fit for the next one - the shape the 9070 XT box needed, where every such
-# timeout restarted a one-minute reload while five requests waited and the host thrashed. "did not finish
-# within 5 s", and every "an earlier window never finished", still invalidate the engine (and a timed-out line
-# without the finished-note, whatever an older engine prints, stays fatal: safer).
+# window's waits itself on its 20 s per-layer timeout; when the GPU finishes right after and the verifier re-
+# arms (the note the engine prints, released_note/timed_out_note in verify.cpp), no spin kernel is left: the
+# request ends with this error, the engine stays fit for the next one - the shape the 9070 XT box needed,
+# where every such timeout restarted a one-minute reload while five requests waited and the host thrashed.
+# "did not finish within 5 s", a split verifier's still-closed note, and every "an earlier window never
+# finished" still invalidate the engine, and so does a timed-out line with no note at all.
+# The version coupling (review F4): the finished-note means recovered only because the engine printing it is
+# THIS tree's - qfn_engine.py is extracted from this very file and ships with the engine binary it drives,
+# and that engine prints the note only once its verifier really re-armed (F3). Pairing this server with an
+# older engine (which poisoned even a drained window under the same words) is not "safe" the other way: it
+# keeps an engine whose next request then dies on "an earlier window never finished" - one extra failed
+# request before the restart. Keep the server and the engine from one build.
 RECOVERED_267 = "released and the GPU finished (#267)"
 
 
