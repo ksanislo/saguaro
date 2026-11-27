@@ -3227,7 +3227,6 @@ class Service:
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.turbo_default = None                     # the model's live Turbo (PLAN-turbo-live): {"drop","skip"} or None
         self.turbo_path = None                        # its sidecar file (the engine config is never touched)
-        self.turbo_live_before = None                 # Turbo on an engine whose half is live (QFN): the default before
         self.fifo = FairLock()
         self.stopping = False            # the server is ending: a request still queued is refused, not started
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
@@ -3486,9 +3485,10 @@ class Service:
         return dict(self.turbo_default) if self.turbo_default else None
 
     def turbo_skip_supported(self) -> bool:
-        """PLAN-p5: whether this engine applies the skip half of the live Turbo.  QFN's applies drop only (its
-        request line takes turbo_skip= and says the engine leaves it off), and an engine that gains it says so
-        itself (INFO turbo_skip=1, kept in the driver's facts) - until then the page hides the Skip choice.
+        """PLAN-p5: whether this engine applies the skip half of the live Turbo.  The engines do (GLM, DeepSeek,
+        MiniMax by their SeqTurbo bars, QFN since its s1 residency-table skip); QFN is the one that says so over
+        the pipe - INFO turbo_skip=1, kept in the driver's facts - so only a QFN started from an older build,
+        one that parses the key and leaves it off, answers false and the page hides the Skip choice.
         Every other engine takes skip: the default is true."""
         if getattr(self, "engine_kind", None) != "qfn":
             return True
@@ -4038,25 +4038,16 @@ class Service:
     def set_turbo(self, on: bool) -> dict:
         """Turbo on or off.  The engine's part (models.turbo_enable / turbo_disable: the context, the expert skipping, the
         drafting, written into the run config) starts Saguaro again as a saved engine setting does, after the request in
-        flight; nothing to restart where the engine already runs so (or without a run config).  QFN's lossy half is the
-        live per-request Turbo, not the environment: switching on drafts and puts its live Turbo to its default,
-        switching off restores what it was."""
+        flight; nothing to restart where the engine already runs so (or without a run config).  The live per-request
+        Turbo (the sidecar, this app's own chats) is a separate choice: the button never switches it on or off
+        (PLAN-p124s) - only Settings > Turbo, live and the chat's bolt set it."""
         if not self.config_path:
             self.turbo_mem = bool(on)
             return self.turbo_info()
         p = Path(self.config_path)
         self._restart_busy()
-        was = models.read(p) or {}
-        out = models.turbo_enable(p, self.turbo_default) if on else models.turbo_disable(p)
+        out = models.turbo_enable(p) if on else models.turbo_disable(p)
         self.fifo.set_one(models.turbo_one_at_a_time(models.read(p) or {}))
-        live = models.TURBO_LIVE_DEFAULT.get(models.family(models.read(p)))
-        if live is not None:
-            if on:
-                self.turbo_live_before = dict(self.turbo_default) if self.turbo_default else None
-                self.set_turbo_default(live)
-            else:
-                self.set_turbo_default(self.turbo_live_before or (was.get("turbo") or {}).get("live_before"))
-                self.turbo_live_before = None
         restarts = bool(out["changed"] and os.environ.get("SAGUARO_RESTART_ON_UPDATE"))
         if restarts:
             self._restart_into(p, "settings")

@@ -77,7 +77,8 @@ export function turboChoose(chat, key, value) {
   return turboOfChat({turbo: next}) ? next : null;
 }
 
-// the Monitor's badge text for a request's options ("" when exact) - serve/turbo_live.py turbo_badge's twin
+// the Monitor's badge text for a request's options ("" when exact) - the page's own words for the dict the
+// monitor rows carry (serve/server.py sends it raw; the old Python twin in serve/turbo_live.py read nothing)
 export const turboBadge = (t) => {
   if (!t || typeof t !== "object") return "";
   const parts = [];

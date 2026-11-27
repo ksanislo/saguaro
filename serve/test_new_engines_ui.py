@@ -239,8 +239,9 @@ class QfnSettings(unittest.TestCase):
             M.apply(self.cfg, {"parallel": 9})
 
     def test_turbo_is_supported(self):
-        self.assertNotIn("qfn", M.TURBO_LIVE_DEFAULT)
-        self.assertEqual(M.TURBO_DRAFT["qfn"], "mtp")
+        self.assertEqual(M.TURBO_DRAFT["qfn"], "mtp")        # (the button's engine half: Lamina drafting, one at a time)
+        self.assertFalse(hasattr(M, "TURBO_LIVE_DEFAULT"))   # (P125f: the button drops no experts - the live half is
+                                                             #  the user's own, and nothing defaults it on)
         info = M.turbo_info(self.cfg)
         self.assertEqual(info["on"], False)
 
