@@ -370,6 +370,14 @@ if(STRATA_BUILD_TESTS)
   add_executable(host_limits_test tests/platform/host_limits_test.cpp)
   target_include_directories(host_limits_test PRIVATE include)
   add_test(NAME host_limits_test COMMAND host_limits_test)
+  # P124x (a): how much of the host the resident tier may claim (resident_policy.hpp): header-only, no GPU
+  add_executable(resident_policy_test tests/program/resident_policy_test.cpp)
+  target_include_directories(resident_policy_test PRIVATE include)
+  add_test(NAME resident_policy_test COMMAND resident_policy_test)
+  # P124x (b): the VRAM floor the ROCm expert cache sizes against (vram_policy.hpp): header-only, no GPU
+  add_executable(vram_policy_test tests/program/vram_policy_test.cpp)
+  target_include_directories(vram_policy_test PRIVATE include)
+  add_test(NAME vram_policy_test COMMAND vram_policy_test)
 endif()
 
 # ---- strata_plan ----------------------------------------------------------

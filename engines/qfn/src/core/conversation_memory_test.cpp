@@ -62,6 +62,33 @@ int main() {
     // Test the real provider without assuming any particular amount of free RAM.
     const auto available = available_host_bytes();
     check(!available || conversation_memory_admit(available, 0, 0), "provider returns bytes or unknown");
+    // P124x: SwapTotal - SwapFree, the parks' "the host is already on disk" reading
+    for (const char* text : {"", "SwapTotal: 8 kB\n",
+                            "SwapFree: 4 kB\n",
+                            "SwapTotal: -1 kB\nSwapFree: 0 kB\n",
+                            "SwapTotal: 1 MB\nSwapFree: 0 kB\n",
+                            "SwapTotal: 8\nSwapFree: 0\n",
+                            "SwapTotal: 8 kB x\nSwapFree: 0 kB\n",
+                            "SwapTotal: 8 kB\nSwapTotal: 4 kB\nSwapFree: 0 kB\n",
+                            "SwapTotal: 18446744073709551616 kB\nSwapFree: 0 kB\n"}) {
+        std::istringstream input(text);
+        check(!conversation_swap_used(input), "missing/malformed swap telemetry is unknown");
+    }
+    {
+        std::istringstream none("MemTotal: 8 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
+        check(conversation_swap_used(none) == 0, "no swap configured: none in use, and known");
+        std::istringstream mortar("SwapCached: 100 kB\nSwapTotal: 8192 kB\nSwapFree: 3072 kB\n");
+        check(conversation_swap_used(mortar) == 5120ULL * 1024, "SwapTotal less SwapFree, other lines ignored");
+        std::istringstream drift("SwapTotal: 3 kB\nSwapFree: 9 kB\n");
+        check(conversation_swap_used(drift) == 0, "SwapFree read above SwapTotal is 0, never negative");
+        std::istringstream broken("SwapTotal: 8 kB\nSwapFree: 0 kB\n");
+        broken.setstate(std::ios::badbit);
+        check(!conversation_swap_used(broken), "swap I/O failure is unknown, not zero");
+    }
+#if defined(__linux__)
+    // host_swap_used_bytes(): every Linux meminfo names SwapTotal and SwapFree, swap or none
+    check(host_swap_used_bytes().has_value(), "the host swap reading answers on Linux");
+#endif
 #if defined(_WIN32)
     // Unknown must fail closed in production, but must not let a broken Windows provider pass this test.
     // Compare with total physical memory, not a second available reading: other processes can allocate

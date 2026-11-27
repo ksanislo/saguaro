@@ -94,10 +94,22 @@ public:
     void trace_dump(std::FILE* f) const;
 
     /// #267: raise every flag the window's spin kernels wait on past any ring (UINT32_MAX), so a window the GPU
-    /// cannot finish drains instead of staying resident, then wait up to `timeout_ms` for its streams.  For the
-    /// paths that give up on the engine (a timed-out window, the serve watchdog): the window then ran on whatever
-    /// the flags guarded, so this verifier refuses every later window.  True when the streams finished.
-    bool release_gpu_waits(int timeout_ms);
+    /// cannot finish drains instead of staying resident, then wait up to `timeout_ms` for its streams.  With
+    /// `poison` (the serve watchdog, which ends the process right after): the window ran on whatever the flags
+    /// guarded, so this verifier refuses every later window either way.  Without it (a window that timed out on
+    /// its own 20 s host wait, PLAN-p124x): a stream that DRAINED holds no spin kernel any more - the failed
+    /// window's request still ends with the timeout error, but the handshake words go back to their no-window
+    /// values and the verifier takes the next window; a stream that did not drain poisons it, as before, and a
+    /// split's verifier (a next stage, an incoming hand-off word) stays poisoned on a drained re-arm too.
+    /// True when the streams finished; `re_armed`, when given, says so only when the verifier will take another
+    /// window (drained, not poisoned, not a split) - P124x review F3: the engine's note must not let the server
+    /// read a still-closed verifier as recovered.
+    bool release_gpu_waits(int timeout_ms, bool poison = true, bool* re_armed = nullptr);
+
+    /// The #267 note after a window's OWN host wait timed out (P124x F3): release with the re-arm rule and word
+    /// it three ways - did not drain (fatal), drained and re-armed (the request ends, the engine goes on),
+    /// drained but still closed (a split: fatal, one failed request earlier than the stale-verifier shape).
+    std::string timed_out_note();
 
     /// `max_t` <= kVerifyMaxT.  `head` may be null (the canonical head is then run per token).
     bool init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
@@ -553,7 +565,9 @@ private:
     float* logit_bias_device_ = nullptr;
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
     unsigned long long* rr_stats_ = nullptr;   ///< SAGUARO_ROUTE_RESIDENT's counters on device_ (#1578); null: none
-    std::atomic<bool> released_{false};  ///< #267: release_gpu_waits ran (maybe on the watchdog thread): no more windows
+    std::atomic<bool> released_{false};  ///< #267: a release poisoned this verifier (watchdog, or a release whose
+                                         /// stream never drained): no more windows.  A self-timeout that DRAINED
+                                         /// re-arms instead (P124x) - the request ends, the engine keeps serving.
     bool all_resident_ = false;           ///< 100% of experts in [lb_, le_) resident in VRAM: zero-doorbell graph
     /// #871: the zero-doorbell graph plans from the device residency table alone, so it is only right while every
     /// expert of the stage is in VRAM.  A prompt loan, a VRAM shrink or an adaptive swap marks some -1 for a while:

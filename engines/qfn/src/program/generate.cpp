@@ -35,6 +35,8 @@
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/park_policy.hpp"
 #include "strata/core/park_release.hpp"
+#include "strata/core/resident_policy.hpp"
+#include "strata/core/vram_policy.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/foresight_swap.hpp"
@@ -1863,12 +1865,9 @@ bool launch_blocking() {
 /// #2065: the VRAM free when the current request began (-1 before the first); the stall report prints it, because a
 /// card this full is the one measured cause of a window that never finishes (the driver pages GPU memory).
 std::atomic<int64_t> g_req_vram_free_mib{-1};
-constexpr int64_t kVramSafeMib =
-#ifdef _WIN32
-    1024;   // WDDM pages instead of failing (docs/DETAILS.md, the sysmem fallback): the line #2065 fell below
-#else
-    512;
-#endif
+// WDDM pages instead of failing (docs/DETAILS.md, the sysmem fallback): the line #2065 fell below.  P124x: the
+// one source of the figure - vram_policy.hpp's floor is what the expert cache now also sizes against.
+constexpr int64_t kVramSafeMib = strata::core::vram::safe_floor_mib();
 
 void stall_report(std::FILE* f, uint64_t layers_during) {
     strata::core::Progress& p = strata::core::progress();
@@ -6424,6 +6423,50 @@ int main(int argc, char** argv) {
     }
     strata::core::ArenaExpertSource arena_src;
     strata::core::ExpertSource* srcp = nullptr;
+    // P124x (a): the resident tier keeps a real margin beside it (resident_policy.hpp).  `--resident-budget-gib`
+    // names what the tier may pin; the shared K/V pool (the live streamed K/V and the parked conversations, one
+    // budget), the turn-save captures it bounds and the host's own working set - OS, harness, and the page cache
+    // the file tier reads through - have to fit in what is left.  On a 96 GB host the asked 68 GiB reached 89 GiB
+    // of RSS, 2-5 GiB of swap and 100k+ major faults before the aborts (mortar, 2026-11-24); a budget that keeps
+    // the margin is untouched, one that does not is cut to it, said.  SAGUARO_RESIDENT_BUDGET_CAP=0 keeps the
+    // asked budget as it is (rule (a)'s knob, review N2 - (b) has SAGUARO_VRAM_RESERVE_FLOOR=0 and (c)
+    // SAGUARO_PARK_SWAP_MIB=0; rule (d) has no operator knob, its switch is the recovered note itself): an
+    // operator who measured the box wins.  Parsed strictly (re-review L2): only exactly "0" turns the cap
+    // off - atoi read "off", "no" and every typo as 0 and silenced the rule that exists to save the box.
+    static const bool resident_cap_off = [] { const char* v = std::getenv("SAGUARO_RESIDENT_BUDGET_CAP");
+                                              return v != nullptr && std::string(v) == "0"; }();
+    if (o.resident_budget > 0 && !resident_cap_off) {
+        const uint64_t host_total = strata::platform::total_physical_memory();
+        const uint64_t kv_pool = strata::core::qsa_kv_bytes_per_cell(g) *
+                                 (uint64_t) std::max<int64_t>(0, g.n_qsa_layers()) * (uint64_t) o.max_context *
+                                 (uint64_t) std::max(o.batch, 1);
+        const uint64_t cap = strata::core::resident::budget_cap(host_total, kv_pool);
+        if (host_total > 0 && o.resident_budget > cap) {
+            if (cap == 0)
+                // the tightest hosts: there is no budget that fits.  Said loudly and the asked figure kept -
+                // clamping to zero would silently flip the box out of the resident mode its setup named (N2)
+                std::fprintf(stderr, "saguaro generate: resident budget: this %.2f GiB host has no room for any tier beside "
+                                     "its K/V pool and captures (%.2f GiB) and the host's own margin (%.2f GiB): "
+                                     "--resident-budget-gib %.2f is kept as asked, but a host this full swaps every expert "
+                                     "read - shrink --max-context/--batch, or give the box more RAM (P124x)\n",
+                             (double) host_total / 1073741824.0,
+                             (double) strata::core::resident::runtime_bytes(kv_pool) / 1073741824.0,
+                             (double) strata::core::resident::host_margin_bytes(host_total) / 1073741824.0,
+                             (double) o.resident_budget / 1073741824.0);
+            else {
+                std::fprintf(stderr, "saguaro generate: resident budget: %.2f GiB of this host's %.2f GiB are kept for the tier, "
+                                     "not the %.2f GiB asked (--resident-budget-gib): the K/V pool and its captures take %.2f "
+                                     "GiB beside it and the host keeps %.2f GiB for itself, its other programs and the file "
+                                     "tier's page cache - a host with no margin swaps every expert read (P124x; "
+                                     "SAGUARO_RESIDENT_BUDGET_CAP=0 keeps the asked budget)\n",
+                             (double) cap / 1073741824.0, (double) host_total / 1073741824.0,
+                             (double) o.resident_budget / 1073741824.0,
+                             (double) strata::core::resident::runtime_bytes(kv_pool) / 1073741824.0,
+                             (double) strata::core::resident::host_margin_bytes(host_total) / 1073741824.0);
+                o.resident_budget = cap;
+            }
+        }
+    }
     if (o.mmap_experts) {
         // FileExpertSource maps the pack's experts.bin: a canonical pack has it; a native (IQ) pack has it when
         // built with `tools/iq_pack.py --experts-bin` (the per-layer blob sizes of its layout, PR #121).  The low-RAM
@@ -6827,6 +6870,55 @@ int main(int argc, char** argv) {
             }
 #endif
         }
+        // P124x (b): the same paging shape on Linux/ROCm, and the same lesson as #1376: the reserve the cache is
+        // sized against is spent by what the engine allocates after the cache (the window captures, the per-slot
+        // MTP heads, the driver's slack), and the engine's own #2065 line - kVramSafeMib, the "LOW:" the stall
+        // report prints - was a label with nothing sizing against it.  The mortar box kept the given 700 MiB,
+        // reached 416-432 MiB free at request start ten of its eleven aborts, and the driver paged GPU memory into
+        // a host RAM the expert tier had already filled.  On auto sizing, a ROCm DISCRETE card of 15 GiB and up
+        // (the #1709 figure) keeps at least the floor plus the measured slack (vram_policy.hpp); an integrated
+        // APU is left alone - its "total VRAM" is a window into system RAM (GTT), the #1709 threshold was measured
+        // on discrete cards, and the UMA block above sizes for that different shape (review N3).  A bigger reserve
+        // is kept as it is, a given one included - a reserve this side of the floor is what ended the engine, so
+        // this floor, unlike #496's, does not step back for `--vram-reserve-mib` below it.  Its own knob
+        // (re-review M1): SAGUARO_VRAM_RESERVE_FLOOR=0 skips the floor and keeps the reserve as it was given
+        // (or the default), for an operator who stays on auto sizing but measured a smaller reserve to fit.
+        // What it promises is what the CACHE is sized against here: on a card too full for even the smallest
+        // working cache at the floored reserve, #496's lowering below may still take the reserve toward
+        // kSmallReserveMib - said in its own line, never silently (re-review L1).  The cache size changes no
+        // output bit.  Linux/HIP only (re-review L3): the first cut ran the card probe on CUDA builds too,
+        // where the floor never raises - it asked the card for two figures and cleared a pending
+        // cudaGetLastError() for nothing.  Windows keeps kWddmAutoReserveMib above (the #1376 path), CUDA's
+        // free figure measures honest with the same reserve (#1376's A/B arm), and vram_policy_test still
+        // drives the header's CUDA/Windows arms directly.
+#if defined(STRATA_USE_HIP) && !defined(_WIN32)
+        {
+            const char* floor_env = std::getenv("SAGUARO_VRAM_RESERVE_FLOOR");
+            const bool floor_on = floor_env == nullptr || std::string(floor_env) != "0";
+            const int asked = o.vram_reserve_mib;
+            int floored = asked;
+            if (floor_on) {
+                size_t fb_now = 0, tb_now = 0;
+                const uint64_t total_vram = cudaMemGetInfo(&fb_now, &tb_now) == cudaSuccess ? tb_now : 0;
+                cudaDeviceProp rsv_p{};
+                int rsv_dev = 0;
+                const bool rsv_integrated = cudaGetDevice(&rsv_dev) == cudaSuccess &&
+                                            cudaGetDeviceProperties(&rsv_p, rsv_dev) == cudaSuccess && rsv_p.integrated != 0;
+                (void) cudaGetLastError();
+                floored = strata::core::vram::hip_auto_reserve_mib(true, false, rsv_integrated, total_vram, asked);
+            }
+            if (floored > asked) {
+                std::fprintf(stderr, "saguaro generate: expert cache auto: the reserve stays at least %d MiB on this ROCm "
+                                     "card, not the %d MiB %s: the window captures and the drafter's heads take about half "
+                                     "of it after the cache, and below the 512 MiB paging line the driver pages GPU memory "
+                                     "to a full host RAM and windows never finish (#2065, P124x); --expert-cache N sizes "
+                                     "the cache by hand, SAGUARO_VRAM_RESERVE_FLOOR=0 keeps the reserve as asked, and a "
+                                     "card too full for any working cache at it may still see the #496 line lower it\n",
+                             floored, asked, o.vram_reserve_given ? "it was asked for" : "it is the default");
+                o.vram_reserve_mib = floored;
+            }
+        }
+#endif
         const int64_t prefill_mib = owned_prefill_mib();
         // the draft layer's head and logits are allocated when it binds, after this: 0.1.27's CJK subset made them
         // ~110-180 MiB larger, and out of the reserve they left 16 GB cards below the stall line (#199)
@@ -10492,6 +10584,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             park_lim.severe_bytes = (uint64_t) o.conversation_cache_min_free_mib << 20;
             park_lim.psi = env_num("SAGUARO_PARK_PSI", 10.0);
             park_lim.idle_s = env_num("SAGUARO_PARK_IDLE_S", 0.0);
+            park_lim.swap_bytes = (uint64_t) env_num("SAGUARO_PARK_SWAP_MIB", 256.0) << 20;
             if (o.conversation_cache_pool) {
                 // one pool with the live K/V: every batch slot at --max-context (the solo session alone without --batch)
                 const uint64_t per_token = strata::core::qsa_kv_bytes_per_cell(g) * (uint64_t) std::max<int64_t>(0, g.n_qsa_layers());
@@ -10501,18 +10594,29 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (o.serve && o.conversation_cache_mib > 0)
                 std::fprintf(stderr, "saguaro serve: conversation cache: %s%lld MiB for up to %d parked conversations; they "
-                                     "leave when available RAM is under %lld MiB%s%s, unsaved ones only under %lld MiB\n",
+                                     "leave when available RAM is under %lld MiB%s%s%s, unsaved ones only under %lld MiB\n",
                              o.conversation_cache_pool ? "one pool with the live K/V (--max-context x batch slots), " : "",
                              (long long) o.conversation_cache_mib, o.conversation_cache_slots,
                              (long long) (park_lim.free_bytes >> 20),
                              park_lim.psi > 0 ? (" or memory stalls pass " + std::to_string(park_lim.psi).substr(0, 5)).c_str() : "",
+                             park_lim.swap_bytes > 0
+                                 ? (", or swap in use passes " + std::to_string(park_lim.swap_bytes >> 20) +
+                                     " MiB (P124x)").c_str()
+                                 : "",
                              park_lim.idle_s > 0 ? (", or after " + std::to_string((long long) park_lim.idle_s) + " s idle").c_str() : "",
                              (long long) o.conversation_cache_min_free_mib);
         }
         if (o.serve) {
-            std::printf("INFO park_pool=%d park_pool_mib=%lld park_free_mib=%lld park_psi=%.1f park_idle_s=%lld\n",
+            // park_swap_mib= joins the INFO line (P124x) WHEN THE RULE IS ON: with SAGUARO_PARK_SWAP_MIB=0 the
+            // line is exactly what it was before P124x (re-review L3 - an off switch should say nothing new);
+            // the server's parser reads the keys it knows and ignores the rest, so an external one must key
+            // on names, not on the token count of this line (report 4).
+            const std::string swap_tok = park_lim.swap_bytes > 0
+                                             ? " park_swap_mib=" + std::to_string(park_lim.swap_bytes >> 20) : "";
+            std::printf("INFO park_pool=%d park_pool_mib=%lld park_free_mib=%lld park_psi=%.1f park_idle_s=%lld%s\n",
                         o.conversation_cache_pool ? 1 : 0, (long long) (park_lim.pool_bytes >> 20),
-                        (long long) (park_lim.free_bytes >> 20), park_lim.psi, (long long) park_lim.idle_s);
+                        (long long) (park_lim.free_bytes >> 20), park_lim.psi, (long long) park_lim.idle_s,
+                        swap_tok.c_str());
             std::fflush(stdout);
         }
         auto park_clock = [] { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); };
@@ -18312,6 +18416,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::ifstream psi("/proc/pressure/memory");
                 if (psi) mem.psi_some10 = pk::psi_some10(psi);
             }
+            // P124x: what the kernel has already moved to swap.  The credit above is a bet that the pinned tier
+            // stays resident; with swap over the bar the bet is lost and the raw reading decides again (mortar ran
+            // 2-5 GiB of swap behind a credited-calm `available` while the releases did nothing).
+            if (park_lim.swap_bytes > 0) mem.swap_used = strata::core::host_swap_used_bytes();
             const bool pressed = pk::pressure_need(mem, park_lim) > 0;
             // the hard floor is judged raw: below it the releases must run however big the credit is (F1)
             const bool hard = pk::severe(mem, park_lim);
@@ -18322,8 +18430,11 @@ vs.d_skip_usage = gs.d_skip_usage;
             // the freed blocks the park pool keeps mapped are RAM nobody uses: they go before any conversation
             if (pressed && pooled > 0) {
                 const size_t n = strata::core::parked_block_pool_trim(0);
-                std::fprintf(stderr, "saguaro serve: conversation cache: memory pressure (%.1f GiB free): %zu MiB of "
-                                     "pooled park buffers go back to the OS\n", free_gib, n >> 20);
+                char sw[64] = "";
+                if (mem.swap_used && *mem.swap_used > 0)
+                    std::snprintf(sw, sizeof sw, ", %.1f GiB in swap", (double) *mem.swap_used / 1073741824.0);
+                std::fprintf(stderr, "saguaro serve: conversation cache: memory pressure (%.1f GiB free%s): %zu MiB of "
+                                     "pooled park buffers go back to the OS\n", free_gib, sw, n >> 20);
                 return;   // (the next tick samples again)
             }
             if (conversations.size() == 0) return;
@@ -18343,6 +18454,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::snprintf(why, sizeof why, "budget: the live K/V holds %.1f of the pool's %.1f GiB",
                                   (double) strata::core::qsa_kv_host_bytes() / 1073741824.0,
                                   (double) park_lim.pool_bytes / 1073741824.0);
+                else if (pk::swap_high(mem, park_lim))
+                    std::snprintf(why, sizeof why, "pressure: %.1f GiB free, %.1f GiB already in swap (P124x: the host is "
+                                                   "out of RAM, the engine's own pinned tier gives no calm)",
+                                  free_gib, mem.swap_used ? (double) *mem.swap_used / 1073741824.0 : 0.0);
                 else if (mem.psi_some10 && pk::psi_high(mem, park_lim) && !pressed)
                     std::snprintf(why, sizeof why, "pressure: memory stalls %.1f, %.1f GiB free", *mem.psi_some10, free_gib);
                 else if (mem.own_pinned > 0)

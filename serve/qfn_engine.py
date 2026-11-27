@@ -503,6 +503,31 @@ SLOT_LINES = ("BT ", "BDONE ", "BRP ", "BRA ", "BRE ")
 # finished, #267): the process may stay alive and even print DONE, but it must not take another request.
 FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed out at layer ",
                   "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
+# PLAN-p124x (d): a timed-out window whose GPU waits DRAINED and whose verifier re-armed (the note the
+# engine prints, released_note/timed_out_note in verify.cpp) says the card is clean: the request ends with
+# this error instead of the pump's SIGKILL of a process that is ending itself, and the verifier can take
+# another window. What it does NOT yet do (review F-A): keep this process to the next request. Every serve
+# path that prints a timed-out ERR returns 1 out of the request loop (the solo prompt read and the solo
+# decode window, the batch step and a batch_fatal prompt read in generate.cpp), so the engine exits seconds
+# after this line, "the engine had stopped" is logged and a reload follows - the one-minute reload the
+# 9070 XT box saw on every #267 is avoided only once those paths return to stdin on the re-armed shape.
+# The rule here is the protocol's half: never SIGKILL a recovered line, and a recovered line means what it
+# says. "did not finish within 5 s", a split verifier's still-closed note, and every "an earlier window
+# never finished" still invalidate the engine, and so does a timed-out line with no note at all.
+# The version coupling (review F4): the finished-note means recovered only because the engine printing it is
+# THIS tree's - qfn_engine.py is extracted from this very file and ships with the engine binary it drives,
+# and that engine prints the note only once its verifier really re-armed (F3). Pairing this server with an
+# older engine (which poisoned even a drained window under the same words) is not "safe" the other way: it
+# keeps an engine whose next request then dies on "an earlier window never finished" - one extra failed
+# request before the restart. Keep the server and the engine from one build.
+RECOVERED_267 = "released and the GPU finished (#267)"
+def fatal_engine_line(line: str) -> bool:
+    """True for the engine's #267 words that mean the verifier cannot take another window."""
+    if not line.startswith(FATAL_PREFIXES):
+        return False
+    timed_out = line.startswith("ERR verify: timed out at layer ") or line.startswith("ERR verify batch: timed out at layer ")
+    return not (timed_out and RECOVERED_267 in line)
+
 def parse_engine_stage_line(line: str) -> list[dict] | None:
     """Accept only the engine's final, contiguous stage plan (inclusive layer ends)."""
     line = logctx.unstamp(line)
@@ -919,9 +944,11 @@ class StrataEngine:
             if line.startswith("INFO ") and self._session_note(line):
                 continue                                # a session note: shown and kept, never an answer
             # checked before batch routing: a fatal line is never a slot's own
-            if line.startswith(FATAL_PREFIXES):
+            if fatal_engine_line(line):
                 # release_gpu_waits invalidates the verifier, even if the native
-                # process stays alive and prints DONE afterwards.
+                # process stays alive and prints DONE afterwards.  (A timed-out window whose waits drained is not
+                # one of those: the engine re-armed its verifier, P124x - the request ends with the error, the
+                # engine keeps the next one.)
                 if self.proc is proc:
                     self.silent_note = "Unrecoverable native verification failure: " + line[4:].strip()
                     self.ended = True
