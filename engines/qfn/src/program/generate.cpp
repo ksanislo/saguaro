@@ -48,6 +48,7 @@
 #include "strata/core/on_device.hpp"
 #include "strata/core/peer_experts.hpp"
 #include "strata/core/read_backing.hpp"
+#include "strata/core/slot_give_guard.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/layout.hpp"
 #include "strata/core/session.hpp"
@@ -8817,6 +8818,11 @@ int main(int argc, char** argv) {
     // request hands them back and the slots are refilled with the profile's hottest experts.  Neither side's
     // addresses move, so every captured graph stays valid.  The context is never smaller: --max-context cells always
     // fit, the cache simply holds fewer experts while a long one is live.
+    // P124e (round 10, manager card): SAGUARO_DEBUG_SLOT_GUARD=1 (core/slot_give_guard.hpp).  The two providers
+    // are set where their data exists (guard_loans where pf_parts has its lend lines, guard_regions with gv);
+    // every give path calls them when the guard is on.  They read LIVE state: kvg.lo/top, gv.lo/top, first_now.
+    std::function<std::vector<strata::core::GiveLoan>(const void*)> guard_loans;
+    std::function<std::vector<strata::core::GiveRegion>(const void*)> guard_regions;
     struct KvGrow {
         bool on = false;
         int64_t top = 0, lo = 0;          // slots [lo, top) hold no expert; their whole chunks may be with the K/V
@@ -8852,6 +8858,13 @@ int main(int argc, char** argv) {
         quiesce();
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
+        // SAGUARO_DEBUG_SLOT_GUARD: the snapshot the loop's gives check against (the live loan, gv's region).
+        std::vector<strata::core::GiveLoan> s_loans;
+        std::vector<strata::core::GiveRegion> s_regions;
+        if (strata::core::slot_give_guard_on()) {
+            if (guard_loans) s_loans = guard_loans(&xcache);
+            if (guard_regions) s_regions = guard_regions(&xcache);
+        }
         std::vector<int32_t> owner;   // slot -> residency index
         // The slots given up are the ones just below the prompt path's loan, and the loan is most of the cache: they
         // hold experts of middling heat.  So an expert there that is hotter than the coldest one in the loan region
@@ -8886,12 +8899,21 @@ int main(int argc, char** argv) {
             }
             --kvg.lo;
             ++gave;
+            if (strata::core::slot_give_guard_on())   // the slot itself must be the cache's to give
+                strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "gives a slot up for the K/V", kvg.lo,
+                                                        kvg.lo + 1,
+                                                        (int64_t) (xcache.slot_offset(kvg.lo) / G),
+                                                        (int64_t) ((xcache.slot_offset(kvg.lo + 1) + G - 1) / G)},
+                                               s_loans, s_regions);
             if (const int32_t oi = owner[(size_t) kvg.lo]; oi >= 0) {
                 const int64_t layer = oi / g.n_expert;
                 int32_t vi = -1;
                 if (!cold.empty() && cold.back().first < heat(oi)) {
                     vi = cold.back().second;
                     const int32_t vs = host_res[(size_t) vi];
+                    if (strata::core::slot_give_guard_on())   // the hot expert's target is a cache slot, never a loan's
+                        strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "moves a hotter expert into a slot",
+                                                                vs, vs + 1, -1, -1}, s_loans, s_regions);
                     if (xcache.slot_offset(vs + 1) - xcache.slot_offset(vs) < lay.blob_bytes(layer) ||
                         cudaMemcpy(xcache.device_slot(vs), xcache.device_slot((int32_t) kvg.lo),
                                    (size_t) lay.blob_bytes(layer), cudaMemcpyDeviceToDevice) != cudaSuccess)
@@ -8916,6 +8938,9 @@ int main(int argc, char** argv) {
         {
             const int64_t c0 = (int64_t) ((xcache.slot_offset(kvg.lo) + G - 1) / G);
             const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
+            if (strata::core::slot_give_guard_on())   // the whole region goes to the K/V: no other owner
+                strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "unmaps the given slots' chunks for the K/V",
+                                                        kvg.lo, kvg.top, c0, c1}, s_loans, s_regions);
             for (int64_t c = c0; c < c1; ++c)
                 if (r.mapped(c))
                     if (const strata::core::VmmChunk h = r.unmap(c)) kvg.spare.push_back(h);
@@ -8961,10 +8986,19 @@ int main(int argc, char** argv) {
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
         const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
+        std::vector<strata::core::GiveLoan> s_loans;   // (SAGUARO_DEBUG_SLOT_GUARD)
+        std::vector<strata::core::GiveRegion> s_regions;
+        if (strata::core::slot_give_guard_on()) {
+            if (guard_loans) s_loans = guard_loans(&xcache);
+            if (guard_regions) s_regions = guard_regions(&xcache);
+        }
         {   // one run from the lowest unmapped chunk, as long as the chunks handed back last (one access call)
             const int64_t c0 = (int64_t) (xcache.slot_offset(kvg.lo) / G);
             int64_t cend = c0, need = (int64_t) kvg.spare.size();
             while (cend < c1 && need > 0) need -= r.mapped(cend++) ? 0 : 1;
+            if (strata::core::slot_give_guard_on())   // mapping back into slots another give-way holds is the crossing
+                strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "takes chunks back from the K/V", kvg.lo,
+                                                        kvg.top, c0, cend}, s_loans, s_regions);
             if (!r.map_range(c0, cend, [&]() -> strata::core::VmmChunk {
                     if (kvg.spare.empty()) return 0;
                     const strata::core::VmmChunk h = kvg.spare.back();
@@ -9009,6 +9043,9 @@ int main(int argc, char** argv) {
         kvg.refilled += (int64_t) filled.size();
         // res_put waits for its copy: the next reader can be a verify window (a non-blocking stream) right away
         if (res_put(d_res) != cudaSuccess) return false;
+        if (strata::core::slot_give_guard_on())   // (the freed handles carry no slot: the region is the named range)
+            strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "frees the K/V's leftover chunks to the driver",
+                                                    kvg.lo, kvg.top, -1, -1}, s_loans, s_regions);
         for (const strata::core::VmmChunk h : kvg.spare) strata::core::vmm_chunk_free(h);   // new ones, if any
         kvg.spare.clear();
         ++kvg.trims;
@@ -9454,6 +9491,7 @@ int main(int argc, char** argv) {
             int32_t first_now = -1;        // where its buffers are laid out now
             int64_t lent_chunk = 0;
             std::vector<std::pair<int32_t, int32_t>> lent;
+            std::string gname;             // (SAGUARO_DEBUG_SLOT_GUARD) the loan's name in the crossing line
         };
         // bytes -> slots for one cache: exact when it knows its per-slot offsets (a native pack's blobs differ
         // per layer), otherwise max_blob each.
@@ -9483,9 +9521,9 @@ int main(int argc, char** argv) {
         // whose cache already filled its reserve, that is the over-subscription the auto sizing avoids - so the
         // chunk is the largest one EVERY participant can lend (a smaller chunk only reads slower)
         if (pf_borrow && d_res != nullptr) {
-            pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}});
+            pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}, ""});
             for (auto& st : stages)
-                pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}});
+                pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}, ""});
             // The two tests plan_lend makes for CUDA0 alone, one participant at a time: a loan must leave the
             // 128-slot floor.  The percentage cap is an AUTO-chunk rule and only the auto scan applies it - an
             // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
@@ -9955,6 +9993,17 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // SAGUARO_DEBUG_SLOT_GUARD: the live loans every give below is checked against (the read's buffers are
+        // [p.first_now, slots) - nothing may be unmapped, moved into, or handed out under them).
+        guard_loans = [&](const void* xc) {
+            std::vector<strata::core::GiveLoan> ls;
+            for (const PfPart& p : pf_parts)
+                if ((const void*) p.cache == xc && p.first_now >= 0)
+                    ls.push_back({p.cache, p.gname.c_str(), p.first_now, p.cache->slots()});
+            return ls;
+        };
+        for (PfPart& p : pf_parts)
+            if (p.first >= 0) p.gname = "CUDA" + std::to_string(p.dev < 0 ? 0 : p.dev) + " prompt loan";
         kvg_start(borrow != nullptr ? (int64_t) lend_first : xcache.slots());
         // the penalty-history buffer: one row per verify-window row (`penalty_rows`), each the last
         // `penalty_last_n` tokens that row's pick follows, -1 padded in front.  Allocated once at the cap for
@@ -13676,6 +13725,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             std::vector<std::pair<int32_t, int32_t>> prof;   // the card's layers' share of the profile, hottest first
             int64_t top = 0, lo = 0;                          // slots [lo, top) hold no expert
             int64_t gives = 0, backs = 0, evicted = 0, moved = 0, refilled = 0;
+            std::string gpath;   // (SAGUARO_DEBUG_SLOT_GUARD) this give-way's name: the region's owner tag
         };
         std::vector<Give> gv;
         const int64_t give_floor = 128;
@@ -13740,6 +13790,32 @@ vs.d_skip_usage = gs.d_skip_usage;
             std::printf("INFO vision_lend=1\n");
             std::fflush(stdout);
         }
+        // SAGUARO_DEBUG_SLOT_GUARD (round 10, manager card): the give-ways' LIVE crossing data.  A give of one
+        // cache is checked against the OTHER one's region [lo, top) on the same cache (kvg's, CUDA0's, and each
+        // card's gv band) plus the loan; both start from the same lend line, which is the suspected crossing.
+        if (give_on)
+            for (Give& v : gv) v.gpath = "gv CUDA" + std::to_string(v.dev);
+        guard_regions = [&](const void* xc) {
+            std::vector<strata::core::GiveRegion> rs;
+            const uint64_t kG = kvg.on ? strata::core::vmm_granularity() : 0;
+            if (kvg.on && (const void*) &xcache == xc && kvg.lo < kvg.top && kG != 0)
+                rs.push_back({&xcache, "kvg CUDA0", kvg.lo, kvg.top,
+                              (int64_t) (xcache.slot_offset(kvg.lo) / kG),
+                              (int64_t) (xcache.slot_offset(kvg.top) / kG)});
+            for (const Give& v : gv)
+                if ((const void*) v.cache == xc && v.lo < v.top && v.cache->vmm_range() != nullptr) {
+                    const uint64_t G = v.cache->vmm_range()->granularity();
+                    rs.push_back({v.cache, v.gpath.c_str(), v.lo, v.top,
+                                  (int64_t) (v.cache->slot_offset(v.lo) / G),
+                                  (int64_t) (v.cache->slot_offset(v.top) / G)});
+                }
+            return rs;
+        };
+        if (strata::core::slot_give_guard_on())
+            std::fprintf(stderr, "saguaro generate: SAGUARO_DEBUG_SLOT_GUARD=1: every handout of an expert-cache "
+                                 "slot or chunk (kvg, gv, the relief, free-to-driver, the trims, the loan's "
+                                 "relayout) is checked against the active prompt loan and the other give-way's "
+                                 "region; a crossing prints one line naming them and aborts\n");
         // STRATA_ELASTIC_IDLE without a cache that gives: the slots get their whole budget after all (what VRAM is left)
         if (eslots_on && !give_on && elastic_idle_env())
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
@@ -13827,6 +13903,12 @@ vs.d_skip_usage = gs.d_skip_usage;
             const strata::core::OnDevice on(v.dev);
             apply_pending(true);   // a swap still copying could write a slot given up here
             if (strata::core::device_sync() != cudaSuccess) return 0;
+            std::vector<strata::core::GiveLoan> s_loans;   // (SAGUARO_DEBUG_SLOT_GUARD)
+            std::vector<strata::core::GiveRegion> s_regions;
+            if (strata::core::slot_give_guard_on()) {
+                if (guard_loans) s_loans = guard_loans(v.cache);
+                if (guard_regions) s_regions = guard_regions(v.cache);
+            }
             auto freeable = [&]() -> int64_t {   // mapped chunks wholly inside [lo, top): a chunk a live slot shares stays
                 const int64_t c0 = (int64_t) ((xc.slot_offset(v.lo) + G - 1) / G), c1 = (int64_t) (xc.slot_offset(v.top) / G);
                 int64_t n = 0;
@@ -13857,6 +13939,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 }
                 --v.lo;
                 ++gave;
+                if (strata::core::slot_give_guard_on())   // this slot must be the cache's to give (kvg's own?)
+                    strata::core::slot_give_guard(v.cache, {v.gpath.c_str(), "gives a slot up to the budget", v.lo,
+                                                            v.lo + 1,
+                                                            (int64_t) (xc.slot_offset(v.lo) / G),
+                                                            (int64_t) ((xc.slot_offset(v.lo + 1) + G - 1) / G)},
+                                                   s_loans, s_regions);
                 const int32_t oi = owner[(size_t) v.lo];
                 if (oi < 0) continue;
                 const int64_t layer = oi / g.n_expert;
@@ -13864,6 +13952,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (!cold.empty() && cold.back().first < heat(oi)) {   // a hotter expert takes the coldest one's slot
                     vi = cold.back().second;
                     const int32_t vs = host_res[(size_t) vi];
+                    if (strata::core::slot_give_guard_on())   // the target slot is the cache's, never the loan's
+                        strata::core::slot_give_guard(v.cache, {v.gpath.c_str(), "moves a hotter expert into a slot",
+                                                                vs, vs + 1, -1, -1}, s_loans, s_regions);
                     if (xc.slot_room(vs) < lay.blob_bytes(layer) ||
                         cudaMemcpy(xc.device_slot(vs), xc.device_slot((int32_t) v.lo), (size_t) lay.blob_bytes(layer),
                                    cudaMemcpyDeviceToDevice) != cudaSuccess)
@@ -13891,6 +13982,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             if (gave > 0 && !give_upload(v)) return 0;
             int64_t given = 0;
             const int64_t c0 = (int64_t) ((xc.slot_offset(v.lo) + G - 1) / G), c1 = (int64_t) (xc.slot_offset(v.top) / G);
+            if (strata::core::slot_give_guard_on())   // the region goes to the slot budget: no other owner
+                strata::core::slot_give_guard(v.cache, {v.gpath.c_str(), "unmaps the given slots' chunks for the budget",
+                                                        v.lo, v.top, c0, c1}, s_loans, s_regions);
             for (int64_t c = c0; c < c1; ++c)
                 if (r.mapped(c))
                     if (const strata::core::VmmChunk h = r.unmap(c)) {
@@ -13918,6 +14012,12 @@ vs.d_skip_usage = gs.d_skip_usage;
             const strata::core::OnDevice on(v.dev);
             apply_pending(true);
             if (strata::core::device_sync() != cudaSuccess) return false;
+            std::vector<strata::core::GiveLoan> s_loans;   // (SAGUARO_DEBUG_SLOT_GUARD)
+            std::vector<strata::core::GiveRegion> s_regions;
+            if (strata::core::slot_give_guard_on()) {
+                if (guard_loans) s_loans = guard_loans(v.cache);
+                if (guard_regions) s_regions = guard_regions(v.cache);
+            }
             const int64_t c0 = (int64_t) (xc.slot_offset(v.lo) / G), c1 = (int64_t) (xc.slot_offset(v.top) / G);
             int64_t holes = 0;
             for (int64_t c = c0; c < c1; ++c) holes += r.mapped(c) ? 0 : 1;
@@ -13925,6 +14025,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             strata::core::qsa_slot_budget_take(v.dev, std::min(n, holes), got);
             int64_t cend = c0, want = (int64_t) got.size();   // one run from the lowest hole, as many holes as chunks taken
             while (cend < c1 && want > 0) want -= r.mapped(cend++) ? 0 : 1;
+            if (strata::core::slot_give_guard_on())   // a hole the K/V handed out is not this budget's to refill
+                strata::core::slot_give_guard(v.cache, {v.gpath.c_str(), "maps budget chunks back into the cache",
+                                                        v.lo, v.top, c0, cend}, s_loans, s_regions);
             size_t gi = 0;
             const bool mapped = r.map_range(c0, cend, [&]() -> strata::core::VmmChunk { return gi < got.size() ? got[gi++] : 0; });
             for (; gi < got.size(); ++gi) strata::core::qsa_slot_budget_give(v.dev, got[gi]);   // (not used)
@@ -14099,6 +14202,18 @@ vs.d_skip_usage = gs.d_skip_usage;
             strata::core::qsa_slot_budget_chunks(eslot_dev(k), &fr, nullptr);
             const int64_t spare = std::max<int64_t>(fr - slots_low_water(k), 0);
             if (spare < n && may_give && give_on && gv[k].lo > give_floor) give(k, n - spare);
+            if (strata::core::slot_give_guard_on() && give_on && k < gv.size() && gv[k].lo < gv[k].top) {
+                // what the release hands the driver are budget chunks - chunk identities, not slots: the named
+                // range is the top `n` chunks of the card's given band (the budget holds what give() gave it)
+                Give& vg = gv[k];
+                const uint64_t G = vg.cache->vmm_range()->granularity();
+                const int64_t c1 = (int64_t) (vg.cache->slot_offset(vg.top) / G);
+                if (G != 0)
+                    strata::core::slot_give_guard(vg.cache,
+                        {vg.gpath.c_str(), "frees budget chunks to the driver", -1, -1, std::max(c1 - n, (int64_t) 0), c1},
+                        guard_loans ? guard_loans(vg.cache) : std::vector<strata::core::GiveLoan>{},
+                        guard_regions ? guard_regions(vg.cache) : std::vector<strata::core::GiveRegion>{});
+            }
             const int64_t freed = strata::core::qsa_slot_budget_release(eslot_dev(k), give_on ? n : std::min(n, spare));
             // P124e round 9 (manager card): a grow that retries right after this relief must find the released
             // chunks back in the driver's free pool.  Physical memory a chunk release lets go of is reclaimed
@@ -16240,6 +16355,27 @@ vs.d_skip_usage = gs.d_skip_usage;
                     first = (int32_t) (p.cache->slots() - need_p);
                 }
                 if (want_p != p.sp->chunk() || first != p.first_now || (!o.prefill_head_alias && !stage_covers(p, reach))) {
+                    // SAGUARO_DEBUG_SLOT_GUARD: the relaid loan must not reach a slot another part loans on this
+                    // cache or a chunk either give-way handed out - the loan's region is the one the round-10
+                    // card suspects the give-ways of crossing with (round 10 update 2's lead, from one line).
+                    if (strata::core::slot_give_guard_on()) {
+                        std::vector<strata::core::GiveLoan> ls;
+                        for (const PfPart& q : pf_parts)
+                            if (&q != &p && q.cache == p.cache && q.first_now >= 0)
+                                ls.push_back({q.cache, q.gname.c_str(), q.first_now, q.cache->slots()});
+                        const std::string what = "CUDA" + std::to_string(p.dev < 0 ? 0 : p.dev) +
+                                                 " lays the prompt buffers down again";
+                        int64_t cl = -1, ch = -1;
+                        if (p.cache->vmm_range() != nullptr && p.cache->vmm_range()->granularity() != 0) {
+                            const uint64_t gG = p.cache->vmm_range()->granularity();
+                            cl = (int64_t) (p.cache->slot_offset(first) / gG);
+                            ch = (int64_t) ((p.cache->slot_offset(p.cache->slots()) + gG - 1) / gG);
+                        }
+                        strata::core::slot_give_guard(p.cache, {"loan relayout", what.c_str(), first,
+                                                                p.cache->slots(), cl, ch}, ls,
+                                                      guard_regions ? guard_regions(p.cache)
+                                                                    : std::vector<strata::core::GiveRegion>{});
+                    }
                     const int64_t had = p.sp->stage_cells();
                     if (!p.sp->relayout(want_p, p.cache->device_slot(first), part_bytes(p, first), e, cells,
                                         keep_p)) return false;
