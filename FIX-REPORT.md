@@ -1,73 +1,71 @@
-# FIX-REPORT - manager card round 10 (`REVIEW-RESULT.md` + MANAGER UPDATE 2: the first cause is disproved - the slot guard + 40K repro FIRST)
+# FIX-REPORT - manager card round 12b (`8e8cf0982`: the 546K stall is a GPU page fault (dmesg) - VA logging first, then a serialised run)
 
-What the card asked this round, and what this box did, in its own order. Straight first: the card's decisive
-step is the 40K-token repro **on the card** with the guard on ("the manager runs it"); this box has no GPU, so
-what follows is the guard itself - shipped, tested, off by default - not a speculative rework of the give-ways.
+Straight first: this box has no card that stalls, so what it can ship is the instrument - every address-space
+op printing itself - plus the two findings the card's serialised run and the merge diff already proved. Three
+commits, in the card's order: A, B0, B1. No serve-side change was needed or made: `serve/qfn_engine.py` is
+untouched (rule held all twelve rounds - if serve ever changes, the change goes into
+`engines/qfn/serve/server.py` and `python3 tools/saguaro/extract_qfn_engine.py` re-extracts; nothing here
+required that).
 
-## Finding A (run 1: `done: 0 tokens (length, cancel=False)`; run 2: `hipMemCreate` refusal with ~7 GiB of experts resident) - already fixed in round 9; cause lead superseded by the card; guard now stands
+## A (`1dc74054a`) - the resident-budget margin: the merge regression, sized right
 
-The r9 fixes for both run-modes are committed (`82ba099e2` relief frees until the ask fits, `22d3cf546` the
-silent ends closed - the zero-token clean end now prints the numbers that name the culprit). UPDATE 2
-disproved the "give takes a slot inside the active loan" cause (the `room_p` clamp keeps a loan at or above
-the setup give line, and a loan layout takes its residents off `host_res`), and named the remaining lead:
-**the two give-ways start from the same lend line and can hand the same chunks out twice**. That is now
-detectable in one card run - see the guard below. The fix for the path it names deliberately waits for that
-run: the two bands share one top (`kvg.top = lend_first = v.top`) by design, so any blind clamp of one at the
-other's line would simply starve whichever give-way moves second - the guard's abort line names who crossed,
-and the fix is then targeted, which is exactly what the card sequences ("DO THIS FIRST ... Fix that path").
+The P124x resident-budget margin counted the K/V the host copies COMMIT (the `--max-context` ceiling), not
+what they actually back - the merge (57fac6ad8) widened that accounting and made the resident experts plan
+67.9 GiB where the pre-merge engine planned 30.8 at the same 1M context. The margin now counts the committed
+copies; `resident_policy_test` 19 checks pass.
 
-## Finding B (exit: SEGFAULT in `VmmRange::release()` after `exit(0)`) - fixed in round 9, nothing new needed
+## B0 (`1b4119a28`) - the faulting reader is the prompt `rope_kernel<true>` (serialised HIP)
 
-`26666fe8d` (core/vmm_exit.hpp: atexit handler armed at the first VMM api() use; from then on `release()` and
-`vmm_chunk_free()` make no driver call). No serve file changed then or now, so `serve/qfn_engine.py` stays as
-extracted - it was not touched and nothing needed re-extraction. Card test (SIGTERM after growth exits 0) is
-the manager's; a GPU-less box cannot raise a HIP runtime.
+The card's serialised run localises the page fault: with kernels serialised, the faulting reader is the prompt
+path's `rope_kernel<true>` - a reader of the RoPE tables over positions the prompt walks, running while some
+range it reads is not mapped (or just was unmapped). That is exactly the fact B1's log is built to name.
 
-## MANAGER UPDATE 1 (the give range fixed at setup overlaps the per-request loan; unit test: a fake cache with a loan resized after setup, a give must not touch `[p.first, slots)`) - cause disproved by UPDATE 2; its TEST and its CHECK ship
+## B1 (`114621b4f`) - `SAGUARO_DEBUG_VA`: every address-space op says its own name
 
-UPDATE 2 showed the give as written neither unmaps nor moves into an active loan (room_p + kNotResident). But
-the test the update asked for exists (`slot_give_guard_test`: "THE ACTIVE LOAN, including re-sized AFTER
-setup"), and the check it encodes is now LIVE on every handout while the guard is armed - a give, move, unmap,
-remap or relayout that reaches `[p.first_now, slots)` prints the loan's owner and aborts, whether or not the
-r9/r10 clamps are what keeps them apart today.
+New pure header `core/va_debug.hpp`: `va_debug_on()` (static bool, read once from the env),
+`va_debug_format()` (the line), `va_log(op, dev, addr, size, what)`. Off, every hook is one static-bool test.
+On, one stderr line per op - `op dev N [0xbase, +bytes) owner` - at:
 
-## MANAGER UPDATE 2 / DO THIS FIRST - the guard: shipped, kept, off by default (`01c43ade7`, `12390e6d2`, `f87b4f143`)
+- `VmmRange` (both the CUDA and the HIP branch, `vmm.cpp`): `reserve` (the cuMemAddressReserve/
+  hipMemAddressReserve), `map` (what landed - the partial commit of a run prints the run that made it),
+  `unmap`, `release`; `set_va_tag()` names the owner before the first reserve.
+- every owner in `layer.cpp`/`expert_cache.cpp` tags its range: `rope cos/sin`, `yarn cos/sin (YaRN-level
+  table)`, `scores scratch`, `slot pool (elastic kv/indexer arrays)`, `kv pools (vram-elastic arrays)`,
+  `follow pool (device follow state)`, `expert cache arena (vmm)`.
+- every pinned-host registration and deregistration in `layer.cpp`: the whole-run copy (`pin`), the elastic
+  pieces (`pin`/`unpin`, the give-back and the no-alias bail included), the prefixes (`pin`/`unpin`, the
+  refusal bails too), plus the copy's whole host VA range at `reserve`.
+- the slot budget's chunk handouts: `budget+` (cache -> budget), `budget-` (budget -> a grow),
+  `budget-free` (budget -> driver) - by handle, since a chunk has no address until a pool's `map` gives it one.
 
-* `engines/qfn/include/strata/core/slot_give_guard.hpp` (new, pure - unit-testable like `vmm_grow.hpp`):
-  `slot_give_guard_line` answers, for one op (path + what + slot range + chunk range), (a) is any of it inside
-  an ACTIVE loan `[first_now, slots)` of a part on that cache, and (b) is any slot/chunk of it inside the
-  region the OTHER give-way handed out (regions are the give-ways' live `[lo, top)` bands, slots AND chunks);
-  a crossing is ONE line naming the path, the slots/chunks and who owns them; `slot_give_guard` prints it to
-  stderr and `abort()`s - the core dump's last word. Loan before region (the active read's memory is named
-  first). Same-path ops never cross their own region; ranges that touch but do not overlap are clean; an op
-  that cannot name its slots is not accused of reaching into a loan (chunk checks still apply - that is the
-  free-to-driver case).
-* Wired in `generate.cpp` at EVERY handout the card lists, each hook gated on `slot_give_guard_on()` (off: one
-  test of a static bool - no driver call, no allocation, no log; the off path is what it was):
-  kvg_ensure's per-slot give, expert move-into, and chunk unmap; kvg_trim's take-back `map_range` and its
-  spare free-to-driver; gv `give()`'s per-slot give, move-into and chunk unmap (the VRAM relief and
-  `free_to_driver` run through it); `take_back()`'s budget remap; `free_to_driver`'s release (it knows chunks,
-  not slots - the named range is the top `n` chunks of the card's given band); and `lend()`'s loan relayout
-  (its own loan is what is being laid out, so (a) checks the OTHER parts on that cache, (b) both give-ways'
-  regions). Live providers: `guard_loans` reads every `PfPart::first_now` at call time (the loan is re-sized
-  per request), `guard_regions` reads `kvg.lo/top` and every `gv[k].lo/top`. Arming prints one line.
-* `slot_give_guard_test` (CMake, beside the other P124e modules): 23 checks - both card scenarios (the loan
-  re-sized after setup; two give-ways counting down from one line, the second's give crossing the first),
-  loan-before-region, own-region clean, per-cache separation, chunk-only ops, touching ranges, the printed
-  line, and off-is-free.
-* `docs/SETTINGS.md`: the `SAGUARO_DEBUG_SLOT_GUARD` line.
+A faulting address from dmesg now falls in exactly one logged range, and the log says who reserved it, who
+mapped it, and whether anything unmapped it while a kernel could still read it. `docs/SETTINGS.md` gains the
+knob's line; `kv_host_growth_test` gained 3 format/gate checks (25 total).
 
-## "Build ONLY the QFN engine (tools/qfn/build.sh <new dir>, AVX floor)" - done; tests run one at a time
+## Build and tests (run ALONE, one at a time)
 
-`QFN_GGML_DIR=scratch/ggml-pinned bash tools/qfn/build.sh scratch/build-p124e-r12` (fresh dir; the script's
-own AVX floor + sm_75 options) -> **180/180 clean, `saguaro-qfn` links**; `generate.cpp` compiles with only the
-pre-existing `w` warning (same line the r10 log shows). Run ALONE, one at a time: `slot_give_guard_test` 23,
-`read_backing_test` 82, `kv_host_growth_test` 22, `vmm_grow_test` 56 -> all pass.
+Fresh `scratch/build-p124e-r13` (same cache as r12 - CUDA sm_75, AVX floor, tests ON; `conversation_snapshot_test`/
+`conversation_transfer_test` excluded, see the heads-up below): full build clean, no warnings in the touched files.
+Then, each alone: `kv_host_growth_test` 25 OK, `resident_policy_test` 19 OK, `vmm_grow_test` 56 OK,
+`park_policy_test` 56 OK. A wider ctest pass (parity excluded) ends with only `pool_cores_test`,
+`pool_tasks_test`, `platform_memory_test` failing - and those three fail identically at pristine HEAD in a
+throwaway worktree build: this sandbox's CPU topology and mlock ulimit, not this round's changes (the GPU
+benches that flaked under -j8 pass alone).
+
+## Heads-up, outside this card, not touched: `conversation_snapshot_save` does not link
+
+The header declares `conversation_snapshot_save` twice - `const QsaState&` (hpp:113) and `const QsaState*`
+(hpp:152) - and only the POINTER form is defined. `conversation_snapshot_test.cpp` and
+`conversation_transfer_test.cpp` still call the reference form, so a full clean configure with
+`STRATA_BUILD_CONVERSATION_TESTS=ON` fails to link those two test binaries. The merge brought it (both sides
+changed the signature's neighbourhood); r12's build never reached those targets, so it went unseen. Left for
+the manager's call - it is a one-word test change or the missing overload, but it is not this card's file.
 
 ## What this box cannot prove, said straight
 
-The crossing itself is a GPU fact: without a card nothing here can show whether kvg and gv really cross on
-mortar's rig, which op crosses first, or that the guard's abort fires - the 40K repro at `--max-context
-1048576` with `SAGUARO_DEBUG_SLOT_GUARD=1` is what names the culprit (one line, one core). With the env unset
-the engine behaves as before (every hook is the flag test; the pure check is proven by its own module). Once
-the card's line names the path, the fix is one targeted change - the guard stays in (off) to keep it honest.
+That the stall's fault address correlates with a logged range - that needs the card's next run:
+`SAGUARO_DEBUG_VA=1` with the serialised prompt. What this box proves is that the instrument sees every door:
+every reserve/map/unmap/release and every pin/unpin in the elastic machinery now says its own name, so the
+`rope_kernel<true>` fault's address either falls inside a range the log shows as still mapped (then the reader
+went past the extent - the r8 table question again) or inside one it shows as unmapped mid-flight (then the
+unmapper is named on the line above). One of those two lines will be the next card's first sentence.
