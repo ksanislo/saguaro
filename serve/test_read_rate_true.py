@@ -489,6 +489,92 @@ class CardTrueReadout(Base):
         self.assertEqual(self.svc._read_counted(stat), self.TOTAL)
 
 
+class CounterFallsRestartOrCorrectDown(Base):
+    """P124v2 review round 5 (P1): a progress step BELOW the booked read_pos is round 2's "the engine's
+    counter went back" restart signal, and round 4's tolerance for a lagging whole-cut step could
+    swallow a REAL restart (an early read whose beats booked only the share of a still-open first unit:
+    its retry's live beat sits at done=0, so "agrees with the beat, fall <= one unit" held and the
+    restart was belted away).  The tolerance now needs the engine's own counter to have a WHOLE unit
+    closed (n_read >= the live beat's chunk=) on top of the beat's agreement; a genuine restart -
+    nothing whole closed yet, or a step below the live beat's own done= - closes the interval,
+    re-baselines engine_t0 and re-opens (what these tests pin).  A step that merely lags a booked share
+    corrects read_pos DOWN to the engine's figure instead (round 4 belted it up, which kept a split
+    read's leading card above the engine's cross-card figure until BRA - the review's P2); the replay
+    shapes below are ones the engine really prints: the unit-1 alignment of a split read, where both
+    cards' beats hold the share guard at done=4,608 and the next cross-card step lands below the
+    leading card's booking."""
+
+    def _aligned_unit(self, eng, stat, it, passes=(10, 40, 70)):
+        """Beats on the unit [4,608, 9,216) of a 9,216-token read, the engine's whole-cut done= at 4,608
+        (the split read's unit-1 alignment: both cards report pos0=4,608 with pass fractions)."""
+        for p in passes:
+            eng.feed(7, f"RHB rid=0 stage=read done=4608 new=9216 reused=0 pass={p}/78 "
+                        f"ms={3000 + p * 10} stage_ms=0 pos0=4608 chunk=4608 slot=7")
+            self.assertIsNone(eng.step(it))
+            self.tick(0.23)
+
+    def test_a_restart_before_any_whole_unit_closed_still_reopens(self):
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        eng.feed(7, "RHB rid=0 stage=read done=0 new=9216 reused=0 pass=40/78 ms=1000 "
+                    "stage_ms=0 pos0=0 chunk=4608 slot=7")
+        self.assertIsNone(eng.step(it))
+        self.assertGreater(stat.read_pos, 0)            # (the open first unit's share booked)
+        leg0, t0 = id(stat.read_cur), stat.engine_t0
+        self.tick(0.23)
+        eng.feed(7, "BRP 7 0 9216 1300 0.0 new_read=0 read_ms=300.0 stage_ms=0")   # the retry's first step
+        self.assertIsNone(eng.step(it))
+        self.assertNotEqual(id(stat.read_cur), leg0, "the interval was not re-opened")
+        self.assertEqual(stat.read_pos, 0)
+        self.assertEqual(stat.engine_t0, self.t[0])     # re-baselined (nit 3), and NOT the old start
+        self.assertNotEqual(stat.engine_t0, t0)
+        self.assertEqual(len([r for r in self.svc.reads if r[0] is stat]), 2)   # closed, and a fresh one
+
+    def test_a_restart_below_the_live_beat_still_reopens(self):
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        self._aligned_unit(eng, stat, it)               # share booked above the beat's done=4,608
+        self.assertGreater(stat.read_pos, 4608)
+        leg0, t0 = id(stat.read_cur), stat.engine_t0
+        eng.feed(7, "BRP 7 4000 9216 4000 1146.2 new_read=4000 read_ms=4000.0 stage_ms=0")   # below the
+        self.assertIsNone(eng.step(it))                 #  beat's own done= -> a real restart
+        self.assertNotEqual(id(stat.read_cur), leg0, "the interval was not re-opened")
+        self.assertEqual(stat.engine_t0, self.t[0])
+        self.assertNotEqual(stat.engine_t0, t0)
+        self.assertEqual(stat.read_pos, 4000)           # counts from the new read's step
+
+    def test_a_step_lagging_a_booked_share_correct_down_instead(self):
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        self._aligned_unit(eng, stat, it, passes=(70,))
+        booked = stat.read_pos                          # (4,608 + 4,608 x 70/78)
+        self.assertGreater(booked, 4608)
+        eng.feed(7, "RHB rid=0 stage=read done=4608 new=9216 reused=0 pass=3/78 "
+                    "ms=3830 stage_ms=0 pos0=4608 chunk=4608 slot=7")     # the second card's beat
+        self.assertIsNone(eng.step(it))
+        leg0, t0 = id(stat.read_cur), stat.engine_t0
+        eng.feed(7, "BRP 7 7007 9216 4000 1751.8 new_read=7007 read_ms=4000.0 stage_ms=0")
+        self.assertIsNone(eng.step(it))                 # the cross-card figure lags the leading booking
+        self.assertEqual(id(stat.read_cur), leg0, "the interval was re-opened by a lagging step")
+        self.assertEqual(stat.engine_t0, t0)            # nothing re-baselined
+        self.assertEqual(len([r for r in self.svc.reads if r[0] is stat]), 1)
+        self.assertLess(stat.read_pos, booked)          # corrected DOWN, not belted up
+        self.assertGreaterEqual(stat.read_pos, 4608)    # ... to the engine's own figure
+        eng.feed(7, "RHB rid=0 stage=read done=7007 new=9216 reused=0 pass=1/78 "
+                    "ms=4300 stage_ms=0 pos0=9216 chunk=0 slot=7")       # the engine's figure carries on
+        self.assertIsNone(eng.step(it))
+        self.assertEqual(stat.read_pos, 7007)
+        eng.feed(7, "BRA 7 1 prompt=9216 reused=0 read_ms=4500.0 stage_ms=0")
+        self.assertTrue(eng.step(it)["start"])
+        self.assertEqual(self.svc._read_counted(stat), 9216)              # BRA's exact tops it up, right
+
+
 class PeaksTellTheTruth(Base):
     """The PEAKS half of PLAN-p124v-read-rate (ref/mangonel-peaks-shown.txt vs ref/mangonel-peaks-log.txt):
     the Monitor showed peak_decode 94.7 tok/s ("4668 tokens") and peak_prefill 171,860.8 tok/s
