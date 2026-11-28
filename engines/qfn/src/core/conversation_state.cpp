@@ -591,8 +591,9 @@ bool conversation_snapshot_capture_bytes(const ConversationKvReuse& reuse, const
 }
 bool conversation_snapshot_save(SavedConversation& image, const ConversationView& view, const SessionState& ss,
                                 const ModelGeometry& g, const QsaState& draft, std::string& error,
-                                ConversationKvReuse reuse, size_t* reused_bytes) {
-    return conversation_snapshot_save(image, view, ss, g, &draft, error, std::move(reuse), reused_bytes);
+                                ConversationKvReuse reuse, size_t* reused_bytes,
+                                const ConversationCheckpoint* live_from) {
+    return conversation_snapshot_save(image, view, ss, g, &draft, error, std::move(reuse), reused_bytes, live_from);
 }
 bool conversation_snapshot_validate(const SavedConversation& image, const SessionState& ss, const ModelGeometry& g,
                                     const QsaState& draft, std::string& error) {
