@@ -555,8 +555,12 @@ struct KvVma {
 std::vector<KvVma> g_kvvma;  // the full visits' K / V ranges, in the order they were allocated
 int g_kv_rpc = 0;            // positions a committed chunk covers (4096 rounded up to the granule, ik2_plan.hpp)
 size_t g_kv_chunk_b = 0;     // bytes one chunk holds in one buffer
-int g_kv_n_chunks = 0;       // chunks in the ceiling's range
-int g_kv_chunks = 0;         // chunks committed so far (every buffer, committed in lockstep)
+// (P125u a4: the chunks as a free list, not just a count - the committed prefix [0, used) and the free rest of
+//  the ceiling's range.  kv_grow takes chunks from the list, kv_give_back (beside use_dev) returns everything a
+//  finished conversation grew above the live high-water; the unmap gives the VRAM back to the driver, and a
+//  later grow - or the experts' demotion step (b4) - takes it again.)
+ik2plan::KvFreeChunks g_kvc;   // chunks in the ceiling's range (n_total) and holding VRAM now (used), all buffers in lockstep
+int g_kv_given = 0;            // chunks given back since the load (a4, for the stats)
 
 // (a3: put VRAM behind the chunks covering positions [0, n) of the elastic global K / V, in the position order,
 //  before anything writes one - host-side, at a request's start or where a kept conversation's rows land, never
@@ -565,10 +569,12 @@ int g_kv_chunks = 0;         // chunks committed so far (every buffer, committed
 //  room is b4, the next step; the CUDA graphs stay valid either way - the base pointer never moves))
 bool kv_grow(int n, std::string& err) {
     if (!g_kv_vmm || n <= 0) return true;
-    const int need = ik2plan::kv_chunks_for(n, g_kv_rpc);
-    if (need <= g_kv_chunks) return true;
+    // (the guards at the calls clamp n to the ceiling; the range's chunk count is the belt on top of that,
+    //  as Range::commit clamps its bytes to the reserved cap)
+    const int need = std::min(ik2plan::kv_chunks_for(n, g_kv_rpc), g_kvc.n_total);
+    if (need <= g_kvc.used) return true;
     const size_t bytes = (size_t) need * g_kv_chunk_b;
-    const size_t old = (size_t) g_kv_chunks * g_kv_chunk_b;
+    const size_t old = (size_t) g_kvc.used * g_kv_chunk_b;
     bool ok = true;
     for (auto& r : g_kvvma) {
         if (!r.k.commit(bytes, err) || !r.v.commit(bytes, err)) { ok = false; break; }
@@ -583,8 +589,9 @@ bool kv_grow(int n, std::string& err) {
     //  reads the unwritten rows up to N as zeros and attention's tiles may touch a row the visit has not
     //  written yet.  Drivers hand out zeroed pages today; this does not bet the answers on it.  One memset a
     //  chunk on g_s, beside the commit - never per token; the span is below the ceiling's chunk count, so
-    //  inside every range's mapped bytes)
-    const size_t zero_hi = std::min(bytes, (size_t) g_kv_n_chunks * g_kv_chunk_b);
+    //  inside every range's mapped bytes.  This is also what makes a chunk given back (a4) and committed
+    //  again read as zeros before it is written: the remap is fresh pages, and they are zeroed here)
+    const size_t zero_hi = std::min(bytes, (size_t) g_kvc.n_total * g_kv_chunk_b);
     int prev_dev = 0;
     cudaGetDevice(&prev_dev);
     for (auto& r : g_kvvma) {
@@ -593,7 +600,7 @@ bool kv_grow(int n, std::string& err) {
         CU(cudaMemsetAsync(r.v.ptr() + old, 0, zero_hi - old, g_s));
     }
     cudaSetDevice(prev_dev);
-    g_kv_chunks = need;
+    g_kvc.commit(need);   // (the chunks taken were the free list's; ik2_plan.hpp's arithmetic)
     return true;
 }
 uint8_t *g_kv_stage_k = nullptr, *g_kv_stage_v = nullptr;   // a host visit's rows for a prompt chunk (VRAM)
@@ -1846,6 +1853,42 @@ void use_dev(int d) {
     g_s = g_dev[d].s, g_cs = g_dev[d].cs, g_ev = g_dev[d].ev, g_blas = g_dev[d].blas;
     if (g_tpn > 1) g_w16 = g_dev[d].w16;
 }
+// (P125u a4: the give-back.  A conversation that grew the commit past the start step and is over - session end,
+//  reset(), a snapshot rewind, a request that stopped far short of what its max_tokens made it commit - leaves
+//  chunks mapped under rows nothing reads any more: attention reads [0, pos), a kept conversation holds its rows
+//  in host RAM and a snapshot its rewound state there.  Everything above the live high-water (the largest
+//  position a live slot can still read, ik2_plan.hpp) goes back to the free chunks: every stream is waited for
+//  first - a give-back never races a kernel still reading a chunk - then cuMemUnmap / hipMemUnmap returns the
+//  VRAM to the driver, where the next kv_grow, the experts or another process can take it.  Host-side, between
+//  the requests and at the drafting trials' end only - never per token, never on a request's way through; the
+//  request's own commit (its kv_grow at the top) always outranks an earlier give-back.  The CUDA graphs are
+//  unaffected: the base pointer never moves and a replayed kernel reads below pos, with pages under every row
+//  it reads.  A no-op on every layout but the VMM-backed one.)
+void kv_give_back(int live_pos) {
+    if (!g_kv_vmm) return;
+    const int keep = ik2plan::kv_chunks_for(std::max(live_pos, 0), g_kv_rpc);
+    const int gave = g_kvc.give_back_to(keep);
+    if (gave <= 0) return;
+    // (nothing in flight may read what is being unmapped: wait for every GPU's streams, as the row copies do)
+    for (auto& D : g_dev) CU(cudaStreamSynchronize(D.s));
+    if (g_kv_cs) CU(cudaStreamSynchronize(g_kv_cs));   // (the copy stream: only streaming creates it - belt and braces)
+    const size_t bytes = (size_t) g_kvc.used * g_kv_chunk_b;   // (after the give-back: what stands committed)
+    int prev_dev = 0;
+    cudaGetDevice(&prev_dev);
+    for (auto& r : g_kvvma) {
+        if (r.k.dev != prev_dev) cudaSetDevice(r.k.dev);
+        r.k.shrink(bytes), r.v.shrink(bytes);
+    }
+    cudaSetDevice(prev_dev);
+    cudaGetLastError();
+    g_kv_given += gave;
+    std::printf("NOTE kv: gave back %d K / V chunk%s of %zu MiB above position %d: %d of %d committed, %d free"
+                " (%d given back since the load)\n",
+                gave, gave == 1 ? "" : "s", g_kv_chunk_b >> 20, std::max(live_pos, 0), g_kvc.used, g_kvc.n_total,
+                g_kvc.free(), g_kv_given);
+    std::fflush(stdout);
+}
+
 // --tp: a layer's attention and MoE stop at their partial sums in W.tmp (before the short convs): tp_forward
 bool g_tp_part = false;
 std::vector<std::vector<uint8_t>> g_tp_down;   // (--tp, at load: the members' columns of down, re-blocked)
@@ -8644,11 +8687,11 @@ int main(int argc, char** argv) {
                 const size_t gran = ik2::vmm::granule(Ly.dev);
                 g_kv_rpc = ik2plan::kv_rows_per_chunk(ik2plan::kKvChunkPos, row_b, gran);
                 g_kv_chunk_b = (size_t) g_kv_rpc * row_b;
-                g_kv_n_chunks = ik2plan::kv_chunks_for(ctx, g_kv_rpc);
-                g_kv_chunks = ik2plan::kv_chunks_for(g_kv_commit, g_kv_rpc);
-            }
-            const size_t cap = (size_t) g_kv_n_chunks * g_kv_chunk_b;
-            const size_t committed = (size_t) ik2plan::kv_chunks_for(g_kv_commit, g_kv_rpc) * g_kv_chunk_b;
+                g_kvc.n_total = ik2plan::kv_chunks_for(ctx, g_kv_rpc);
+                g_kvc.commit(ik2plan::kv_chunks_for(g_kv_commit, g_kv_rpc));   // (the load takes the start step's
+            }                                                                  //  chunks; a4: the rest stand free)
+            const size_t cap = (size_t) g_kvc.n_total * g_kv_chunk_b;
+            const size_t committed = (size_t) g_kvc.used * g_kv_chunk_b;
             KvVma r;
             std::string verr;
             if (!r.k.open(Ly.dev, cap, verr)) die("elastic K / V: " + verr);
@@ -10144,6 +10187,15 @@ int main(int argc, char** argv) {
             for (auto& D : g_dev) CU(cudaStreamSynchronize(D.s));
             return 0;
         };
+        // (a4: the live high-water across the slots - what kv_give_back keeps.  The cache's conversation and its
+        //  snapshots are all that can read rows: a kept conversation's rows are in host RAM until unparked (its
+        //  own kv_grow re-commits them), and --parallel - the one thing that would add a conversation per slot -
+        //  is never taken on an elastic start (ik2_plan.hpp's elastic_start), so there is exactly one cache slot)
+        auto kv_live = [&]() {
+            std::vector<int> live{(int) hist.size()};
+            for (const auto& sn : snaps) live.push_back(sn.pos);
+            return ik2plan::kv_high_water(live);
+        };
         auto reset = [&]() {
             for (auto& sn : snaps) sn.pos = -1;
             for (int vis = 0; vis < (int) M.V.size(); ++vis) {
@@ -10370,6 +10422,8 @@ int main(int argc, char** argv) {
                 draft_choice = best;
                 draft_remember(draft_key_s, tps, best);
                 reset();
+                kv_give_back(kv_live());   // (a4: the trials' grown rows are nobody's conversation - what they
+                                           //  committed above the empty cache goes back before READY)
                 std::printf("NOTE saguaro ik2: measured this PC once in %.0f s: drafting - %s (no drafting %.1f, the prompt "
                             "lookup %.1f, the drafter %.1f, both %.1f tokens/s)\n", now() - tm0, kDraftNames[best],
                             tps[0], tps[1], tps[2], tps[3]);
@@ -10425,6 +10479,12 @@ int main(int argc, char** argv) {
                             n_gpu == 1 && d == 0 ? g_dense_bytes : (size_t) 0, kv_d,
                             g_two.on && d == 1 ? g_two.bytes : g_dev[d].EC.total_bytes());
             }
+            // (P125u a4: the elastic K / V's chunk map beside the VRAM one - the ceiling's range split into the
+            //  committed prefix and the free rest.  A conversation ending gives its grown chunks back (each
+            //  give-back is a NOTE kv: line); the free rest at the load is the ceiling minus the start step.)
+            if (g_kv_vmm && !g_kvvma.empty())
+                std::printf("KVVRAM dev=%d chunk_mib=%zu total=%zu committed=%zu free=%zu\n", g_kvvma.front().k.dev,
+                            g_kv_chunk_b >> 20, (size_t) g_kvc.n_total, (size_t) g_kvc.used, (size_t) g_kvc.free());
             use_dev(0);
             CU(cudaSetDevice(0));   // (GPU 1 was made current above without use_dev: g_cur still says 0)
             if (g_par > 1) std::printf("READY %d stop multi=%d\n", ctx_s, g_par);
@@ -11015,6 +11075,10 @@ int main(int argc, char** argv) {
                                     "the next request)",
                                     ids.size());
                         std::fflush(stdout);
+                        // (a4: the request is over and the cache holds nothing (the reset above) - what its
+                        //  failed commit and the old conversation had grown go back; the next request commits
+                        //  what it needs again)
+                        kv_give_back(kv_live());
                         busy = false;
                         g_wd_busy = false;
                         continue;
@@ -11252,6 +11316,9 @@ int main(int argc, char** argv) {
                 if (serve_maya) std::printf("DONE 0 %zu %.1f 0 cancel 0 0 %d 0 0\n", ids.size(), (now() - t0) * 1e3, cached);
                 else std::printf("@END cancelled %zu %d %.3f %.3f\n", ids.size(), cached, now() - t0, 0.0);
                 std::fflush(stdout);
+                // (a4: the read ended back at a snapshot it kept, or at nothing - the chunks above where the
+                //  state stands (the rewind above, or the reset) are dead rows: given back, not held idle)
+                kv_give_back(kv_live());
                 busy = false;
                 g_wd_busy = false;
                 continue;
@@ -11468,6 +11535,14 @@ int main(int argc, char** argv) {
             else
                 std::printf("@END %s %zu %d %.3f %.3f\n", reason, ids.size(), cached, t1 - t0, now() - t1);
             std::fflush(stdout);
+            // (a4: the request is over.  What it committed above the conversation it settled into - first of all
+            //  the max_tokens slack of an ask that answered early - is dead rows until the next request, and a
+            //  next request that continues from here needs it again and re-commits it (kv_grow).  With it: the
+            //  grown VRAM goes back to the driver between the requests; a session ended by this very answer
+            //  (parked out of the cache, or the next request being a new conversation that resets) gives back
+            //  its turns here too - the reset() / rewind paths inside a request run again into that request's
+            //  own commit, so the give-back waits for this point, host-side, with the GPU idle)
+            kv_give_back(kv_live());
             busy = false;
             g_wd_busy = false;
         }

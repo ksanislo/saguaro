@@ -1,7 +1,8 @@
 // tests/ik2_plan_test.cpp - the elastic start step's sizing decision (src/ik2/ik2_plan.hpp), no GPU: the committed
 // K / V of the global layers, the engine's fits arithmetic at the ceiling and at the commit, and when the elastic
 // start is taken (the mortar rows of ref/REPORT-p125b-ik2-vram.md: 32768 resident, 262144 with 0 of 3072 experts in
-// VRAM - and what a1 makes of the second row).
+// VRAM - and what a1 makes of the second row); the chunk arithmetic of the growable commit (P125o a2 / a3); and the
+// give-back's high-water arithmetic and free-chunk list (P125u a4).
 #include "../src/ik2/ik2_plan.hpp"
 
 #include <cstdio>
@@ -105,6 +106,67 @@ int main() {
         expect(ascending, "the commit order is the position order, one chunk at a time");
         committed = grow;
         expect(committed == 15, "the commit advances to where the conversation reached");
+    }
+
+    // P125u (a4): the give-back.  The live high-water across the slots: the largest position a live conversation
+    // can still read (attention reads [0, pos); an ended one's rows live in host RAM, and so does a snapshot's
+    // rewound state) - everything above it goes back.
+    expect(kv_high_water({}) == 0, "no live slot: the high-water is 0");
+    expect(kv_high_water({0}) == 0, "an empty conversation reads nothing");
+    expect(kv_high_water({-1, -1}) == 0, "no snapshot anywhere does not pull it below 0");
+    expect(kv_high_water({4096, 123}) == 4096, "the slot that reached furthest sets it");
+    expect(kv_high_water({70000, -1, 8000, 65536}) == 70000, "a slot past an empty snapshot");
+    expect(kv_high_water({512}) == 512, "one cache conversation, no snapshots");
+    // the give-back lands on whole chunks: keep the ones covering the high-water, return the rest
+    {
+        const int rpc = kv_rows_per_chunk(kKvChunkPos, 4096, 2u << 20);
+        expect(kv_chunks_for(kv_high_water({60000, 40000}), rpc) == 15, "a 60K high-water keeps chunks 0 .. 14");
+        expect(kv_chunks_for(kv_high_water({4097, -1}), rpc) == 2, "one position into chunk 1 keeps it whole");
+        expect(kv_chunks_for(kv_high_water({}), rpc) == 0, "an ended conversation keeps no chunk of its own");
+    }
+    // the free-chunk list: the ceiling's chunks split into the committed prefix and the free rest (every buffer
+    // commits in lockstep); the 262144 ceiling of 4096-position chunks, the 32768 start step
+    {
+        KvFreeChunks fl;
+        fl.n_total = kv_chunks_for(262144, 4096);
+        expect(fl.n_total == 64 && fl.free() == 64, "the range: 64 chunks, all free before the load commits");
+        expect(fl.commit(kv_chunks_for(32768, 4096)), "the load takes the start step's chunks from the list");
+        expect(fl.used == 8 && fl.free() == 56, "8 committed, 56 free at the 32768 start step");
+        expect(!fl.commit(71), "past the ceiling's range: nothing is taken");
+        expect(fl.used == 8, "a refused commit leaves the list where it was");
+        expect(fl.commit(15), "a 60K read takes chunks 8 .. 14");
+        expect(fl.used == 15 && fl.free() == 49, "the grown conversation holds 15 chunks");
+        expect(fl.commit(15), "committing what is already committed takes nothing and succeeds");
+        expect(fl.used == 15, "a commit never unmaps");
+        expect(fl.give_back_to(15) == 0, "a conversation ending where the commit stands gives nothing back");
+        expect(fl.give_back_to(20) == 0, "nothing above the committed prefix needs returning");
+        expect(fl.used == 15, "and the list stands");
+        expect(fl.give_back_to(10) == 5, "a rewind to 40960 gives chunks 10 .. 14 back");
+        expect(fl.used == 10 && fl.free() == 54, "the free rest grows by what went back");
+        expect(fl.commit(11), "the next request takes a freed chunk again");
+        expect(fl.used == 11 && fl.free() == 53, "commit is not the high-water: it re-maps from the list");
+        expect(fl.give_back_to(0) == 11, "a session end gives every chunk back");
+        expect(fl.used == 0 && fl.free() == 64, "the whole range stands free");
+        expect(fl.give_back_to(-1) == 0, "a negative target on an empty list gives nothing");
+        expect(fl.commit(64), "the whole ceiling can be committed");
+        expect(fl.free() == 0, "nothing free at the ceiling");
+        expect(fl.give_back_to(-1) == 64, "a negative target is 0: everything goes");
+    }
+    // the serve loop's arithmetic in one walk: the 262144 row, a request that commits far past where its answer
+    // stops (a big max_tokens) and a new conversation after it
+    {
+        KvFreeChunks fl;
+        fl.n_total = kv_chunks_for(262144, 4096);
+        fl.commit(kv_chunks_for(32768, 4096));
+        const int asked = kv_chunks_for(std::min(60000 + 230000, 262144), 4096);   // (the guard clamps to the ceiling)
+        expect(fl.commit(asked) && fl.used == 64, "the 60K ask with a huge max_tokens commits the whole range");
+        const int answered = 60000 + 40;   // (the answer stopped early - the state the request settles into)
+        expect(fl.give_back_to(kv_chunks_for(answered, 4096)) == 49,
+               "at its end only the chunks past the answer go back, the max_tokens slack with them");
+        expect(fl.used == 15 && fl.free() == 49, "the card keeps what the conversation still reads");
+        expect(fl.give_back_to(kv_chunks_for(kv_high_water({0, -1, -1}), 4096)) == 15,
+               "the next request finds a new conversation: reset leaves nothing live, all 15 go back");
+        expect(fl.free() == 64, "and the grown VRAM is the driver's again");
     }
 
     std::printf("ik2_plan_test: %s\n", fails ? "FAILED" : "ok");
