@@ -4,7 +4,7 @@
 import {html, render, useEffect, useRef, useState} from "./preact.js";
 import {isPhone} from "./lib.js";
 import {S, applyScheme, applyTheme, closeDialog, emit, useStore} from "./state.js";
-import {applyHealth, loadMcp, loadUpdate, poll, watchStarting, whenHealth} from "./server.js";
+import {applyHealth, loadMcp, loadUpdate, poll, unloaded, watchStarting, whenHealth} from "./server.js";
 import {cancelEdit, chatView, focusInput, loadChats, newChat, newChatObj, openChat, resumePending, send, stopAnswer,
         updateCtxMeter} from "./chats.js";
 import {DialogHost, Toasts, trapTab} from "./ui.js";
@@ -121,6 +121,8 @@ function boot(h) {
   render(html`<${App}/>`, root);
   route();
   whenHealth(() => updateCtxMeter());
+  if (unloaded()) whenHealth(loadTurbo);   // (P125n: the boot's loadTurbo asked nothing off the card; its Turbo loads
+                                           //  with the first health after the gate opens - as Settings re-arms its rows)
   loadChats().then(() => { if (S.view === "chat" && !S.settings) focusInput(); return h ? applyHealth(h) : null; }).then(loadMcp).then(() => {
     loadTurbo();                                     // (the Turbo button: on or off)
     loadUpdate();                                    // (Settings' dot when a new version is out)

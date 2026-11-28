@@ -4,7 +4,7 @@ import {html, useRef, useState} from "./preact.js";
 import {GIB, ago, ctxfmt, fmt, gb, isPhone, kfmt, rate, store} from "./lib.js";
 import {S, copyText, emit, toast} from "./state.js";
 import {turboBadge} from "./turbo-core.js";
-import {fetchReport, reqAll, speculationView, tierShares} from "./server.js";
+import {fetchReport, loadNow, reqAll, speculationView, tierShares, waking} from "./server.js";
 import {newChat} from "./chats.js";
 import {setSide, status} from "./sidebar.js";
 import {Icon} from "./ui.js";
@@ -848,7 +848,11 @@ export function MonitorPage() {
         <${Requests} m=${m}/>`
       : html`<div class="card mon__wait">${S.conn === "down" ? "The server is not reachable. It may be starting, or stopped."
                                         : S.conn === "key" ? "This server needs its API key: add it in Settings › Connect your tools."
-                                        : S.conn === "unloaded" ? "Unloaded - the next message loads it. llama-swap keeps one model on the card."
+                                        : S.conn === "unloaded" ? (waking()   // (P125n: nothing is polled off the card; the Load button is the one
+                                            ? "Loading the model - a minute or two; the figures come back by themselves."
+                                            : html`<span>Unloaded - this page asks nothing of it. The next message loads it, or load it here on purpose:</span>
+                                                <button type="button" class="btn btn--secondary btn--sm" onClick=${() =>
+                                                  loadNow().catch((e) => toast("error", "The model did not start", e.message, 6000))}><${Icon} name="refresh" sm/>Load it now</button>`)
                                         : "Waiting for the first reading…"}</div>`}
     </div></div>
   </main>`;
