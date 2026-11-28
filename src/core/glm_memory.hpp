@@ -212,4 +212,20 @@ inline bool ram_class_plan(uint64_t budget, const std::vector<size_t>& stride,
     return true;
 }
 
+// The decode's indexer score rows - sc_score in the scratch arena (src/core/glm_model.cu) and the rows' ascore
+// (src/core/glm_rows.cu) - hold one score per COMPLETED pool: a sequence at position p wants (p + 1) / kpool floats,
+// so the need grows with the context actually decoded, not with --max-context (the GLM memory report, rows H and J).
+// The carve at load is one sub-batch grid of pools - the prompt path's largest sub-batch + slack, the same 8192 + 64
+// positions the ik/ig rings keep (row C) - capped by the context's max_pools; a step whose pools pass the capacity
+// doubles it toward max_pools (the sub-batch grid doubling of row I), so a 1M-token context pays its 1 MB only once
+// it has really been decoded.
+constexpr int64_t kScoreGridPositions = 8192 + 64;
+inline int64_t glm_score_rows_start(int64_t max_pools, int kpool) {
+    return std::min(max_pools, kScoreGridPositions / std::max(1, kpool));
+}
+inline int64_t glm_score_rows_grow(int64_t cap, int64_t pools, int64_t max_pools) {
+    if (pools <= cap) return cap;
+    return std::max(pools, std::min(max_pools, std::max<int64_t>(1, cap) * 2));
+}
+
 }  // namespace maya::core::glmfast

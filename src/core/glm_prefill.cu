@@ -2113,6 +2113,7 @@ bool Glm5Model::prefill_half(int64_t p0, int T, std::string& err, const int32_t*
     const cudaStream_t s = S->cs;
     const PrefillState::View& V = S->v;
     if (!el_.empty() && !seq_grow(V.seq < 0 ? 0 : V.seq, p0 + T, err)) return false;   // elastic: the chunk backed
+    if (kv_ != nullptr && !kv_pin(kv_, p0 + T, err)) return false;   // P125g: the chunk's host pages registered first
     const int E = g.n_embd, DI = g.d_inner(), HD = g.kda_head_dim, K = g.n_exp_used;
     const float one = 1.0f, zero = 0.0f;
     {   // an error left in the thread's state by an earlier kernel is what the first cuBLAS call reports
@@ -4449,6 +4450,12 @@ bool Glm5Model::prefill_begin(int64_t n, int32_t next_token, bool background, st
         v.img_rows = m == this ? m->img_rows_ : std::vector<float>();   // (only the first part embeds)
         // elastic: the whole prompt backed here, on the decode's thread, before it is read
         if (!m->el_.empty() && !m->seq_grow(v.seq < 0 ? 0 : v.seq, v.pos + n, err)) {
+            for (Glm5Model* k = this; k != nullptr; k = k->split_next_.get()) k->pf_->v = PrefillState::View{};
+            return false;
+        }
+        // P125g: ... and the prompt's granules of the host copy registered here, same reason (kv_pin's slack covers
+        // the whole read; prefill_half repeats it per chunk, which is where a refusal on a long prompt lands)
+        if (m->kv_ != nullptr && !kv_pin(m->kv_, v.pos + n, err)) {
             for (Glm5Model* k = this; k != nullptr; k = k->split_next_.get()) k->pf_->v = PrefillState::View{};
             return false;
         }

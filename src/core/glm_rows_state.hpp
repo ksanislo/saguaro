@@ -52,6 +52,11 @@ struct Glm5Model::RowsState {
     int apart_tokens = 0;
     float* ascore = nullptr;   // ... and each row's indexer scores (ascore_n a row), the rows' selection in one launch
     int64_t ascore_n = 0;
+    // P125i (GLM memory report, row J): the carve holds glm_score_rows_start pools a row (src/core/glm_memory.hpp) -
+    // a sub-batch grid, not the whole --max-context; a row with more completed pools puts every row's scores in this
+    // side buffer (ascore_xn a row), whose stride doubles toward the longest sequence's pool count (ascore_max)
+    float* ascore_x = nullptr;
+    int64_t ascore_xn = 0, ascore_max = 0;
     int* tok_h = nullptr;   // pinned
     cudaEvent_t ev_done = nullptr;
 };

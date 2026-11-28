@@ -707,6 +707,7 @@ Glm5Model::~Glm5Model() {
     if (!el_.empty()) el_destroy();   // (every sequence's reservation, state_ among them)
     else if (state_) cudaFree(state_);
     if (sc_) cudaFree(sc_);
+    if (sc_score_x_) cudaFree(sc_score_x_);
     if (d_pos_) cudaFree(d_pos_);
     if (pool_) cudaFree(pool_);
     if (dev_xq_) cudaFree(dev_xq_);
@@ -816,7 +817,8 @@ bool Glm5Model::load(const std::string& gguf_path, int64_t max_ctx, std::string&
     sc_qabs = take((int64_t) g_.kv_lora * g_.n_head);
     sc_iq = take((int64_t) g_.idx_heads * g_.idx_key);
     sc_iw = take(g_.idx_heads);
-    sc_score = take(max_pools);
+    sc_score_cap_ = glmfast::glm_score_rows_start(max_pools, g_.idx_kpool);   // (P125i: grown on use, see score_rows)
+    sc_score = take(sc_score_cap_);
     sc_cells = take(g_.n_sel_max());
     sc_attn = take((int64_t) g_.v_head * g_.n_head);
     sc_gate = take(ff_max);
@@ -850,11 +852,19 @@ void Glm5Model::reset() {
         cudaMemsetAsync(state_, 0, state_bytes_, fast_->cs);
         kv_stream_reset_maps();   // (the zeroed slots hold no block now - on the same stream)
         if (fast_->md.route_err_d != nullptr) cudaMemsetAsync(fast_->md.route_err_d, 0, sizeof(int), fast_->cs);
-        if (cudaStreamSynchronize(fast_->cs) == cudaSuccess && fast_->route_error_h)
-            *fast_->route_error_h = 0;   // a failed route belongs to the previous request
+        const bool synced = cudaStreamSynchronize(fast_->cs) == cudaSuccess;
+        if (synced && fast_->route_error_h) *fast_->route_error_h = 0;   // a failed route belongs to the previous request
+        // P125g (give-back): the conversation's pinned host copy goes back with it - the slots are zeroed and the
+        // maps reset above and the sync waited for that, so nothing on the device names those pages now.  What the
+        // next conversation writes is registered again, granule by granule, by kv_pin.
+        if (synced) kv_unpin(kv_);
     } else {
         cudaMemset(state_, 0, state_bytes_);
-        cudaStreamSynchronize(0);
+        // P125g (give-back): the same as the fast branch's rule - an engine that cannot say the device is idle
+        // must not unregister memory under it, so the give-back waits for the sync to report success (cudaMemset
+        // is synchronous, so this rarely has anything to wait for; the asymmetry with the fast branch was the bug).
+        const bool synced = cudaStreamSynchronize(0) == cudaSuccess;
+        if (synced) kv_unpin(kv_);
     }
     pos_ = 0;
     mtp_hx_pos_ = -1;   // (head_x holds no position of the new sequence)
@@ -881,11 +891,48 @@ int64_t Glm5Model::kv_resident() const {
     return 0;
 }
 
+namespace {
+// The granule arena's registration (P125g, PLAN-p125g): cudaHostRegister per granule, hipHostRegister in HIP
+// builds through the shim.  Mapped like the whole-max cudaHostAlloc was, Portable like every pin in this engine.
+struct KvPinner : maya::core::Pinner {
+    bool pin(void* at, uint64_t bytes) override {
+        if (cudaHostRegister(at, (size_t) bytes, cudaHostRegisterMapped | cudaHostRegisterPortable) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        return true;
+    }
+    void unpin(void* at, uint64_t) override {
+        if (cudaHostUnregister(at) != cudaSuccess) cudaGetLastError();
+    }
+};
+maya::core::Pinner& kv_pinner() {
+    static KvPinner p;
+    return p;
+}
+// The granule an arena divides into: 64-256 MB, the report's range (M of ref/REPORT-p125c-glm-mem.md), moved by
+// SAGUARO_GLM_KV_PIN_GRANULE_MB; a cache smaller than one granule is one granule.
+uint64_t kv_pin_granule(uint64_t total) {
+    const char* v = getenv("SAGUARO_GLM_KV_PIN_GRANULE_MB");
+    uint64_t mb = v != nullptr && v[0] != '\0' ? (uint64_t) std::atoll(v) : 128;
+    mb = std::min<uint64_t>(std::max<uint64_t>(mb, 64), 256);
+    const uint64_t g = mb << 20;
+    return g > total ? total : g;
+}
+}  // namespace
+
 // This part's DSA layers (the NextN block's too) keep a sequence's latent cache in one pinned, device-mapped host
 // allocation - the authoritative copy, written by both dsa_preps - and `cells` positions of it in VRAM: the state arena's
 // latent runs are the VRAM slots, and every layer gets a residency map (one device allocation for all of them), nothing
-// resident.  ctx: that sequence's context.  Under WSL the driver pins only about 1 GB in all, which the start reports as
-// an error.  Null with err empty: no DSA layer on this part.
+// resident.  ctx: that sequence's context.  Null with err empty: no DSA layer on this part.
+//
+// P125g (item M of ref/REPORT-p125c-glm-mem.md): the arena is a GranuleArena - the whole range reserved as address
+// space here, a granule cudaHostRegister'ed when a position of it is first named (kv_pin) and given back when the
+// conversation resets, parks or ends.  What a conversation pins is what it writes, not what --max-context allows;
+// the addresses never move, so the layers' host rows are still one pointer each.  A machine whose device cannot use
+// the host pointer of registered memory (or where the reservation itself fails) keeps the old whole-max
+// cudaHostAlloc, pinned at the load as it was.  Under WSL the driver pins only about 1 GB in all: with the granules
+// that cap is no longer a load error, it stops a conversation where it reaches it (kv_pin's err).
 Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::string& err) {
     namespace k = maya::kernels;
     const std::vector<int> ls = dsa_layers();
@@ -906,9 +953,21 @@ Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::
                     " pages of whole 16-byte runs");
     const uint64_t layer_bytes = (uint64_t) K->n_blocks * K->page * K->row_bytes;
     K->host_bytes = layer_bytes * ls.size();
+    K->slab_bytes = layer_bytes;
     uint8_t* d = nullptr;
-    if (cudaHostAlloc((void**) &K->host_arena, K->host_bytes, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
-        cudaHostGetDevicePointer((void**) &d, K->host_arena, 0) != cudaSuccess) {
+    int can = 0;   // the device may read and write registered memory through the host's own pointer (UVA)
+    if (cudaDeviceGetAttribute(&can, cudaDevAttrCanUseHostPointerForRegisteredMem, dev_) != cudaSuccess) {
+        cudaGetLastError();
+        can = 0;
+    }
+    std::string aerr;
+    if (can && K->arena.open(K->host_bytes, kv_pin_granule(K->host_bytes), aerr)) {
+        K->host_arena = K->arena.base();
+        d = K->host_arena;
+        K->pin_slabs.reserve(ls.size());
+        for (size_t i = 0; i < ls.size(); ++i) K->pin_slabs.push_back((uint64_t) i * layer_bytes);
+    } else if (cudaHostAlloc((void**) &K->host_arena, K->host_bytes, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+               cudaHostGetDevicePointer((void**) &d, K->host_arena, 0) != cudaSuccess) {
         cudaGetLastError();
         char b[320];
         std::snprintf(b, sizeof b, "KV streaming: cannot pin %.2f GB of RAM for the latent cache - lower the context, or "
@@ -947,17 +1006,76 @@ Glm5Model::KvStream* Glm5Model::kv_stream_make(int64_t cells, int64_t ctx, std::
         k::kv_stream_reset(m, nullptr);
     }
     if (cudaDeviceSynchronize() != cudaSuccess) return fail("KV streaming: the residency maps did not reset");
-    std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM (%.2f "
-                         "GB), the latent cache in %.2f GB of pinned RAM\n", dev_, (long long) cells, (long long) ctx,
-                 ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9, (double) K->host_bytes / 1e9);
+    // P125g step 4 (PLAN-p125g): the line names what is PINED NOW at the load and what one conversation at this
+    // context can grow it to - the arena starts at 0 MiB, where the old whole-max allocation started at its full
+    // size.  The eager fallback (no lazy arena) has it all pinned at the load, as it always did - telling it to
+    // "grow with use" up to that same figure would be self-contradicting, so its line names the pinned cache as
+    // what it is.  Either line states the engine's declared pin for tools/mem_vs_ctx.py: the "up to M GB" ceiling
+    // of the lazy line, the whole-cache figure standing before "of pinned RAM" on the fallback's.
+    if (K->arena.empty())
+        std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM "
+                             "(%.2f GB), pinned latent cache: %.2f GB of pinned RAM at the load, the whole cache "
+                             "(no lazy arena on this device)\n", dev_, (long long) cells, (long long) ctx,
+                     ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9, (double) K->host_bytes / 1e9);
+    else
+        std::fprintf(stderr, "glm pack: CUDA%d KV streaming: %lld of %lld positions of each of %zu DSA layers in VRAM "
+                             "(%.2f GB), pinned latent cache grows with use: %llu MiB of pinned RAM at start, up to "
+                             "%.2f GB\n", dev_, (long long) cells, (long long) ctx,
+                     ls.size(), (double) cells * K->row_bytes * ls.size() / 1e9,
+                     (unsigned long long) (K->pinned_now() >> 20), (double) K->host_bytes / 1e9);
     return K;
 }
 
 void Glm5Model::kv_stream_free(KvStream* K) {
     if (K == nullptr) return;
-    if (K->host_arena) cudaFreeHost(K->host_arena);
+    const bool lazy = !K->arena.empty();
+    if (lazy) {   // granules a conversation pinned and never gave back (a stream freed mid-conversation)
+        K->arena.release(kv_pinner());
+        K->arena.close();
+    }
+    if (K->host_arena && !lazy) cudaFreeHost(K->host_arena);
     if (K->map_arena) cudaFree(K->map_arena);
     delete K;
+}
+
+// P125g: register the granules of K's host copy that hold the positions BELOW end_pos, before any kernel names them.
+// Every DSA layer's slab gets its prefix [0, end_pos x row_bytes) - a conversation writes positions in order, so what
+// a decode or a chunk touches grows from the arena's start, and attention only ever reads a position it wrote.
+// Whole pages: a resolve fills and the prompt's stage copy takes whole blocks, whose last row can sit in the next
+// granule.  The slack past end_pos: a decode step's verify window writes rows up to kWinMax positions past the one
+// it commits and the draft chain's a little further - pinned ahead of them, so a speculative write never lands on
+// an unregistered page (it costs at most one granule of pinned bytes over what was written).  True for a stream on
+// the eager whole-max arena, which was pinned in full at the load.  False with err: the driver refused (out of
+// pinned RAM - the WSL cap of about 1 GB in all, a host with nothing left): what pinned before the refusal stays,
+// the request ends on err, the engine lives.
+bool Glm5Model::kv_pin(const KvStream* K, int64_t end_pos, std::string& err) {
+    if (K == nullptr || K->arena.empty()) return true;
+    const int64_t slack = 2 * kWinMax + 2 + K->page;   // (the window's rows, the chain's, and the block's rest)
+    const int64_t end = std::min(end_pos + slack, K->n_blocks * K->page);
+    if (end <= 0) return true;
+    const int64_t blocks = (end + K->page - 1) / K->page;
+    const uint64_t span = (uint64_t) blocks * (uint64_t) K->page * (uint64_t) K->row_bytes;
+    // const K: pinning is the arena's mutex-guarded bookkeeping, not a write to the stream's data (the rows'
+    // read-only views name their positions through it too)
+    maya::core::GranuleArena& ar = const_cast<maya::core::GranuleArena&>(K->arena);
+    for (const uint64_t slab : K->pin_slabs)
+        if (!ar.ensure(slab, span, kv_pinner(), err)) {
+            char b[320];
+            std::snprintf(b, sizeof b, "KV streaming: cannot grow the pinned latent cache (%s) - lower the context, "
+                          "or turn it off (--kv-streaming off in the config's args; under WSL the driver pins only "
+                          "about 1 GB in all)", err.c_str());
+            err = b;
+            return false;
+        }
+    return true;
+}
+
+// P125g (give-back): unregister every granule of K's host copy and hand the pages to the kernel - the conversation
+// that wrote them reset, parked or ended.  The addresses stay, so the layers' rows still point where they always
+// did, and the next writer's kv_pin re-registers (zero-filled) what it names.  The caller synced the device first:
+// nothing in flight names these pages (reset's stream sync, seq_release's and kv_pinned_release's).
+void Glm5Model::kv_unpin(KvStream* K) {
+    if (K != nullptr && !K->arena.empty() && K->arena.pinned_bytes() > 0) K->arena.release(kv_pinner());
 }
 
 // the first sequence's stream (the only one without SAGUARO_GLM_SEQS); the prompt path's staging copy is sized for it,
@@ -995,7 +1113,7 @@ Glm5Model::KvStreamStats Glm5Model::kv_stream_stats() const {
                 r.misses += c.misses;
                 r.overflow = r.overflow || c.overflow;
             }
-            r.host_gb += (double) K->host_bytes / 1e9;
+            r.host_gb += (double) K->pinned_now() / 1e9;   // P125g: what it holds pinned now, not what it can grow to
             r.block_bytes = K->page * K->row_bytes;
         }
     }
@@ -1018,9 +1136,33 @@ uint64_t Glm5Model::kv_host_bytes() const {   // the same walk as kv_stream_stat
     for (const Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
         std::vector<const KvStream*> ks = {m->kv_};
         for (const SeqCtx& c : m->seq_) ks.push_back(c.kv);
-        for (const KvStream* K : ks) if (K != nullptr) n += K->host_bytes;
+        for (const KvStream* K : ks) if (K != nullptr) n += K->pinned_now();   // pinned now (P125g), not the ceiling
     }
     return n;
+}
+
+// P125g (give-back, parking): every part's bound conversation's pinned host copy, given back now.  The serve loop
+// calls this only from a slot_put that DETACHES the conversation (its context is released right after, or the engine
+// is shutting down): from then on the slot is the live copy, the host arena's granules would only be held for a
+// conversation that is no longer running, and its return re-pins what it restores (slot_load's hook, then the
+// per-position ones).  A park the conversation keeps running in must NOT call this: the host copy is the
+// authoritative one (the VRAM slots are a cache, never written back) and a re-pin lands zero-filled.
+// A part whose stream sync fails keeps its pins - an engine that cannot say the device is idle must not unregister
+// memory under it.
+void Glm5Model::kv_pinned_release() {
+    int cur = 0;
+    cudaGetDevice(&cur);
+    for (Glm5Model* m = this; m != nullptr; m = m->split_next_.get()) {
+        if (m->kv_ == nullptr || m->kv_->arena.empty() || m->kv_->arena.pinned_bytes() == 0) continue;
+        cudaSetDevice(m->dev_);
+        if (m->fast_ != nullptr && cudaStreamSynchronize(m->fast_->cs) != cudaSuccess) {
+            cudaGetLastError();
+            continue;
+        }
+        cudaDeviceSynchronize();   // (a parked context is idle: this waits for nothing of its own; other contexts'
+        kv_unpin(m->kv_);          //  work on the card touches their own arenas, never this one)
+    }
+    cudaSetDevice(cur);
 }
 
 bool Glm5Model::forward(const std::vector<int32_t>& tokens, std::vector<float>& logits_out,
@@ -1597,7 +1739,7 @@ static std::vector<int> glm_search_bounds(const std::string& pack_dir, int64_t m
     // elastic pool a fixed amount, without it one whole context's (per DSA layer)
     double el_card = 0.0;
     if (const char* ev = getenv("SAGUARO_GLM_ELASTIC"); fast && kv_cells == 0 && ev != nullptr && std::atoi(ev) != 0) {
-        const double ring = (double) std::min<int64_t>(max_ctx, 8192 + 64);
+        const double ring = (double) std::min<int64_t>(max_ctx, glmfast::kScoreGridPositions);
         const double grow = 4.0 * (lat + (double) g.idx_key * max_pools);
         const char* kv = getenv("SAGUARO_GLM_ELASTIC_KV_GB");
         const char* pv = getenv("SAGUARO_GLM_ELASTIC_POOL");
@@ -2261,6 +2403,28 @@ bool Glm5Model::forward_pipeline(const std::vector<int32_t>& tokens, std::vector
     return true;
 }
 
+// P125i (GLM memory report, row H): the reference path step's indexer score row - one entry a completed pool.  The
+// arena carve holds a sub-batch grid of pools (sc_score_cap_, glm_score_rows_start); once the completed pools pass
+// it a side buffer doubles toward the context's max_pools, its bytes counted into sc_bytes_ so the activations
+// figure follows the longest context actually decoded, not --max-context.
+bool Glm5Model::score_rows(int64_t pools, float*& out, std::string& err) {
+    const int64_t cap_now = sc_score_x_ != nullptr ? sc_score_xcap_ : sc_score_cap_;
+    if (pools <= cap_now) {
+        out = sc_score_x_ != nullptr ? sc_score_x_ : sc_ + sc_score;
+        return true;
+    }
+    const int64_t cap = glmfast::glm_score_rows_grow(cap_now, pools, max_ctx_ / g_.idx_kpool);
+    float* nx = nullptr;
+    GM_CHECK(cudaMalloc(&nx, (size_t) cap * sizeof(float)), err);
+    if (sc_score_x_ != nullptr) sc_bytes_ -= (uint64_t) sc_score_xcap_ * sizeof(float);
+    cudaFree(sc_score_x_);
+    sc_score_x_ = nx;
+    sc_score_xcap_ = cap;
+    sc_bytes_ += (uint64_t) cap * sizeof(float);
+    out = sc_score_x_;
+    return true;
+}
+
 bool Glm5Model::step_layers(int64_t p, std::string& err) {
     const Glm5Geometry& g = g_;
     float* const S = state_;
@@ -2375,14 +2539,16 @@ bool Glm5Model::step_layers(int64_t p, std::string& err) {
             // selection runs whenever pools exist OR the tail is on; only tail-off with no pools
             // has nothing to attend to
             if (pool_done > 0 || g.idx_select_tail) {
+                float* score = nullptr;   // (P125i: the growable score row - a score a completed pool)
+                if (!score_rows(pool_done, score, err)) return false;
                 if (pool_done > 0)
                     maya::kernels::glm_dsa_score(A + sc_iq, S + dsa_pool_[(size_t) il], A + sc_iw, g.idx_key,
-                                                   g.idx_heads, 1, (int) pool_done, A + sc_score, nullptr);
+                                                   g.idx_heads, 1, (int) pool_done, score, nullptr);
                 const int top_pools = (int) std::min<int64_t>(g.top_pools_max(), pool_done);
                 const int n_sel = g.idx_kpool * top_pools + (g.idx_select_tail ? g.idx_kpool - 1 : 0);
                 const int p32 = (int) p;
                 GM_CHECK(cudaMemcpy(d_pos_, &p32, sizeof(int), cudaMemcpyHostToDevice), err);
-                maya::kernels::glm_dsa_select(A + sc_score, (int) pool_done, g.idx_kpool, top_pools,
+                maya::kernels::glm_dsa_select(score, (int) pool_done, g.idx_kpool, top_pools,
                                                 g.idx_select_tail, 1, n_sel, d_pos_, (int*) (A + sc_cells),
                                                 nullptr);
                 maya::kernels::glm_mla_attention(A + sc_qabs, lat, (const int*) (A + sc_cells),
@@ -3579,7 +3745,8 @@ bool maya::core::Glm5Model::load_pack(const std::string& pack_dir, int64_t max_c
     sc_qabs = take((int64_t) g_.kv_lora * g_.n_head);
     sc_iq = take((int64_t) g_.idx_heads * g_.idx_key);
     sc_iw = take(g_.idx_heads);
-    sc_score = take(max_pools);
+    sc_score_cap_ = glmfast::glm_score_rows_start(max_pools, g_.idx_kpool);   // (P125i: grown on use, see score_rows)
+    sc_score = take(sc_score_cap_);
     sc_cells = take(g_.n_sel_max());
     sc_attn = take((int64_t) g_.v_head * g_.n_head);
     sc_gate = take(ff_max);

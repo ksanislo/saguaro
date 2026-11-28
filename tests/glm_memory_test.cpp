@@ -78,8 +78,38 @@ static void check_ram_plan() {
     assert(balanced_resident_ram(true, true, false));
 }
 
+// The decode's indexer score rows (P125i, the GLM memory report rows H and J): the carve is one sub-batch grid of
+// pools, growth doubles toward the context's max_pools, and the step's need is never left short.
+static void check_score_rows() {
+    using namespace maya::core::glmfast;
+    // GLM-5.3-Flash geometry: kpool 4, the grid 8256 positions -> 2064 pools
+    assert(kScoreGridPositions == 8256);
+    assert(glm_score_rows_start(65536, 4) == 2064);   // 262144 ctx: 8 KB carved, not the 256 KB of --max-context
+    assert(glm_score_rows_start(8192, 4) == 2064);    // 32768 ctx: the grid, not 8192 pools
+    assert(glm_score_rows_start(2064, 4) == 2064);    // 8256 ctx: grid == max_pools
+    assert(glm_score_rows_start(1000, 4) == 1000);    // a context shorter than the grid: its own max_pools
+    assert(glm_score_rows_start(0, 4) == 0);          // and kpool variants keep the grid in positions
+    assert(glm_score_rows_start(2064, 2) == 2064 && glm_score_rows_start(9000, 1) == 8256);
+    assert(glm_score_rows_grow(2064, 2064, 65536) == 2064);   // a step that still fits: no growth
+    assert(glm_score_rows_grow(2064, 2065, 65536) == 4128);   // the grid passes: double
+    assert(glm_score_rows_grow(2064, 5000, 65536) == 5000);   // a step far ahead: jump to its need
+    assert(glm_score_rows_grow(60000, 65536, 65536) == 65536);   // capped at the context's max_pools
+    assert(glm_score_rows_grow(0, 7, 100) == 7);              // zero capacity: exactly the need
+    // doubling from the grid reaches any context, never short of the step, never above max_pools
+    for (const int64_t mp : {2064LL, 65536LL, 262144LL}) {
+        int64_t cap = glm_score_rows_start(mp, 4);
+        for (int64_t pools = 1; pools <= mp; pools += mp / 8 + 1) {
+            const int64_t next = glm_score_rows_grow(cap, pools, mp);
+            assert(next >= std::max(pools, cap) && next <= mp);
+            cap = next;
+        }
+        assert(cap >= mp);
+    }
+}
+
 int main() {
     check_ram_plan();
+    check_score_rows();
     using maya::core::glmfast::expert_pool_budget;
     using maya::core::glmfast::minimal_ram_tier;
     using maya::core::glmfast::full_unified_pool;

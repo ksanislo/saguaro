@@ -14,7 +14,16 @@
                 box-sizing: border-box; background: var(--st-danger-tint); color: var(--st-danger-text);
                 font-size: var(--st-fs-sm); overflow-wrap: anywhere; }
 .start__hint { color: var(--st-ink-muted); font-size: var(--st-fs-sm); margin: 0; }
+/* the crash of a load (P125m phase 2): the engine's own last ~20 lines, scrollable, in the card */
+.start__log { margin: 0; padding: var(--st-s-3) var(--st-s-4); border-radius: var(--st-r-md); width: 100%;
+              box-sizing: border-box; background: var(--st-surface-2); border: 1px solid var(--st-line); color: var(--st-ink-soft);
+              font-family: var(--st-font-mono); font-size: var(--st-fs-xs); line-height: 1.5; text-align: left;
+              max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .start__spin { width: 28px; height: 28px; border-radius: 50%; border: 3px solid var(--st-line-strong);
                border-top-color: var(--st-accent); animation: start-spin .9s linear infinite; }
+/* the load's own progress (P125m): the engine's load milestones, not a timer */
+.start__prog { width: 100%; height: 6px; border-radius: 3px; background: var(--st-surface-3); overflow: hidden; }
+.start__prog i { display: block; height: 100%; border-radius: 3px; background: var(--st-accent);
+                 transition: width .6s; }
 @keyframes start-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .start__spin { animation: none; } }

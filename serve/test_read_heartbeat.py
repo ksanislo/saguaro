@@ -1,7 +1,8 @@
-"""serve/test_read_heartbeat.py - the U5 read heartbeat: prompt reads report progress about every second.
+"""serve/test_read_heartbeat.py - the U5 read heartbeat: prompt reads report their progress at a steady cadence.
 
 The engine prints `RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total>
-reused=<n> pass=<i>/<n> ms=<read ms>` (the batch path's with an appended `slot=<b>`) at most once per ~1 s
+reused=<n> pass=<i>/<n> ms=<read ms> stage_ms=<staging part, P124v>` (the batch path's with an appended
+`slot=<b>`) at most once per ~0.23 s
 from host points between layer passes / pipe pieces / KV staging passes.  Behind a fake engine speaking
 those lines: the driver parses them into read_live (the solo read + per slot, the live rate the tokens
 between two heartbeats over the time between them), and the shared server's live figures refresh with every
@@ -110,6 +111,26 @@ class DriverReadLive(unittest.TestCase):
     def test_an_engine_before_the_lines_is_untouched(self):
         eng = pump_engine(["RDONE rid=1 new=500 ms=158.0"])
         self.assertFalse(hasattr(eng, "read_live"))      # (no RHB line ever came: the state is never laid out)
+
+    def test_the_staging_time_leaves_the_read_s_clock(self):
+        # P124v (PLAN-p124v-read-rate): ms is the read's clock and stage_ms the part of it spent staging the
+        # reused prefix in from RAM.  While the read only stages (stage_ms == ms) its READ time is 0 and there
+        # is no rate; the first read beat's rate is its tokens over the READ time, undiluted by the staging.
+        eng = pump_engine([
+            "RHB rid=1 stage=stage done=0 new=800 reused=50000 pass=4/64 ms=1500 stage_ms=1500",
+            "RHB rid=1 stage=read done=120 new=800 reused=50000 pass=1/64 ms=2700 stage_ms=1500",
+        ])
+        s = eng.read_live["solo"]
+        self.assertEqual((s["stage"], s["done"], s["rt"], s["stage_ms"]), ("read", 120, 1200.0, 1500.0))
+        self.assertAlmostEqual(s["rate"], 100.0)         # 120 tokens over the 1.2 s it spent READING, not 2.7
+        eng = pump_engine(["RHB rid=1 stage=stage done=0 new=800 reused=50000 pass=4/64 ms=1500 stage_ms=1500"])
+        s = eng.read_live["solo"]
+        self.assertEqual(s["rt"], 0.0)                   # nothing has been read yet
+        self.assertIsNone(s["rate"])                     # (and there is no rate to freeze at)
+        # RDONE's finished figures carry it too: the exact read time is the clock minus the staging
+        eng = pump_engine([])
+        eng._rdone("RDONE rid=1 new=800 ms=5500.0 stage_ms=4000.0")
+        self.assertEqual(eng.read_done, (800, 1500.0))
 
     def test_a_split_read_solo_beats_are_a_belt(self):
         # U5b (PLAN-u5b-split-progress), a 4 x T4 layer split (ref/hb-4xT4.txt): every card's host point printed
@@ -360,9 +381,18 @@ class EngineSideContract(unittest.TestCase):
 
     def test_the_engine_prints_the_documented_fields(self):
         cpp = (ROOT / "engines" / "qfn" / "src" / "program" / "generate.cpp").read_text(encoding="utf-8")
-        self.assertIn('"RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f\\n"', cpp)
-        self.assertIn('"RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f slot=%d\\n"', cpp)
-        self.assertIn("at most one line per ~1 s", cpp)
+        # P124v: the beat carries the read's own staging time (stage_ms=) beside its read clock (ms=), and the
+        # gate is a steady ~4 lines a second (230 ms), not the old ~1.
+        # P124v2: and the unit in flight's position and length (pos0=, chunk=), so the server can count its
+        # pass=<i>/<n> share of tokens that done= (whole units only) leaves out.
+        self.assertIn('"RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld '
+                      'ms=%.0f stage_ms=%.0f"', cpp)
+        self.assertIn('" pos0=%lld chunk=%lld\\n"', cpp)
+        self.assertIn('"RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld '
+                      'ms=%.0f stage_ms=%.0f"', cpp)
+        self.assertIn('" pos0=%lld chunk=%lld slot=%d\\n"', cpp)
+        self.assertIn("at most one line per ~0.23 s", cpp)
+        self.assertIn("stage_ms=%.1f", cpp)          # PP / RDONE / BRP / BRA carry it too (the finished figures)
 
     def test_the_driver_keeps_the_heartbeat_per_reader(self):
         for rel in ("engines/qfn/serve/server.py", "serve/qfn_engine.py"):

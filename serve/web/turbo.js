@@ -16,6 +16,8 @@ import {Seg} from "./ui.js";
 S.turbo = {on: false, engine: false, plan: {}, env: {}, restarts: false, busy: false};
 
 export async function loadTurbo() {
+  if (unloaded()) return S.turbo;          // (P125n: booting off the card, api/turbo under /upstream/ would load the
+                                           //  model - app.js re-arms this through whenHealth once its health lands)
   try {
     const t = await api("api/turbo");
     S.turbo = {...S.turbo, ...t, busy: S.turbo.busy};

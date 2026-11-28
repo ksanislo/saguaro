@@ -127,22 +127,28 @@ class ReadWindowSums(unittest.TestCase):
 
 
 class PeakPrefill(unittest.TestCase):
-    """totals.peak_prefill is kept like peak_decode - and ignores tiny reads (their rate says little)."""
+    """totals.peak_prefill - P124v: one read's OWN true readout over a minimum window (PEAK_MIN_SPAN_S and
+    PEAK_MIN_READ_TOKENS); the summed engine-total figure lands on peak_prefill_engine, never on this one."""
 
     def test_kept_and_smaller_rates_do_not_replace_it(self):
         svc = make_svc()
-        svc._note_peak_read(800.0, PEAK_MIN_READ_TOKENS, 100.0)
+        svc._note_peak_read(800.0, 8000, 100.0)                  # 800 tok/s over a 10 s window: recorded
         first = svc.totals["peak_prefill"]
-        self.assertEqual(first, {"tok_s": 800.0, "tokens": PEAK_MIN_READ_TOKENS, "time": 100.0})
-        svc._note_peak_read(900.0, PEAK_MIN_READ_TOKENS - 1, 200.0)   # under the minimum: no record
-        svc._note_peak_read(500.0, 4096, 300.0)                       # a slower read: the peak stands
+        self.assertEqual(first, {"tok_s": 800.0, "tokens": 8000, "time": 100.0})
+        svc._note_peak_read(900.0, 400, 150.0)                    # under the token minimum: no record
+        svc._note_peak_read(900.0, 2700, 200.0)                  # 3 s window: a burst, not a speed: no record
+        svc._note_peak_read(500.0, 10000, 300.0)                 # a slower read: the peak stands
         self.assertEqual(svc.totals["peak_prefill"], first)
-        svc._note_peak_read(1200.0, 4096, 400.0)                      # a faster one beats it
+        svc._note_peak_read(1200.0, 12000, 400.0)                # a faster one beats it
         self.assertEqual(svc.totals["peak_prefill"]["tok_s"], 1200.0)
+        svc._note_peak_read(900.0, 9000, 500.0, engine=True)     # the engine total is a separate, labelled figure
+        self.assertEqual(svc.totals["peak_prefill"]["tok_s"], 1200.0)
+        self.assertEqual(svc.totals["peak_prefill_engine"]["tok_s"], 900.0)
 
-    def test_live_window_records_it_only_over_min_tokens(self):
-        # a live peak needs the window's REAL span past PEAK_MIN_SPAN_S and enough tokens really read in it:
-        # 200 over 2 s say little (no peak), 1000 over 4 s become one, and a window whose mean falls keeps it
+    def test_live_window_records_the_engine_peak_only_over_min_tokens(self):
+        # a live peak needs the window's REAL span past PEAK_MIN_SPAN_S (5 s now: at 2 s a burst read as a rate
+        # made mangonel's impossible headline) and enough tokens really read in it; the summed-window figure is
+        # an ENGINE TOTAL (peak_prefill_engine) - one read's peak comes from the per-read readout or its DONE row
         svc = make_svc()
         svc.status.update(busy=True)
         t = [1000.0]
@@ -152,25 +158,33 @@ class PeakPrefill(unittest.TestCase):
             svc._read_start(a)                        # (the read's interval starts where the engine took it)
             svc._note_read(a, 100)
             t[0] += 2.0
-            svc._note_read(a, 200)                           # 200 tokens over the 2 s span: under the 512 minimum
+            svc._note_read(a, 200)                           # 200 tokens over the 2 s span: under both minimums
             self.assertAlmostEqual(svc._prefill_tok_s(), 100.0)
             self.assertIsNone(svc.totals["peak_prefill"])
+            self.assertIsNone(svc.totals["peak_prefill_engine"])
             svc._note_read(a, 1000)                          # the read goes on: 1000 tokens counted by now
             t[0] += 2.0
             self.assertAlmostEqual(svc._prefill_tok_s(), 250.0)   # 1000 over the window's 4 s span
-            peak = svc.totals["peak_prefill"]
-            self.assertEqual((peak["tok_s"], peak["tokens"]), (250.0, 1000))
-            t[0] += 2.0                                      # nothing read since: the window's mean falls
-            self.assertAlmostEqual(svc._prefill_tok_s(), 850 / 5.0)   # 800 inside + half of the straddling 100-token step
-            self.assertEqual(svc.totals["peak_prefill"]["tok_s"], 250.0)   # the peak keeps the higher
+            self.assertIsNone(svc.totals["peak_prefill_engine"])   # (4 s: still under the 5 s peak window)
+            t[0] += 2.0                                      # 1000 counted, but the straddling 100-token step
+            self.assertAlmostEqual(svc._prefill_tok_s(), 170.0)   #  counts half: 850 over the window's 5 s
+            peak = svc.totals["peak_prefill_engine"]
+            self.assertEqual((peak["tok_s"], peak["tokens"]), (170.0, 850))
+            self.assertIsNone(svc.totals["peak_prefill"])    # (the summed window never poses as one read's peak)
+            t[0] += 6.0                                      # nothing read since: the window drains empty
+            self.assertEqual(svc._prefill_tok_s(), 0.0)
+            self.assertEqual(svc.totals["peak_prefill_engine"]["tok_s"], 170.0)   # the peak keeps it
 
     def test_a_finished_read_records_it(self):
-        # the done path records the rate the row shows: 400 tokens under the minimum leaves no peak,
-        # 1000 over it does (the row's own figures go through _note_peak_read there)
+        # the done path records the rate the row shows: 400 tokens under the minimum leaves no peak, and
+        # neither does a fast rate over a window shorter than PEAK_MIN_SPAN_S; a read of 12000 tokens at
+        # 2000 tok/s (6 s) does (the row's own figures go through _note_peak_read there)
         svc = make_svc()
         svc._note_peak_read(2000.0, 400, 100.0)
         self.assertIsNone(svc.totals["peak_prefill"])
-        svc._note_peak_read(2000.0, 1000, 100.0)
+        svc._note_peak_read(2000.0, 1000, 100.0)            # 1000 tokens over 0.5 s: the window says no
+        self.assertIsNone(svc.totals["peak_prefill"])
+        svc._note_peak_read(2000.0, 12000, 100.0)
         self.assertEqual(svc.totals["peak_prefill"]["tok_s"], 2000.0)
 
 
@@ -247,7 +261,7 @@ class StrataEngineReadHook(unittest.TestCase):
 
     def test_a_service_counts_the_steps_end_to_end(self):
         # the full path of one real read: PP lines -> the hook run() installs -> the window -> the live figure:
-        # the tokens really read, over the span the window spans - the engine's means ride along as peak candidates
+        # the tokens really read, over the span the window spans
         svc = make_svc()
         eng = self.engine()
         svc.engine = eng
@@ -264,8 +278,16 @@ class StrataEngineReadHook(unittest.TestCase):
             self.assertIsNotNone(stat.read_t0)
             t[0] += 2.0
             self.assertEqual(svc._prefill_tok_s(), 4000 / 2.0)   # 4000 really read over the window's 2 s span
-            # the engine's own means rode in on the PP lines: the peak saw the faster of the two (2000, then 2400)
-            self.assertEqual(svc.totals["peak_prefill"]["tok_s"], 2400.0)
+            # P124v: a peak comes only from the true readout over a window of PEAK_MIN_SPAN_S or more, and a
+            # summed window figure is always an ENGINE TOTAL (this old line format carries no per-read clock)
+            self.assertIsNone(svc.totals["peak_prefill"])         # 2 s window: a burst, not a peak
+            self.assertIsNone(svc.totals["peak_prefill_engine"])
+            t[0] += 2.5                                           # steps keep landing as the read goes on
+            eng._tls.on_read(5000, 2200.0)                        # (a mid-progress step at 1004.5)
+            t[0] += 1.5                                           # now the window spans 5 s+
+            self.assertGreater(svc._prefill_tok_s(), 0.0)         # (the window's straddling-step spread)
+            self.assertIsNone(svc.totals["peak_prefill"])         # still no PER-READ peak from a summed window
+            self.assertIsNotNone(svc.totals["peak_prefill_engine"])   # but the engine-total peak records it
 
 
     def test_multi_pp_line_counts_too(self):
@@ -353,7 +375,10 @@ class QfnAdmissionReads(unittest.TestCase):
             self.assertEqual(stat.read_pos, 438)              # prompt - reused, exactly
             self.assertEqual(svc._read_counted(stat), 438)    # the engine-total window saw the same
             t[0] += 2.0
-            self.assertEqual(svc._prefill_tok_s(), 438 / 2.0)  # the real count over the window's 2 s span
+            # P124v: the live figure is the read's own true readout - 438 tokens over the 9897 ms of READ time
+            # the engine reported for them (aged by the 0.5 s past the beat grace since the read ended) - not
+            # the window's 438 / 2 s, which read a 9.9 s read as if it took the window's span
+            self.assertAlmostEqual(svc._prefill_tok_s(), 438 / 10.397, places=3)
             self.assertIsNone(svc.totals["peak_prefill"])      # 438 < PEAK_MIN_READ_TOKENS: no peak from a short read
 
     def test_provisional_steps_never_count_as_reads_they_may_be_positions(self):
@@ -381,7 +406,10 @@ class QfnAdmissionReads(unittest.TestCase):
             self.drain(eng)
             self.assertEqual((stat.read_pos, svc._read_counted(stat)), (431, 431))
             t[0] += 1.0
-            self.assertEqual(svc._prefill_tok_s(), 431.0)           # the real count over the window's 1 s span
+            # P124v: its own true readout - 431 tokens over the 33 ms of READ time the engine says they took,
+            # held through the beat grace (431 < the peak's token minimum, so it makes no peak) - not the
+            # window's 431 / 1 s, a figure that was neither this read's rate nor its span
+            self.assertAlmostEqual(svc._prefill_tok_s(), 431 / 0.033, places=0)
 
     def test_legs_of_one_request_add_up(self):
         # after a fair slice the same request is admitted again (the held prefix reused): the legs' reads add up
@@ -393,7 +421,10 @@ class QfnAdmissionReads(unittest.TestCase):
         eng.slot_q[7].put("BRA 7 1 prompt=5020 reused=5000 read_ms=40 wait_ms=0")
         self.drain(eng)
         self.assertEqual((stat.read_pos, svc._read_counted(stat)), (5020, 5020))
-        self.assertEqual(svc.totals["peak_prefill"]["tok_s"], round(5000 / 0.1, 1))   # from the first leg (>= 512)
+        # P124v: a 50000 tok/s reading over a 0.1 s leg is a burst, not a speed: a peak needs
+        # PEAK_MIN_SPAN_S of the read's own clock as well as its tokens
+        self.assertIsNone(svc.totals["peak_prefill"])
+        self.assertIsNone(svc.totals["peak_prefill_engine"])
 
     def test_lines_and_return_value_pass_through(self):
         eng, got = self.engine()
@@ -462,19 +493,35 @@ class ReadsSpreadOverTheirTime(unittest.TestCase):
             rate = svc._prefill_tok_s()
             self.assertGreater(rate, 500.0)               # (their true shared ~810...)
             self.assertLess(rate, 1100.0)                 # (...never the 11518 -> 1536.7 of before)
-            peak = svc.totals["peak_prefill"]
-            self.assertIsNotNone(peak)
-            self.assertLess(peak["tok_s"], 1536.0)
-            self.assertGreater(peak["tok_s"], 500.0)
+            # P124v: this summed-window figure is an ENGINE TOTAL - it lands on peak_prefill_engine, labelled,
+            # and never poses as one read's peak (peak_prefill only ever takes a single read's own readout)
+            epeak = svc.totals["peak_prefill_engine"]
+            self.assertIsNotNone(epeak)
+            self.assertLess(epeak["tok_s"], 1536.0)
+            self.assertGreater(epeak["tok_s"], 500.0)
+            self.assertIsNone(svc.totals["peak_prefill"])
             self.assertEqual(svc._read_counted(stats[0]), 10624)   # (the exact counts stand, per read)
 
 
 class PrometheusPeak(unittest.TestCase):
     def test_peak_prefill_gauge(self):
         svc = make_svc()
-        svc._note_peak_read(900.0, 1000, 100.0)
+        # P124v: a peak needs the minimum window too (1000 tok/s over >= 5 s: 5000 tokens read)
+        svc._note_peak_read(900.0, 5000, 100.0)
         prom = svc.prometheus()
         self.assertIn("maya:prefill_peak_tokens_seconds 900.0", prom)
+
+    def test_the_engine_total_peaks_are_their_own_labelled_gauges(self):
+        # the summed-over-chats figures (Ken: mangonel's 94.7 "peak decode" was two answers of ~64 added up)
+        # are kept on their own, separately labelled gauges - never on the per-answer ones
+        svc = make_svc()
+        svc._note_peak(128.7, 2600, 100.0, engine=True)          # two chats writing at ~64 tok/s each
+        svc._note_peak_read(6300.0, 31500, 100.0, span=5.0, engine=True)   # three reads at ~2100 together
+        prom = svc.prometheus()
+        self.assertIn("maya:decode_engine_peak_tokens_seconds 128.7", prom)
+        self.assertIn("maya:prefill_engine_peak_tokens_seconds 6300.0", prom)
+        self.assertEqual((svc.totals["peak_decode"] or {}).get("tok_s"), None)
+        self.assertEqual((svc.totals["peak_prefill"] or {}).get("tok_s"), None)
 
 
 class ReadEmittingEngine(MockEngine):
@@ -731,8 +778,9 @@ class PerRequestEngineStats(unittest.TestCase):
             self.assertAlmostEqual(svc._own_read_rate(b, t[0], 0), 10000 / 2.0)   # ITS read: 5000 tok/s
             self.assertNotEqual(a.read_eng_ms, b.read_eng_ms)                     # (never one shared number)
             t[0] += 1.0
-            total = svc._prefill_tok_s()                                          # the live total: sum of the chats
-            self.assertAlmostEqual(total, (438 + 10000) / 1.0)
+            total = svc._prefill_tok_s()   # P124v: the live total is the sum of each read's OWN true readout
+            self.assertAlmostEqual(total, 438 / 0.9 + 10000 / 2.0)                # (its own tokens over its own
+            #  read time, aged by the silence since - never one shared window dividing the summed tokens by 1 s)
 
     def test_convs_list_computes_the_reading_rows_own_rate(self):
         # the review finding (11-21): _convs_list must compute every live row's own read rate - with the

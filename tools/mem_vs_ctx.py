@@ -19,7 +19,9 @@ in the VRAM cache ("1729 in the GPU cache", "every expert in VRAM (3072 copied",
 "(N of M in VRAM)"), the experts in RAM / pinned ("resident RAM mode: X GiB of experts in RAM", "experts in
 pinned memory: X GiB", "X GB pinned pool"), the GB left for the expert pool ("VRAM before the expert pool:
 A of T GB in use" -> T - A, summed over the cards), and the GB of pinned RAM the engine declares ("the latent
-cache in 2.95 GB of pinned RAM").  Then it stops the run - kill by the port's owner - and starts the next.
+cache in 2.95 GB of pinned RAM"; GLM since P125g says what is pinned NOW at the load instead - "0 MiB of pinned
+RAM at start, up to 2.95 GB" - and it is the ceiling the run declares, so that is what gets read).  Then it
+stops the run - kill by the port's owner - and starts the next.
 
 A table of every figure per context, the placement figures and the budget lines, and the verdict: PASS when
 every memory figure differs by less than max(2%, 256 MiB) between the contexts AND no placement figure
@@ -68,7 +70,9 @@ MEMINFO_KEYS = ("Mlocked", "Unevictable", "Shmem")  # host-wide: where pinned/un
 #   QFN      "resident RAM mode: 68.00 GiB of experts in RAM (page-locked), 1729 in the GPU cache" (generate.cpp)
 #   QFN      "every expert is in the GPU cache (N of M)" (generate.cpp)
 #   GLM      "glm fast: CUDA0 VRAM before the expert pool: A of T GB in use - ... state/KV (N ctx) X" (glm_fast_path.cu)
-#   GLM      "glm pack: CUDA0 KV streaming: ..., the latent cache in X GB of pinned RAM" (glm_model.cu)
+#   GLM      "glm pack: CUDA0 KV streaming: ..., the latent cache in X GB of pinned RAM" (glm_model.cu, pre-P125g)
+#   GLM      "pinned latent cache grows with use: N MiB of pinned RAM at start, up to M GB" - the lazy arena, and
+#            "pinned latent cache: X GB of pinned RAM at the load, the whole cache" - the eager fallback (glm_model.cu)
 #   Inkling  "resident: every expert in VRAM (N copied in ...)" / "offload: N of M experts in VRAM" (ik2_main.cu)
 #   MM3      "saguaro mm3: loaded in ..., N of M experts in VRAM, X GB pinned pool" (mm3_main.cpp)
 #   Hy4      "INFO CPU lane: N of M routed experts in VRAM (..%)" (hy4_model.cu)
@@ -88,7 +92,12 @@ EXPERT_RAM_RES = (                           # the RAM/pinned expert tier, GiB/G
     re.compile(r"routed experts on the CPU lane \(([\d.]+) GB(?: of RAM)?"),
 )
 EXPERT_POOL_RES = re.compile(r"VRAM before the expert pool: ([\d.]+) of ([\d.]+) GB in use")
-PINNED_DECLARED_RES = re.compile(r"([\d.]+) Gi?B of pinned RAM")
+PINNED_DECLARED_RES = (re.compile(r"([\d.]+) Gi?B of pinned RAM"),
+                       # P125g: GLM's lazy-arena line states what is pinned NOW ("N MiB of pinned RAM at start" -
+                       # 0 for a fresh arena, which no Gi?B pattern sees) and the ceiling after "up to" - that is
+                       # the declared pin, what the pre-P125g line gave as one cudaHostAlloc's size.  The eager
+                       # fallback's whole-cache figure sits before "of pinned RAM" and matches the pattern above.
+                       re.compile(r"pinned latent cache grows with use: .*up to ([\d.]+) GB"))
 PLACEMENT_FIGURES = (("experts_vram", "experts in VRAM"), ("experts_ram_gib", "experts in RAM"),
                      ("expert_pool_gb", "expert pool (GB)"), ("pinned_declared_gib", "pinned RAM declared (GB)"))
 
@@ -329,7 +338,7 @@ def parse_placement(text: str) -> dict:
     pool = [float(t) - float(used) for used, t in EXPERT_POOL_RES.findall(text)]
     if pool:
         out["expert_pool_gb"] = sum(pool)
-    declared = nums([PINNED_DECLARED_RES])
+    declared = nums(PINNED_DECLARED_RES)
     if declared:
         out["pinned_declared_gib"] = max(declared)
     return out

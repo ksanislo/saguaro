@@ -3,7 +3,7 @@
 // attachments, the context meter and the Markdown export.
 import {SPRITE, api, coarse, ctxfmt, db, download, fmt, headers, store, uid} from "./lib.js";
 import {P, PENALTIES, S, confirmDialog, defaultSystem, emit, levelFor, modelId, promptDialog, toast} from "./state.js";
-import {mcpOn, unloaded} from "./server.js";
+import {mcpOn, switchingView, unloaded} from "./server.js";
 import {turboOfChat} from "./turbo-core.js";
 
 // ------------------------------------------------------------------ the chats' list
@@ -510,6 +510,9 @@ export async function answer(resumeJob = null) {
     for (;;) {
       if (controller.signal.aborted) throw new DOMException("stopped", "AbortError");
       if (Date.now() - t0 > 600000) throw gone;
+      // P125n: behind llama-swap a reconnect is an upstream request - it would load a model the card let go. Wait the
+      // gate out instead (the server keeps a running answer for strata_resume; an unloaded one the next message starts).
+      if (unloaded()) { await sleepOrVisible(5000); continue; }
       try {
         const r2 = await fetch(`v1/strata/stream?id=${encodeURIComponent(jobId)}&from=${nRecv}`,
                                {headers: headers(false), signal: controller.signal});
@@ -577,6 +580,10 @@ export function resumePending() {
 export async function send() {
   const text = S.draft.trim();
   if (S.reload) { toast("info", "The model is reloading", "Send it once the new context size is loaded."); return; }
+  if (S.switching) {                              // (P125m: a switch is on its way; the chats stay, sending waits)
+    toast("info", switchingView(S.switching).text, "Send it once the new model is up.");
+    return;
+  }
   if ((!text && !S.attachments.length) || S.busy) return;
   const c = S.current;
   if (S.editIndex != null) c.messages.splice(S.editIndex);       // the edited message and every answer after it
@@ -593,7 +600,7 @@ export async function send() {
 }
 export function regenerate() {
   const ms = S.current.messages;
-  if (S.busy || S.reload) return;
+  if (S.busy || S.reload || S.switching) return;
   while (ms.length && ms[ms.length - 1].role === "assistant") ms.pop();
   if (!ms.length) return;
   answer();
@@ -619,8 +626,9 @@ export function cancelEdit(clear = true) {
 export function stopAnswer() {
   const b = S.busy;
   if (!b) return;
-  // the server runs a dropped answer on, so Stop says so explicitly (then the stream ends with it)
-  if (b.job) fetch("v1/strata/cancel", {method: "POST", headers: headers(true), body: JSON.stringify({id: b.job})}).catch(() => {});
+  // the server runs a dropped answer on, so Stop says so explicitly (then the stream ends with it); P125n: while the
+  // llama-swap gate is closed nothing runs on the server to cancel, and the POST would be an upstream request waking it
+  if (b.job && !unloaded()) fetch("v1/strata/cancel", {method: "POST", headers: headers(true), body: JSON.stringify({id: b.job})}).catch(() => {});
   b.controller.abort();
 }
 

@@ -334,6 +334,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/idle_gate_test.cpp")
   add_test(NAME idle_gate_test COMMAND idle_gate_test)
 endif()
 
+# ---- granule_arena_test --------------------------------------------------
+# The lazy pinned host arena (include/maya/core/granule_arena.hpp): a reserved range whose granules
+# cudaHostRegister on first write and give the pages back on release - the bookkeeping, with a recording
+# fake for the driver's pin (host code only, like idle_gate_test above; PLAN-p125g).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/granule_arena_test.cpp")
+  add_executable(granule_arena_test EXCLUDE_FROM_ALL tests/granule_arena_test.cpp)
+  target_include_directories(granule_arena_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(granule_arena_test PRIVATE maya_warnings)
+  find_package(Threads)
+  if(Threads_FOUND)
+    target_link_libraries(granule_arena_test PRIVATE Threads::Threads)
+  endif()
+  add_test(NAME granule_arena_test COMMAND granule_arena_test)
+endif()
+
 # ---- maya_plan ----------------------------------------------------------
 # Also header-only.  A "planner" that hides state would be one whose decision is not inspectable, and the
 # whole point of P1.S9 is that the decision is arithmetic you can check by hand.
@@ -1030,6 +1045,8 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
     add_executable(strata_fmt_gpu_test tests/strata_fmt_gpu_test.cu)
     target_link_libraries(strata_fmt_gpu_test PRIVATE ik2_kernels strata_fmt)
     set(_ik2_targets ik2_kernels saguaro-ik2 ik2_kernels_test strata_fmt_gpu_test)
+    # (the load-time sizing decision: the committed start step of the global layers' K / V against the ceiling, no GPU)
+    add_executable(ik2_plan_test tests/ik2_plan_test.cpp)
     if(NOT _ik2_hip)
     # (the offload path's exact lane: the GPU's rows against the CPU's forms bit for bit; the staging plan, the fetch)
     add_executable(ik2_off_test tests/ik2_off_test.cu ${_ik2_lane_sources})

@@ -4,7 +4,7 @@ import {html, useRef, useState} from "./preact.js";
 import {GIB, ago, ctxfmt, fmt, gb, isPhone, kfmt, rate, store} from "./lib.js";
 import {S, copyText, emit, toast} from "./state.js";
 import {turboBadge} from "./turbo-core.js";
-import {fetchReport, reqAll, speculationView, tierShares} from "./server.js";
+import {fetchReport, loadNow, reqAll, speculationView, tierShares, waking} from "./server.js";
 import {newChat} from "./chats.js";
 import {setSide, status} from "./sidebar.js";
 import {Icon} from "./ui.js";
@@ -76,24 +76,31 @@ function Throughput({m}) {
   const a = sparkPath(h.tok_s), b = sparkPath(h.prefill_tok_s);
   // (the drafters on, and the share of their drafts the model kept: live from the engine's STAT lines, else the last answer's)
   const spec = speculationView(m);
-  // the highest Decode figure since Saguaro started - live or a finished answer's (the server's, kept as each reading beats
-  // it; from 32 tokens on: a few tokens' speed says little)
+  // P124v: the highest ONE ANSWER's / ONE READ's speed since Saguaro started (the server's peak_decode /
+  // peak_prefill: a live reading or a finished answer's own figures, 5 s and PEAK_MIN tokens or more), with the
+  // separate engine-total peaks (peak_decode_engine / peak_prefill_engine: the summed rate over several chats
+  // at once) labelled as what they are - a reference, not a second headline.  Ken (11-26): the old figures
+  // added several chats up (94.7 tok/s over two answers of ~64) and counted a restored prefix as read
+  // (171,860 tok/s for tokens the engine never read).
   const peak = m.totals && m.totals.peak_decode, ppeak = m.totals && m.totals.peak_prefill;
+  const epeak = m.totals && m.totals.peak_decode_engine, eppeak = m.totals && m.totals.peak_prefill_engine;
   const at = (p) => (p ? new Date(p.time * 1000).toLocaleString([], new Date(p.time * 1000).toDateString() === new Date().toDateString()
     ? {hour: "2-digit", minute: "2-digit"} : {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "");
+  const eNote = (e) => (e && e.tok_s > 0 && (!peak || e.tok_s > peak.tok_s) ? ` · all chats together ${fmt(e.tok_s, 1)}` : "");
+  const peNote = (e, p) => (e && e.tok_s > 0 && (!p || e.tok_s > p.tok_s) ? ` · all reads together ${fmt(e.tok_s, 1)}` : "");
   return html`<section class="card card--wide" aria-label="Throughput">
     <div class="speeds">
       <div class="speed"><span class="speed__label"><i class="key key--line"></i>Decode · ${many ? `engine total, ${live.writing} chats writing` : gen ? "writing now" : live.state === "reading" ? "reading the prompt" : last ? "last request" : "waiting for a request"}</span>
         <div class="speed__row"><span class="speed__big num">${speed == null ? "–" : fmt(speed, 1)}<small>tok/s</small></span>
           ${/* the peak beside the live Decode (below it on a phone), small: a reference, not a second headline */ ""}
-          <span class="speed__peak num" title=${peak ? `The highest decode speed since Saguaro started: ${fmt(peak.tok_s, 1)} tok/s at ${at(peak)}, ${fmt(peak.tokens)} tokens into the answer. Live speeds and finished answers count, from 32 tokens on.`
-              : "The highest decode speed since Saguaro started. Live speeds and finished answers count, from 32 tokens on."}>Peak ${peak ? `${fmt(peak.tok_s, 1)} tok/s` : "–"}</span></div></div>
+          <span class="speed__peak num" title=${peak ? `The fastest single answer's decode since Saguaro started: ${fmt(peak.tok_s, 1)} tok/s at ${at(peak)}, ${fmt(peak.tokens)} tokens into the answer - one answer's own speed over a window of 5 s or more, from 32 tokens on.${epeak ? ` All chats decoding at once peaked at ${fmt(epeak.tok_s, 1)} tok/s (a sum, not one answer's speed).` : ""}`
+              : "The fastest single answer's decode since Saguaro started: one answer's own speed, from 32 tokens on."}>Peak ${peak ? `${fmt(peak.tok_s, 1)} tok/s` : "–"}${eNote(epeak)}</span></div></div>
       <div class="speed" title="Prompt tokens read per second (the prefill), counting only the tokens read - not the ones reused from the conversation cache">
         <span class="speed__label"><i class="key key--dash"></i>Prefill · ${readingN ? (mostlyCached ? `restoring ${fmt(rReused)} cached · reading ${fmt(rNew)} new${rStaging ? " · staging" : ""}` : readingN > 1 ? `engine total, ${readingN} chats reading` : "reading now") : last && last.prefill_tok_s != null ? `not reading · last read ${fmt(last.prefill_tok_s)} tok/s` : "not reading"}</span>
         <div class="speed__row"><span class="speed__mid num">${prefill == null ? "–" : fmt(prefill)}<small>tok/s</small></span>
           ${/* the peak read beside it, like Decode's: the server keeps it, from 512 tokens read on */ ""}
-          <span class="speed__peak num" title=${ppeak ? `The highest prompt read speed since Saguaro started: ${fmt(ppeak.tok_s, 1)} tok/s at ${at(ppeak)}, a read of ${fmt(ppeak.tokens)} tokens. Live read rates and finished reads count, from 512 tokens read on.`
-              : "The highest prompt read speed since Saguaro started. Live read rates and finished reads count, from 512 tokens read on."}>Peak ${ppeak ? `${fmt(ppeak.tok_s, 1)} tok/s` : "–"}</span></div></div>
+          <span class="speed__peak num" title=${ppeak ? `The fastest single prompt read since Saguaro started: ${fmt(ppeak.tok_s, 1)} tok/s at ${at(ppeak)}, a read of ${fmt(ppeak.tokens)} tokens actually READ - never a reused / restored one - measured over 5 s or more, from 512 tokens on.${eppeak ? ` All reads at once peaked at ${fmt(eppeak.tok_s, 1)} tok/s (a sum, not one read's speed).` : ""}`
+              : "The fastest single prompt read since Saguaro started: the tokens actually read, from 512 tokens on."}>Peak ${ppeak ? `${fmt(ppeak.tok_s, 1)} tok/s` : "–"}${peNote(eppeak, ppeak)}</span></div></div>
     </div>
     <div class=${`spark-wrap${a || b ? "" : " is-empty"}`}>
       <svg class="spark spark--hero" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">
@@ -841,7 +848,11 @@ export function MonitorPage() {
         <${Requests} m=${m}/>`
       : html`<div class="card mon__wait">${S.conn === "down" ? "The server is not reachable. It may be starting, or stopped."
                                         : S.conn === "key" ? "This server needs its API key: add it in Settings › Connect your tools."
-                                        : S.conn === "unloaded" ? "Unloaded - the next message loads it. llama-swap keeps one model on the card."
+                                        : S.conn === "unloaded" ? (waking()   // (P125n: nothing is polled off the card; the Load button is the one
+                                            ? "Loading the model - a minute or two; the figures come back by themselves."
+                                            : html`<span>Unloaded - this page asks nothing of it. The next message loads it, or load it here on purpose:</span>
+                                                <button type="button" class="btn btn--secondary btn--sm" onClick=${() =>
+                                                  loadNow().catch((e) => toast("error", "The model did not start", e.message, 6000))}><${Icon} name="refresh" sm/>Load it now</button>`)
                                         : "Waiting for the first reading…"}</div>`}
     </div></div>
   </main>`;

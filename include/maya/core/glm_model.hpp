@@ -155,7 +155,9 @@ public:
         // (PLAN-context-panel, output only) the K/V budget fields the Monitor's Context panel aggregates: kv_room
         // is what this part can hold for chat state - the sequence state it holds now plus, with the elastic
         // context on, the expert pool's room the contexts can still back themselves out of (the fixed carve alone
-        // without it); kv_ram_room is the pinned host K/V the engine allocated for KV streaming - its own figure,
+        // without it); kv_ram_room is the pinned host K/V the engine holds for KV streaming NOW (P125g: the cache
+        // granules written so far - it grows as a conversation writes and goes back when it resets, parks or ends,
+        // so a re-printed line follows it; the ceiling it may grow to is the load line's figure) - its own figure,
         // the same on every part's line, 0 when it does not stream; parked: this engine parks nothing in RAM
         // outside its slots, so 0.
         uint64_t kv_room = 0, kv_ram_room = 0, parked = 0;
@@ -700,6 +702,16 @@ public:
     // a stream for one sequence's caches of a context of ctx tokens (null: no DSA layer here, or err), and its free
     KvStream* kv_stream_make(int64_t cells, int64_t ctx, std::string& err);
     void kv_stream_free(KvStream* K);
+    // P125g (PLAN-p125g): register the host copy's granules (GranuleArena) that the positions BELOW end_pos live
+    // in, before any kernel names them - whole pages (a resolve reads whole blocks), plus the slack a decode step
+    // writes past its committed position (the verify window's rows, the draft chain's).  A no-op for a stream on the
+    // eager whole-max arena; false with err when the driver refuses (out of pinned RAM: the WSL ~1 GB cap).  A const
+    // K: pinning is the arena's mutex-guarded bookkeeping, not a write to the stream's data - the rows' read-only
+    // views name their positions through it too.
+    static bool kv_pin(const KvStream* K, int64_t end_pos, std::string& err);
+    // ... and the give-back of one stream's pins (its conversation reset, parked or released).  The caller must
+    // have nothing in flight that touches the arena: a sync of the part (its stream, or the whole card) first.
+    static void kv_unpin(KvStream* K);
     uint64_t kv_stage_bytes_ = 0;                            // the prompt path's staging copy (the first sequence's)
     uint64_t slot_image(const std::function<uint8_t*(uint64_t, bool&)>& alloc, std::string& err, double* ms);
     void kv_stream_reset_maps();                             // nothing resident (reset, slot_load)
@@ -765,8 +777,19 @@ public:
     /// The latent cache's bytes of ONE position over every DSA layer of this model and its split parts, at the
     /// K/V dtype in use (FP16's kv_lora*2, INT8's record, or F32 on the reference path).  The server's context card.
     uint64_t kv_bytes_token() const;
-    /// ... and the pinned host latent caches allocated now, summed over the parts and the bound sequences (0: not streaming).
+    /// ... and the pinned host latent caches held NOW, summed over the parts and the bound sequences (0: not
+    /// streaming).  P125g: the cache grows with what a conversation writes (GranuleArena), so this is its current
+    /// size, not what the context allows - the Context card's and the VRAM line's honest figure, re-read when re-printed.
     uint64_t kv_host_bytes() const;
+    /// P125g: the bound conversations' pinned host copies, every part, given back now (each part's stream synced
+    /// first; a part whose sync failed keeps its pins).  PARKING: call this only from a park that DETACHES the
+    /// conversation - its context is released right after (seq_release) or the engine is shutting down, so the slot
+    /// is the conversation's only copy (its return re-pins what it restores).  A park the conversation continues
+    /// from - the system-prompt slot saved mid-read, a checkpoint continuation, a paused request - must NOT give it
+    /// back: while the conversation stays bound the host copy is the authoritative latent store (the VRAM slots are
+    /// only a cache and nothing writes rows back into it), and a released arena re-pins ZERO-FILLED, so the whole
+    /// written past would read as zeros for every later host read.
+    void kv_pinned_release();
     /// ... and its block reads since the start, every part summed: those the selections named, those read from RAM
     struct KvStreamStats {
         uint64_t lookups = 0, misses = 0;
@@ -1255,6 +1278,14 @@ private:
     int64_t sc_score = 0, sc_cells = 0, sc_attn = 0, sc_gate = 0, sc_up = 0, sc_h = 0, sc_dn = 0;
     int64_t sc_moe = 0, sc_sh = 0, sc_ffn = 0, sc_mixer = 0, sc_head = 0, sc_logits = 0;
     int64_t sc_ids = 0, sc_rw = 0;
+    // P125i (GLM memory report, row H): sc_score holds one indexer score per completed pool, so it is carved at
+    // glm_score_rows_start(max_pools) pools (src/core/glm_memory.hpp) - a sub-batch grid, not the whole
+    // --max-context - and a step whose completed pools pass the carve grows a side buffer, doubling toward
+    // max_pools; its bytes move into sc_bytes_ as it does, keeping the VRAM line honest.
+    int64_t sc_score_cap_ = 0, sc_score_xcap_ = 0;
+    float* sc_score_x_ = nullptr;
+    /// The step's score row in `out`: the arena carve while it holds `pools`, else the grown side buffer
+    bool score_rows(int64_t pools, float*& out, std::string& err);
 };
 
 /// What a part with these layer kinds lends the prompt path for a chunk of T tokens, its prestage buffer aside

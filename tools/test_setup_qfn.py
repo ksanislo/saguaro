@@ -649,11 +649,11 @@ class PascalBuild(unittest.TestCase):
 
 
 class Offered(unittest.TestCase):
-    def test_amd_and_nvidia_offer_it_metal_refuses(self):
+    def test_amd_nvidia_and_metal_offer_it(self):
         self.assertIsNone(maya.family_unavailable("qfn", "hip"))
         self.assertIsNone(maya.family_unavailable("qfn", "cuda"))    # (NVIDIA too since T2: qfn_fit lays the cards out)
         self.assertIsNone(maya.family_unavailable("qfn", None))      # (no backend: the CUDA default, offered too)
-        self.assertIn("Metal", maya.family_unavailable("qfn", "metal"))
+        self.assertIsNone(maya.family_unavailable("qfn", "metal"))   # (engines/qfn/metal: Strata's Metal engine)
 
     def test_the_model_question_has_one_qwen_row(self):
         got = {}

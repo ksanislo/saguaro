@@ -38,6 +38,7 @@ SIZES=${SIZES:-"1000 30000 100000"}
 ROUNDS=${ROUNDS:-3}
 HOLD_S=${HOLD_S:-5}                 # idle between the switch away and back: longer than one park-pressure tick
 PY=${PY:-$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)}
+. "$(dirname "$0")/health.sh"          # readiness: ready / loading / failed (PLAN-p124t2: stop at a failed load)
 WORK=$OUT
 CFG_SRC=$(ls -t saguaro-*.json 2>/dev/null | head -1 || true)
 [ -n "$CFG_SRC" ] || { echo "no saguaro-<model>.json here: set the model up first (or run this from the Saguaro folder)"; exit 1; }
@@ -71,7 +72,12 @@ args = [a for a in cfg.get("args", [])]
 if "--session-dir" in args:                          # the test copy parks its conversations in its own folder
     i = args.index("--session-dir"); args[i + 1] = sess
 else:
-    args += ["--session-dir", sess]
+    _env = cfg.setdefault("env", {})            # (GLM/DS4/ik2 name it in the env: *_SLOT_DIR)
+    _slot = [k for k in _env if k.endswith("_SLOT_DIR")]
+    for _k in _slot:
+        _env[_k] = sess
+    if not _slot:
+        args += ["--session-dir", sess]
 cfg["args"] = args
 cfg["port"] = int(port)
 cfg.pop("api_key", None)                             # (a test copy: no key, the readiness poll needs none)
@@ -100,11 +106,14 @@ say "starting the test copy on port $PORT (the model loads - watch $SRV)"
 SRV_PID=$!
 trap cleanup EXIT
 for _ in $(seq 1 240); do
-    if curl -sf -o /dev/null "http://127.0.0.1:$PORT/metrics" 2>/dev/null; then break; fi
-    kill -0 $SRV_PID 2>/dev/null || { echo "the server died; see $SRV"; exit 1; }
+    case "$(health_status "$PORT")" in
+        ready) break ;;
+        failed) echo "the model failed to load - /health says so; the last 20 lines of $SRV:"; tail -n 20 "$SRV"; exit 1 ;;
+    esac
+    kill -0 $SRV_PID 2>/dev/null || { echo "the server died while loading; the last 20 lines of $SRV:"; tail -n 20 "$SRV"; exit 1; }
     sleep 5
 done
-curl -sf -o /dev/null "http://127.0.0.1:$PORT/metrics" || { echo "the API did not come up in 20 min; see $SRV"; exit 1; }
+[ "$(health_status "$PORT")" = ready ] || { echo "the API did not come up in 20 min; see $SRV"; exit 1; }
 disown $SRV_PID 2>/dev/null || true
 
 gen_body() {                                 # $1 file, $2 filler tokens, $3 seed word, $4 user text, $5 reply|none

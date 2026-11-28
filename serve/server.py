@@ -291,7 +291,11 @@ def text_file_limit(context: int) -> int:
 # token (the Monitor showed five-digit numbers) and then undershoots for the first second of every answer.  5 s: drafted
 # tokens come in bursts of 1-4 a step, and over 2 s the rate swung +-25% around the engine's steady one
 RATE_WINDOW_S = 5.0
-PEAK_MIN_SPAN_S = 2.0     # a peak only from an answer or read this old: younger windows read bursts as rates
+READ_BEAT_STALE_S = 1.5      # P124v: an engine that beats (~4 a second) older than this is silence: a stalled
+#  read's rate then falls with it and drains to nothing past the window, instead of freezing at the last beat
+PEAK_MIN_SPAN_S = 5.0     # P124v: a peak only from an answer or read measured over at least this much time -
+#  younger windows read bursts as rates (mangonel: a 2 s gate let the summed 5 s window of two chats decode at
+#  94.7 tok/s, 1.5x any single answer's real 64.3)
 RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean so far, with the span floored here
 # A request that waited this long in the FIFO gets a line in the server window when its turn comes: with nothing else
 # logged, a queue that had stopped moving (and requests piling up behind it) was indistinguishable from a busy server.
@@ -842,6 +846,17 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+class EngineStartFailed(RuntimeError):
+    """The engine process died before it said READY (P125m phase 2): the crash page shows its exit code and its
+    last engine-log lines, so it carries them (`exit_code`, from the process; `lines`, the engine's own ~20 lines
+    from the log).  exit_code is None only when the process would not report one (it never started)."""
+
+    def __init__(self, message: str, exit_code=None, lines=None):
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.lines = list(lines or [])
+
+
 class LendTimeout(ValueError):
     """A VLEND / VRECLAIM got no answer within its wait (PLAN-vision-fast-start review 4): the engine was busy reading
     its prompt and did not reach a settle.  Distinct from an ERR refusal (the engine alive and saying "no room"): on a
@@ -1280,6 +1295,15 @@ def _quiet_seconds() -> float:
 
 REQUEST_QUIET_S = _quiet_seconds()
 
+# P124z: how often a request whose PROMPT READ is still unfinished wakes on its own while the engine says
+# nothing of it.  The read preemption of R122 decides on the request loop's ticks, and a quiet reader says
+# nothing for as long as it waits (saguaro-ds4's DS4_READER hands its cards to a running answer between the
+# read's pieces, src/ds4/ds4_main.cpp:2149): a normal request that fits a free place and is gone inside one
+# silence was never seen by the low read beside it - the card's DS4 run logged no priority line at all
+# (ref/rc2-ds4-engine.txt).  0.25 s: QFN's own read heartbeat's cadence (an RHB line every ~0.23 s), and a
+# wake costs only the cancel/stall looks the line-less waits already take.
+READ_TICK_S = 0.25
+
 
 # The longest a stopped request's own lines (T / PP / DONE) are waited for when it is drained after a cancel with
 # --parallel: a STOP an engine does not honour (or a rid it has already let go) would otherwise hold the FIFO place for
@@ -1449,6 +1473,53 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             print(f"[saguaro] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
 
 
+def engine_log_tail(log: str | None, offset: int = 0, n: int = 20) -> list:
+    """The last ~n non-empty lines the engine wrote to its log at or after `offset` (P125m phase 2): the crash page
+    shows these - the engine's own reason is in them (shards read, experts pinned ... and the line or traceback
+    that ended it).  [] when there is no log or nothing in it from this start; each line trimmed to 500 chars."""
+    if not log:
+        return []
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2)
+            start = max(offset, f.tell() - 65536)              # (enough for n lines, never an earlier start's whole log)
+            f.seek(start)
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    text = text[1:] if start > offset else text                # (not a line cut in half at the window's edge)
+    return [x.rstrip()[:500] for x in text.splitlines() if x.strip()][-n:]
+
+
+# Windows NTSTATUS codes of a process the system ended (a crash, not an exit the engine chose): the same table the
+# batch driver keeps (engines/qfn/serve/server.py), so both engines' crashes say the same thing on the page.
+_WIN_CRASH = {0xC0000135: "a DLL the program needs was not found", 0xC00000FD: "stack overflow",
+              0xC0000005: "bad memory access", 0xC000001D: "illegal instruction (the CPU lacks an instruction it used)",
+              0xC0000409: "fast-fail / stack buffer overrun", 0xC0000374: "the heap was corrupted"}
+
+
+def engine_exit_words(rc):
+    """What the engine process's exit status says, in words (P125m phase 2, the crash page): "killed by signal 9
+    (SIGKILL - the system's out-of-memory killer ends it this way)" on Linux/macOS, a named Windows crash code, or
+    "exit code N"; "" when there is no status (None: the process never reported one)."""
+    if rc is None:
+        return ""
+    if rc < 0 and os.name != "nt":
+        import signal
+        try:
+            sig = signal.Signals(-rc)
+            extra = " - the system's out-of-memory killer ends it this way" if sig.name == "SIGKILL" else ""
+            return f"killed by signal {-rc} ({sig.name}, {signal.strsignal(sig) or sig.name}{extra})"
+        except (ValueError, AttributeError):
+            return f"killed by signal {-rc}"
+    code = rc & 0xFFFFFFFF
+    if code in _WIN_CRASH:
+        return f"exit code 0x{code:08X}: {_WIN_CRASH[code]}"
+    if 0xC0000000 <= code < 0xD0000000:
+        return f"exit code 0x{code:08X} (a system error status)"
+    return f"exit code {rc}"
+
+
 class StrataEngine:
     """The resident engine: `saguaro-glm --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -1493,6 +1564,9 @@ class StrataEngine:
         self.vram = []                   # VRAM lines: what each part holds on its GPU (the Monitor's GPU map)
         self.prefill_tok_s_mean = None
         self.progress = None             # (read, total, reuse, ms) prompt progress while a prompt is read, from PP lines
+        self.progress_reuse = None       # (P125l) the PP line's OWN reuse field - where its read started - or None
+        #  when the engine's PP lines carry no such field (saguaro-ik2 prints one, a GLM line does not): Service.
+        #  _sliced reports a resumed read's continuation from it, and a 0 is a lost read, not an unknown one
         try:                             # a ready-made engine's BUILD.json says its version
             self.info["version"] = json.loads((Path(exe).parent / "BUILD.json").read_text()).get("version")
         except (OSError, ValueError):
@@ -1530,7 +1604,18 @@ class StrataEngine:
             # its output closed: it is gone, even before the OS says so (as _pump) - alive() is False at once, not
             # only after the process is reaped (a busy CI runner saw it alive right after a failed restart)
             self.ended = True
-            raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
+            # P125m phase 2: a crash mid-load gets the crash page - the process's exit code and the engine's own
+            # last lines from the log go on the exception, so main() can hand them to the standing page.
+            code = self.exit_code()
+            lines = engine_log_tail(log, log_start)
+            for closer in (self.proc.stdin, self.proc.stdout):        # (its pipes and our handle on its log go back)
+                with contextlib.suppress(OSError, ValueError):
+                    closer.close()
+            if self.log is not subprocess.DEVNULL:
+                with contextlib.suppress(OSError):
+                    self.log.close()
+            raise EngineStartFailed("the engine exited before it was ready" + (f" (see {log})" if log else ""),
+                                    exit_code=code, lines=lines)
         # (#1026) a start that came out short of its VRAM reserve (INFO reserve_short=<MiB>) - the engine measured
         # what it allocates after its experts' plan and keeps that free from its next start on: started once more
         # now, so the first start after an update or a new setting never serves with the reserve used up
@@ -1553,6 +1638,11 @@ class StrataEngine:
             for k, v in ik2_log_facts("".join(head), self.max_context).items():
                 self.info.setdefault(k, v)                # (an engine that says it itself, INFO: its own figure)
             self._ik2_log(head)
+            if not self.multi:   # P125l: SOLO saguaro-ik2 honours a STOP only between a prompt's chunk passes
+                self.keeps_stopped_read = True   #  (ik2_main.cu:10815-10841) and keeps the conversation at its last
+                #  snapshot then (the last turn's end, or the last message's start - :10870-10892), so a cut read
+                #  continues from where the engine kept it; --parallel slot_resets a stopped READER - "nothing of its
+                #  prompt is kept" (:10494-10499) - so the multi one is not given it and its reads run to their end.
         if self.info.get("engine_kind") == "hy4":
             self.keeps_stopped_read = True   # R122: a STOP between its prompt's chunks keeps the conversation live at the chunk reached (solo, hy4_main.cpp:1086, :1106-1110)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
@@ -1700,7 +1790,8 @@ class StrataEngine:
             # (glm, before a restored read: this many of the prompt's tokens are not read again. The reuse base rides
             # the PP lines for these engines ("no RESUME base needed", the solo reader), so the line is only taken -
             # routed to its own request when one is live: it says that read began - and never left for the shared
-            # queue, which in multi mode nothing reads)
+            # queue, which in multi mode nothing reads. The request's own loop reads the figure from it into
+            # engine.reused: the continued low read's line carries it (P124b, the StrataEngine driver's side))
             f = line.split()
             if len(f) >= 3 and f[1].isdigit():
                 with self._routes_lock:
@@ -1848,6 +1939,25 @@ class StrataEngine:
             self._tls.last = v
         else:
             self._last = v
+
+    @property
+    def reused(self):
+        """The RESUME line of the read in flight: the base that read continues from, the engine's own figure - the
+        figure Service._sliced's continue line of a resumed low read carries (P124b, where only the QFN driver set
+        it: a line-protocol engine that says RESUME - GLM, DS4 with its kept read - reaches it here too).  None
+        until the line arrives: an engine that reports no figure over the pipe keeps the numberless wording, and
+        generate()/_generate_multi reset it, so no stale figure crosses into the next call.  Multi: this thread's
+        request's own (its RESUME was routed to it)."""
+        if self.multi:
+            return getattr(self._tls, "reused", None)
+        return getattr(self, "_reused", None)
+
+    @reused.setter
+    def reused(self, v):
+        if self.multi:
+            self._tls.reused = v
+        else:
+            self._reused = v
 
     def _parse_done(self, line):
         f = line.split()
@@ -2027,15 +2137,34 @@ class StrataEngine:
         on = sampling.get("experimental_speed_projection")
         return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
+    def _read_tick(self, otherwise: float) -> float:
+        """The wait for the engine's next line in a request loop: `otherwise`, shortened to READ_TICK_S while
+        THIS thread's prompt read is unfinished (P124z).  That is what hands a quiet reader its ticks: the
+        read preemption of R122 (Service._sliced, `prio < PRIORITY_HIGH and t0 is None ...`) decides on the
+        None ticks this wait yields, and an engine that says nothing of its read for seconds (DS4_READER
+        waiting on the cards, a chunk of a long context) must not put that decision to sleep beside a
+        normal request that runs and finishes inside the silence.  The position it reads is exactly what
+        Service._read_position looks at (its own lines: _tls.pp on the multi path, _tls.own_pp on the solo
+        one and every driver's per-request read), so the two can never disagree on whether a read is open."""
+        tls = getattr(self, "_tls", None)
+        pp = (getattr(tls, "pp", None) if tls is not None else None) \
+            or ((getattr(tls, "own_pp", None) or (None,))[0] if tls is not None else None)
+        if isinstance(pp, (tuple, list)) and len(pp) >= 2 and 0 <= pp[0] < pp[1]:
+            return min(READ_TICK_S, otherwise)
+        return otherwise
+
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-        """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
-        the HTTP layer turns it into an SSE comment, which keeps clients' watchdogs calm and notices a client that
-        has gone.  A consumer that stops early (or `cancel`) makes the engine STOP, so it does not run to max_new."""
+        """Yields token ids, and None as a heartbeat while the engine is quiet (reading a long prompt: every
+        READ_TICK_S while that read is unfinished, 10 s otherwise - P124z): the HTTP layer turns it into an
+        SSE comment, which keeps clients' watchdogs calm and notices a client that has gone.  A consumer that
+        stops early (or `cancel`) makes the engine STOP, so it does not run to max_new."""
         if self.multi:
             yield from self._generate_multi(ids, max_new, sampling, cancel, embeddings)
             return
         self.progress = None
+        self.progress_reuse = None       # (P125l) this call's PP lines report their reuse field or they don't
         self.prefill_tok_s_mean = None
+        self.reused = None                            # (P124b: this call's own RESUME figure - none carried over)
         if getattr(self, "_tls", None) is not None:   # (this request's own prompt progress: Service._progress)
             self._tls.own_pp = None
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
@@ -2055,7 +2184,8 @@ class StrataEngine:
         try:
             while True:
                 try:
-                    line = self.lines.get(timeout=10)
+                    line = self.lines.get(timeout=self._read_tick(10.0))   # (P124z: a read that says nothing
+                    #  of itself still ticks, so a low one beside a running normal is seen - _read_tick)
                 except queue.Empty:
                     if lp_wait is not None:
                         t, lp_wait = lp_wait, None
@@ -2099,6 +2229,10 @@ class StrataEngine:
                         self.progress = (int(f[1]), int(f[2]),
                                          int(f[5]) if len(f) >= 6 and f[5].isdigit() else 0,
                                          float(f[3]) if len(f) >= 4 else 0.0)
+                        self.progress_reuse = int(f[5]) if len(f) >= 6 and f[5].isdigit() else None
+                        #  (P125l: kept apart from progress[2] - that one defaults to 0 for a line with no field,
+                        #  this one is None there: saguaro-ik2's PP carries it and a resumed read's continuation
+                        #  line is its figure, 0 included - a GLM line says nothing)
                         self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
                         if getattr(self, "_tls", None) is not None:
                             self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
@@ -2112,6 +2246,9 @@ class StrataEngine:
                     self._parse_stat(line)
                 elif line.startswith("NOTE "):                # what happens to the kept conversations
                     print("[saguaro] " + line[5:].strip(), flush=True)
+                elif line.startswith("RESUME "):              # (GLM/DS4, before the read: the base this read goes on
+                    f = line.split()                          #  from - its own figure, the continue line's; a figure
+                    self.reused = int(f[1]) if len(f) >= 2 and f[1].isdigit() else None   #  that cannot parse is none)
                 elif line.startswith("DONE"):
                     self._parse_done(line)
                     self._ik2_done(ik2_stats)
@@ -2259,7 +2396,9 @@ class StrataEngine:
         self._tls.rid = rid
         self._tls.pp = None                 # this request's last prompt-progress report (fair reads)
         self.progress = None
+        self.progress_reuse = None
         self.prefill_tok_s_mean = None
+        self.reused = None                  # (P124b: this request's own RESUME figure, reset per call)
         self._tls.own_pp = None
         keys = self.gen_keys(sampling or {}) + f" rid={rid}"
         head = f"GENI {int(max_new)}{keys} {embeddings}" if embeddings else f"GEN {int(max_new)}{keys}"
@@ -2277,7 +2416,8 @@ class StrataEngine:
             want_lp, lp_wait = logprobs_asked(sampling) is not None, None   # (as generate(): a token waits for its LP)
             while True:
                 try:
-                    line = q.get(timeout=poll_s)
+                    line = q.get(timeout=self._read_tick(poll_s))   # (P124z: same - a quiet reader's low
+                    #  read must still tick while a normal request runs beside it on a free place)
                 except queue.Empty:
                     if lp_wait is not None:
                         t, lp_wait = lp_wait, None
@@ -2345,6 +2485,9 @@ class StrataEngine:
                     if cancel.is_set():
                         return
                     yield None
+                elif line.startswith("RESUME "):        # (this request's RESUME, _route brought it here:
+                    self.reused = int(f[2]) if len(f) >= 3 and f[2].isdigit() else None   #  <rid> <reused> - its
+                    #  read's own figure, the continue line's (P124b); f[1] is the rid _route routed on)
                 elif line.startswith("DONE "):
                     self._parse_done("DONE " + line.split(None, 2)[2])
                     done = True
@@ -3152,6 +3295,7 @@ class RequestStat:
         # reader's rate, never wall time since the engine took it
         self.read_eng_n, self.read_eng_ms = 0, None     # live pair (the last progress step's)
         self.read_engine = None                         # the finished read's exact (new tokens, read_ms)
+        self.read_leg_ms = 0.0                          # P124v2: the read's closed legs' wall time (ms) so far
         # U5 read heartbeat (PLAN-u5-read-heartbeat): the engine's last RHB report of the read in flight - stage
         # (staging the reused prefix from RAM, or reading new tokens), done/new (new tokens done of total),
         # reused, the rate over the last heartbeat interval and when it arrived (consumers ignore a stale one)
@@ -3255,7 +3399,10 @@ class Service:
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
                        "prompt_ms": 0.0, "decode_ms": 0.0,
                        "peak_decode": None,   # the fastest answer's decode: {tok_s, tokens, time} (PEAK_MIN_TOKENS+)
-                       "peak_prefill": None}  # the fastest prompt read: {tok_s, tokens, time} (PEAK_MIN_READ_TOKENS+)
+                       "peak_prefill": None,  # the fastest prompt read: {tok_s, tokens, time} (PEAK_MIN_READ_TOKENS+)
+                       # P124v: the engine-total figures are kept SEPARATE and labelled as such (the summed rate
+                       #  of several chats at once is not one answer's or one read's speed - mangonel's peaks were)
+                       "peak_decode_engine": None, "peak_prefill_engine": None}
         # every prompt read as its own INTERVAL [stat, t_start, t_end, tokens, steps] (the drivers' read hooks fill
         # it): the window's count = in-progress reads' steps inside it + finished reads' tokens spread over their
         # overlap with it - a top-up lands ACROSS the read it belongs to, not in the window it happens to end in,
@@ -4328,18 +4475,26 @@ class Service:
             now = time.time()
             rate = sum(r.tok_s(now) for r in self.current_requests)
             n = sum((r.samples[-1] if r.samples else r.base or (0, 0))[1] for r in self.current_requests)
-            # a peak only from answers past their first PEAK_MIN_SPAN_S: a young window reads a burst as a rate
-            if all(r.first_token is not None and now - r.first_token >= PEAK_MIN_SPAN_S for r in self.current_requests):
-                self._note_peak(rate, n, now)
+            # a peak only from answers past their first PEAK_MIN_SPAN_S: a young window reads a burst as a rate.
+            # P124v: per answer and engine total are kept SEPARATE - the summed figure was mangonel's "94.7
+            # tok/s", 1.5x any single answer's real 64.3, two chats' rates added and labelled one answer's speed.
+            if all(r.first_token is not None and now - r.first_token >= PEAK_MIN_SPAN_S
+                   for r in self.current_requests):
+                for r in self.current_requests:           # each answer's own window rate: its own peak candidate
+                    self._note_peak(r.tok_s(now), (r.samples[-1] if r.samples else r.base or (0, 0))[1], now)
+                self._note_peak(rate, n, now, engine=True)
             return rate
 
-    def _note_peak(self, tok_s, tokens, when):
-        """The Monitor's peak decode (status_lock held): the highest decode rate it has shown - a running answer's live
-        rate or a finished answer's - rounded as shown (0.1 tok/s), once the answers hold PEAK_MIN_TOKENS tokens."""
+    def _note_peak(self, tok_s, tokens, when, engine=False):
+        """The Monitor's peak decode (status_lock held): the highest decode rate it has shown - a running answer's
+        live rate or a finished answer's - rounded as shown (0.1 tok/s), once the answers hold PEAK_MIN_TOKENS
+        tokens.  engine=True records the separate peak_decode_engine: the highest engine TOTAL over several chats
+        decoding at once; peak_decode itself is only ever one answer's own speed (P124v)."""
         tok_s = round(tok_s or 0.0, 1)
-        peak = self.totals.get("peak_decode")
+        key = "peak_decode_engine" if engine else "peak_decode"
+        peak = self.totals.get(key)
         if tok_s > 0 and tokens >= PEAK_MIN_TOKENS and (peak is None or tok_s > peak["tok_s"]):
-            self.totals["peak_decode"] = {"tok_s": tok_s, "tokens": tokens, "time": when}
+            self.totals[key] = {"tok_s": tok_s, "tokens": tokens, "time": when}
 
     def _tok_s_mean(self):
         """The whole-request mean since the first token (the old formula), kept so the two can be compared."""
@@ -4358,12 +4513,19 @@ class Service:
 
     def _prefill_tok_s(self):
         """Engine-total prompt READ rate now, summed over every chat reading its prompt (the drivers' read hooks
-        feed it, as the answer tokens feed _tok_s).  Every read is an interval: the window's count = the in-progress
-        reads' steps counted inside it + each FINISHED read's tokens spread over its overlap with the window - the
-        exact count over the time it really took, so three sparse-progress reads that end in the same second read as
-        one engine at their true ~810 tok/s, not 1536 (live 11-20: a top-up landing at a read's end doubled the peak).
-        0.0 while nothing reads a prompt; a reading above the peak becomes the peak, gated on the tokens counted
-        inside RATE_WINDOW_S like decode gates on answer length."""
+        feed it, as the answer tokens feed _tok_s).  P124v (PLAN-p124v-read-rate): once the engine reports its
+        own per-read figures (new_read / read_ms, the RHB beats' done over the read's own READ time), this is the
+        SUM over the reads running right now of each read's true rate - (tokens finished + the in-flight chunk's
+        passed share) over the time that read itself spent reading, no queue / staging / decode time and no
+        window mean smoothing the read's own beats away.  A read that stopped mid-way (a stall) falls with the
+        silence and drops out; a read that ended (BRA / its answer started) is no longer reading and contributes
+        nothing.  Smoothed only by the engine's own beat cadence - no client-side averaging that hides a stall.
+        0.0 while nothing reads.  Without the engine's fields (an older engine) the read stays an interval and
+        the old window figure counts it: the in-progress reads' steps inside RATE_WINDOW_S + each FINISHED read's
+        tokens spread over its overlap with the window - the exact count over the time it really took, so three
+        sparse-progress reads that end in the same second read as one engine at their true ~810 tok/s, not 1536
+        (live 11-20).  A reading above the peak becomes the peak, gated on the tokens counted inside the window
+        like decode gates on answer length."""
         with self.status_lock:
             if not self.status.get("busy"):
                 return 0.0
@@ -4374,6 +4536,25 @@ class Service:
             readers = [r for r in self.running if r.at_engine and r.first_token is None]
             if not readers:
                 return 0.0
+            if any(st.read_eng_ms and st.read_eng_ms > 0 for st in readers):
+                total, n_tot, span_max = 0.0, 0, 0.0    # (the per-read readouts, summed: the engine's own cadence
+                for st in readers:                      #  is the only smoothing)
+                    r = getattr(st, "read_cur", None)
+                    open_read = r is not None and r[2] is None
+                    rate = self._own_read_rate(st, now, self._read_counted(st))
+                    if rate <= 0:
+                        continue                        # (staged out, stalled, or history: nothing to sum)
+                    total += rate
+                    n = st.read_eng_n or 0
+                    span = (st.read_eng_ms or 0.0) / 1000.0
+                    if n > 0 and st.read_eng_ms:
+                        n_tot += n
+                        span_max = max(span_max, span)
+                        if open_read and n >= PEAK_MIN_READ_TOKENS and span >= PEAK_MIN_SPAN_S:
+                            self._note_peak_read(rate, n, now)      # this read's own readout, gated like before
+                if total > 0:
+                    self._note_peak_read(total, int(round(n_tot)), now, span=span_max, engine=True)
+                return total
             w0 = now - RATE_WINDOW_S
             n, t_lo = 0.0, None
             for r in self.reads:                        # finished reads: their tokens over their overlap with it
@@ -4412,7 +4593,8 @@ class Service:
             span = now - t_lo
             total = n / span if span >= RATE_MIN_SPAN_S else 0.0
             if span >= PEAK_MIN_SPAN_S:
-                self._note_peak_read(total, int(round(n)), now)
+                self._note_peak_read(total, int(round(n)), now, span=span, engine=True)   # (an engine total: the
+                #  window adds the reads up; one read's own peak comes from the engine's figures or its DONE row)
             return total
 
     def _read_open(self, stat, now):
@@ -4430,6 +4612,7 @@ class Service:
             return
         r[3] = max(0, stat.read_pos - r[5])             # (what THIS read counted, not the absolute position: a
         r[2] = max(r[1], (time.time() if at is None else at) - 0.0)   #  slice's next leg starts from the held prefix)
+        stat.read_leg_ms += 1000.0 * (r[2] - r[1])      # (P124v2: the read's own elapsed span sums its legs)
         self._read_prune(time.time())
 
     def _read_exact(self, stat, tokens):
@@ -4448,21 +4631,66 @@ class Service:
         while self.reads and self.reads[0][2] is not None and self.reads[0][2] < now - 2 * RATE_WINDOW_S:
             self.reads.popleft()
 
+    def _read_span_s(self, stat, now) -> float:
+        """P124v2: the read's own elapsed span on the server's clock - the closed legs' wall time plus
+        the open leg's - with the staging time (the engine's stage_ms: the reused prefix's RAM -> VRAM
+        copy, not read time) left out.  0.0 when the server never saw the read's start (no start hook:
+        the engine's own pair is the figure then); a closed read's span stands at its end."""
+        if getattr(stat, "engine_t0", None) is None:
+            return 0.0
+        r = getattr(stat, "read_cur", None)
+        wall = stat.read_leg_ms / 1000.0 + (max(0.0, now - stat.engine_t0)
+                                            if r is not None and r[2] is None else 0.0)
+        stage = ((getattr(stat, "read_hb", None) or {}).get("stage_ms") or 0.0) / 1000.0
+        return max(0.0, wall - min(wall, stage))
+
     def _own_read_rate(self, st, now, n_own) -> float:
-        """One chat's live read rate (PLAN-qfn-per-request-read-stats): once the engine's progress lines carry
-        its own figures, its new_read over its own read_ms - the reader's wall time no longer mixes in what the
-        chat spent queued or held at a piece boundary.  Without those fields (an older engine): its counted
-        tokens over the time since the engine took it, as before."""
+        """One chat's live read rate (PLAN-qfn-per-request-read-stats + PLAN-p124v-read-rate +
+        PLAN-p124v2-read-rate-true): its counted tokens (the beat's done plus the chunk in flight's
+        passed share, booked by _note_hb) over the read's OWN elapsed span - now minus the read's own
+        start, legs summed, staging left out, the engine's own read_ms pair as the floor.  Not the
+        beat's ms= alone: that is the read's RUN clock over its settled legs, and a read held between
+        pieces pairs whole-chunk tokens with a clock that stopped (the recorded mangonel: at 7.11 s the
+        engine's own new/read_ms said 704.2 tok/s while the Monitor showed 2,099.4).  A read the
+        engine beats for that stops beating (a stall, a wedge): the readout FALLS with the silence
+        instead of freezing at the last beat, and drains to nothing past the window.  Without the
+        engine's fields (an older engine): its counted tokens over the time since the engine took it,
+        as before - drained to 0 once nothing has landed for a full window."""
         if st.read_eng_ms and st.read_eng_ms > 0 and st.read_eng_n:
-            return st.read_eng_n / (st.read_eng_ms / 1000.0)
-        return n_own / (now - st.engine_t0) if n_own and st.engine_t0 and now > st.engine_t0 else 0.0
+            r = getattr(st, "read_cur", None)
+            if r is not None and r[2] is None and st.first_token is None:
+                if getattr(st, "read_hb", None) is not None:
+                    # an engine that beats every ~0.23 s: a beat older than the cadence plus one Monitor poll is
+                    # silence - the readout falls with it (a stalled read shows a falling rate, never a frozen
+                    # one).  An engine whose progress steps are sparse (a BRP per chunk, none between) is not
+                    # beating: its silence is the cadence, and the span below is the read's own elapsed.
+                    if now - (st.read_t1 or now) > RATE_WINDOW_S + READ_BEAT_STALE_S:
+                        return 0.0
+                return st.read_eng_n / max(st.read_eng_ms / 1000.0, self._read_span_s(st, now))
+            # the read is over (BRA / a leg's close) but its answer has not started: its true rate ages
+            # with the wall time since it ended, and drops out once it is only history.  A leg still open
+            # with first_token set (one landed before _prefill_tok_s closed it): age from the last step.
+            ended = r[2] if r is not None and r[2] is not None else st.read_t1 or now
+            gap = now - ended
+            if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
+                return 0.0
+            span = max(st.read_eng_ms / 1000.0, self._read_span_s(st, ended))
+            span += max(0.0, gap - READ_BEAT_STALE_S)
+            return st.read_eng_n / span
+        if n_own and st.engine_t0 and now > st.engine_t0:
+            r = getattr(st, "read_cur", None)
+            if r is not None and r[2] is None and st.read_t1 and now - st.read_t1 > RATE_WINDOW_S:
+                return 0.0                           # (the window drained empty: nothing read lately)
+            return n_own / (now - st.engine_t0)
+        return 0.0
 
     def _read_counted(self, stat) -> int:
         """The prompt tokens this request's reads have counted (closed intervals plus an open one's steps) - what
-        the Monitor's figures and the tests read back."""
+        the Monitor's figures and the tests read back.  int(): the -> int annotation stands even if a booking
+        ever hands a fractional step (the RHB share at _note_hb is already booked whole)."""
         n = sum(r[3] or 0 for r in self.reads if r[0] is stat and r[2] is not None)
         r = getattr(stat, "read_cur", None)
-        return n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0)
+        return int(n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0))
 
     def _read_start(self, stat):
         """(a driver's hook) the engine took this request - a QFN admission after its wait for a slot says so too:
@@ -4493,16 +4721,47 @@ class Service:
                       flush=True)
 
     def _note_hb(self, stat, hb):
-        """(a driver's hook, PLAN-u5-read-heartbeat) the engine's own about-once-a-second report of a read in
-        flight: its stage (KV staging from RAM, or new tokens being read), done / new (new tokens done of the
-        total), reused, and its rate over the last heartbeat interval.  It refreshes the chat's live figures
-        every second - a one-chunk read, a long first chunk or a read mostly busy staging its K/V from RAM no
-        longer shows nothing until it ends - and feeds the counted tokens in as a normal read step, so the
-        engine-total window moves per second too.  No step of its own while it stages (done 0: nothing to count)."""
+        """(a driver's hook, PLAN-u5-read-heartbeat + PLAN-p124v-read-rate) the engine's own ~four-times-a-second
+        report of a read in flight: its stage (staging the reused prefix from RAM, or new tokens being read),
+        done / new (new tokens done of the total), reused, and the read's own clocks - ms over its whole read
+        time and rt = ms - stage_ms over the part of it actually spent READING.  It refreshes the chat's live
+        figures every beat and books the counted tokens in as a normal read step, pairing them with the READ's
+        own time (rt): the request's live rate is then done / rt - the tokens really read over the time the read
+        really ran, with no staging / restore / queue / decode time mixed in (that mixing is what showed
+        single-digit tok/s during a read that runs at 100-800).  The beat's own interval rate is NOT a peak
+        candidate: only the readout itself feeds the peaks.  Nothing counts while it stages (the share is of a
+        chunk being READ); while a chunk is being read its passed share counts (P124v2, below)."""
         stat.read_hb = dict(hb, at=time.time())
         n = hb.get("done") or 0
+        # P124v2 (PLAN-p124v2-read-rate-true): done= counts WHOLE units (chunks - or pieces, when the
+        # read pipelines) and never the unit in flight; the line's pass=<i>/<n> counts that unit's layer
+        # passes, and its pos0=/chunk= say the unit being read: pos0 - reused is where done stands when
+        # only whole units are done.  The readout then adds the in-flight unit's share,
+        # done + chunk x pass_i/pass_n - so the read's first chunk shows its true rate, never 0.0
+        # (the recorded mangonel sat at 0.0 for the first 1.8 s, and saw-toothed 1,178 -> 801 -> 1,214
+        # around a true 1,568 with whole chunks landing only at their ends).  When done stands further
+        # along than the reporting card's unit start - a split read's cross-card figure already holds the
+        # share - nothing is added.  A beat whose tokens are only the share counts too.
+        chunk, pr, pos0 = hb.get("chunk") or 0, hb.get("pass"), hb.get("pos0")
+        new = hb.get("new") or 0
+        if chunk > 0 and pr and pr[1] > 0 and hb.get("stage") != "stage" and new > n and pos0 is not None \
+                and pos0 - (hb.get("reused") or 0) == n:
+            n = int(n + min(chunk, new - n) * min(1.0, max(0.0, pr[0] / pr[1])))
         if n > 0:
-            self._note_read(stat, n, hb.get("rate"), False, False, hb.get("ms"))
+            if n < stat.read_pos:
+                # P124v2 (review round 2): the booking is belted like the engine belts done= - a beat never
+                # books a step BACKWARDS.  On a split read the guard above holds for every card working the
+                # unit in flight while their pass= fractions differ: the lead card books done + chunk x share,
+                # the lagging card's next beat (or either card's once done moves off the boundary and the
+                # guard fails and only the shared done= books) would book below that - and a booked decrease
+                # is _note_read's engine-counter-went-backwards signal: close the interval, double the closed
+                # leg in _read_counted, re-baseline engine_t0 mid-read - the span collapse this plan is about.
+                # Real restarts stand: _rhb belts done per new/rid and starts that belt over on a new read, a
+                # retry's or slice's first PP / BRP steps book below read_pos through the unbelted _note_read
+                # path (its restart branch resets read_pos, releasing this belt), BRA's exact figures correct.
+                n = stat.read_pos
+            rt = hb.get("rt")
+            self._note_read(stat, n, None, False, False, rt if rt and rt > 0 else hb.get("ms"))
 
     def _note_read(self, stat, n_read, tok_s=None, exact=False, prov=False, read_ms=None):
         """A read step of one request: the drivers' PP lines and the batch slots' read counters call this (through
@@ -4550,11 +4809,14 @@ class Service:
                 if sum(1 for x in self.running if x.at_engine and x.first_token is None) > 1:
                     stat.read_shared = True             # (two admissions read at once: label the request's own rate)
                 if tok_s is not None:
-                    stat.read_avg = tok_s
-                    self._note_peak_read(tok_s, n_read, now)
+                    stat.read_avg = tok_s             # (the engine's own mean over the read, shown in the row)
                 if stat.read_t0 is None:
                     stat.read_t0 = now
                 stat.read_t1 = now
+                if tok_s is not None and stat.read_engine:
+                    # P124v: the read closes on the engine's OWN figures (BRA / RDONE: new tokens over read time,
+                    # staging left out) - a peak is recorded from them alone, and only over a long-enough window
+                    self._note_peak_read(tok_s, n_read, now, span=stat.read_engine[1] / 1000.0)
                 d = n_read - stat.read_pos
                 if d:
                     stat.read_pos = n_read
@@ -4567,6 +4829,12 @@ class Service:
                 self._read_close(stat, now)
                 stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
                 stat.read_eng_n, stat.read_eng_ms = 0, None   # (the engine's live pair restarts with the read)
+                stat.read_leg_ms = 0.0                  # (P124v2: and so does its own elapsed span)
+                if stat.engine_t0 is not None:
+                    # (P124v2 review nit 3: the open leg's start re-baselines too - _read_span_s adds
+                    #  now - engine_t0 to the span, and the counter going backwards mid-admission would
+                    #  otherwise carry the PREVIOUS read's whole time into the new read's span)
+                    stat.engine_t0 = now
                 self._read_open(stat, now)              # (counts from nothing again; the engine's counter reset)
             d = n_read - stat.read_pos
             stat.read_pos = n_read
@@ -4578,21 +4846,36 @@ class Service:
             stat.read_prev_t, stat.read_prev_n = now, n_read
             if tok_s is not None:                       # the engine's own mean over THIS request's read (its PP line)
                 stat.read_avg = tok_s
-                self._note_peak_read(tok_s, n_read, now)
+                # P124v: only the true readout may make a peak: the engine's own pair (new_read over its own read
+                # time) recorded above, over a window of at least PEAK_MIN_SPAN_S; a chunk's wall mean (no read_ms
+                # on this line) shows in the row but never becomes the headline
+                if stat.read_eng_ms and stat.read_eng_ms > 0 and n_read == stat.read_eng_n:
+                    self._note_peak_read(tok_s, n_read, now, span=stat.read_eng_ms / 1000.0)
             if d <= 0:
                 return
             if sum(1 for x in self.running if x.at_engine and x.first_token is None) > 1:
                 stat.read_shared = True                 # two chats read at once: neither's engine clock is just its own
             stat.read_cur[4].append((now, n_read))
 
-    def _note_peak_read(self, tok_s, tokens, when):
-        """The Monitor's peak Prefill (status_lock held): the highest read rate it has shown - a live window or a
-        finished read's - rounded as shown, once a read holds PEAK_MIN_READ_TOKENS tokens (a small read's rate says
-        little).  Kept like peak_decode."""
+    def _note_peak_read(self, tok_s, tokens, when, span=None, engine=False):
+        """The Monitor's peak Prefill (status_lock held): the highest READOUT it has shown - the same true
+        per-read figure the live numbers use (P124v: the read's own tokens over its own READ time, never a
+        reused / restored / staged count and never a chunk's wall mean) - rounded as shown, over at least
+        PEAK_MIN_SPAN_S seconds (when `span` is not given: tokens / tok_s, the span the figure was taken over)
+        and PEAK_MIN_READ_TOKENS tokens (a small read's rate says little).  engine=True records the separate
+        peak_prefill_engine - the highest engine TOTAL over several reads at once; peak_prefill itself is only
+        ever ONE read's own speed (mangonel: the summed window of 859,304 tokens over a 5 s window read as
+        171,860 tok/s, ~80x the box's real ~2,100, because it added the reads up AND counted what they restored)."""
         tok_s = round(tok_s or 0.0, 1)
-        peak = self.totals.get("peak_prefill")
-        if tok_s > 0 and tokens >= PEAK_MIN_READ_TOKENS and (peak is None or tok_s > peak["tok_s"]):
-            self.totals["peak_prefill"] = {"tok_s": tok_s, "tokens": tokens, "time": when}
+        if tok_s <= 0 or tokens < PEAK_MIN_READ_TOKENS:
+            return
+        span = tokens / tok_s if span is None else span
+        if span < PEAK_MIN_SPAN_S:
+            return                                   # (a peak over a window this short is a burst, not a speed)
+        key = "peak_prefill_engine" if engine else "peak_prefill"
+        peak = self.totals.get(key)
+        if peak is None or tok_s > peak["tok_s"]:
+            self.totals[key] = {"tok_s": tok_s, "tokens": tokens, "time": when}
 
     def _wall_tick(self):
         """The totals' wall clocks (status_lock held): the seconds during which at least one prompt was being read,
@@ -4997,11 +5280,21 @@ class Service:
             ("llamacpp:requests_deferred", "gauge", "Requests waiting their turn", s.get("queued") or 0),
             ("maya:requests_total", "counter", "Requests finished", t["requests"]),
             ("maya:decode_peak_tokens_seconds", "gauge",
-             f"The fastest answer's generation throughput in tokens/s ({PEAK_MIN_TOKENS} tokens or more)",
+             f"The fastest single answer's generation throughput in tokens/s ({PEAK_MIN_TOKENS} tokens or more, "
+             f"{PEAK_MIN_SPAN_S:.0f} s or more)",
              (t.get("peak_decode") or {}).get("tok_s") or 0),
+            ("maya:decode_engine_peak_tokens_seconds", "gauge",
+             "The highest engine-total generation throughput in tokens/s, summed over several answers at once "
+             "(not one answer's speed)",
+             (t.get("peak_decode_engine") or {}).get("tok_s") or 0),
             ("maya:prefill_peak_tokens_seconds", "gauge",
-             f"The fastest prompt read throughput in tokens/s ({PEAK_MIN_READ_TOKENS} tokens read or more)",
+             f"The fastest single prompt read throughput in tokens/s ({PEAK_MIN_READ_TOKENS} tokens actually "
+             f"read or more, {PEAK_MIN_SPAN_S:.0f} s or more; reused / restored tokens never count)",
              (t.get("peak_prefill") or {}).get("tok_s") or 0),
+            ("maya:prefill_engine_peak_tokens_seconds", "gauge",
+             "The highest engine-total prompt read throughput in tokens/s, summed over several reads at once "
+             "(not one read's speed)",
+             (t.get("peak_prefill_engine") or {}).get("tok_s") or 0),
             ("maya:engine_alive", "gauge", "1 while the engine process runs",
              int(self.engine.alive()) if hasattr(self.engine, "alive") else 1),
             ("maya:loop_guard_detected_total", "counter", "Loops the loop guard saw in answers", guard["detected"]),
@@ -5706,13 +5999,25 @@ class Service:
                 for t in gen:
                     if resume_note is not None:         # P124b: the resumed read logs the engine's OWN reused
                         kept = getattr(self.engine, "reused", None)   #  figure (QFN's RESUME line, the same one its
-                        if isinstance(kept, int) and not isinstance(kept, bool) and 0 <= kept <= resume_note:
+                        if isinstance(kept, bool):                    #  DONE carries). P125l: saguaro-ik2 says no
+                            kept = None                               #  RESUME, but its PP line carries a reuse
+                        if kept is None:                              #  field (progress_reuse) - and its 0 means
+                            kept = getattr(self.engine, "progress_reuse", None)   #  the read was LOST, said as one
+                        if isinstance(kept, int) and 0 <= kept <= resume_note:
                             print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} prompt read continued: "
-                                  f"{kept:,} of {resume_note:,} tokens reused", flush=True)   #  DONE carries), or
-                        else:                           #  the old numberless wording for an engine that reports no
-                            print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} prompt read continues "  #  figure
-                                  f"from where the engine kept it", flush=True)   #  over the pipe: never a reuse
-                        resume_note = None                                    #  that did not happen
+                                  f"{kept:,} of {resume_note:,} tokens reused", flush=True)
+                            resume_note = None
+                        elif t is not None or getattr(self.engine, "progress", None) is not None:
+                            #  the old numberless wording for an engine that reports no figure over the pipe
+                            #  (GLM's PAUSE keeps by protocol, its line says no number). P125l: it waits for the
+                            #  read to report SOMETHING (its first PP line, or a token): the quiet-10 s heartbeat
+                            #  that can precede that first line says nothing about whether the engine kept the
+                            #  read - the card run logged "continues from where the engine kept it" while its
+                            #  first PP reported reuse 0 - and "continues" is only ever claimed once the read
+                            #  has actually started reporting
+                            print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} prompt read continues "
+                                  f"from where the engine kept it", flush=True)
+                            resume_note = None
                     if guard is None:
                         yield t
                     elif t is None:
@@ -6562,7 +6867,10 @@ class Service:
                         self._note_peak(row["decode_tok_s"], n, started)   # (a solo engine's own decode clock)
                     elif n and ft is not None and time.time() - ft >= PEAK_MIN_SPAN_S:   # (QFN batch: its decode_ms
                         self._note_peak(n / (time.time() - ft), n, started)            # is partial - the server's clock)
-                    self._note_peak_read(pf_s, read_n, started)   # (the same for the read, from PEAK_MIN_READ_TOKENS on)
+                    self._note_peak_read(pf_s, read_n, started,   # (the same for the read, from PEAK_MIN_READ_TOKENS
+                                         span=eng_read[1] / 1000.0 if eng_read and eng_read[1] else None)   #  on,
+                                    #  over the engine's own read time when it reported one: P124v - the peak is
+                                    #  never shorter a window than PEAK_MIN_SPAN_S nor more tokens than were READ)
                     t["requests"] += 1
                     t["prompt_tokens"] += len(ids)
                     t["reused"] += last.get("reused") or 0
@@ -8818,23 +9126,160 @@ def index_html() -> bytes:
     return body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
 
 
+# ------------------------------------------------- the engine's own load lines, as the load's progress (P125m phase 2)
+# What the loading screen and the switch bar show is NOT a timer: it is what the engine is writing to its log right
+# now, mapped through a small table of that engine's load milestones - shards read, experts pinned, cards ready ...
+# The lines come from each engine's own sources (src/, engines/qfn/src/) and from what this server already reads of
+# them (narrate_start, ik2_log_facts, _context_cost); the tables are tested against recorded lines in
+# serve/testdata/.  A line the table does not know keeps the last value: the bar never jumps on noise.  The
+# percentages say where a milestone sits in a usual load of that engine - the last stretch is quick and lands late,
+# and the engines that write little while they load (hy4, mm3) simply hold longer between their lines.
+def _between(lo: float, hi: float):
+    """A milestone's percentage from a counter line "N / M": `lo` at none, `hi` at all of them."""
+    def f(m):
+        n, d = int(m.group(1)), int(m.group(2))
+        return lo + (hi - lo) * (min(1.0, n / d) if d > 0 else 0.0)
+    return f
+
+
+# Each table: (pattern, percentage, the step's words), scanned in order, first match wins; a line none of them
+# knows keeps the last (pct, step).  The families are maya_quants.family_of's, plus "qfn" (the batch engine); an
+# engine with no table (the mock) simply never moves the bar.
+LOAD_MILESTONES = {
+    "glm": [
+        (re.compile(r"PLE on\b"), 12, "setting up the expert fast path"),
+        (re.compile(r"expert arena:"), 18, "making room for the experts in RAM"),
+        (re.compile(r" loaded .*GiB at"), 55, "experts read into RAM"),
+        (re.compile(r"(?:CUDA|HIP)\d+ VRAM before the expert pool"), 70, "cards ready: the context first"),
+        (re.compile(r"expert cache \d+ slots, "), 82, "filling the GPU's expert cache"),
+        (re.compile(r"session is up"), 95, "almost ready"),
+    ],
+    "deepseek": [
+        (re.compile(r"saguaro ds4: loading \d+ experts"), 5, "reading the pack's expert list"),
+        (re.compile(r"saguaro ds4: copying experts (\d+) / (\d+)"), _between(65, 82),
+         "pinning the experts for the CPU lane"),
+        (re.compile(r"saguaro ds4: experts (\d+) / (\d+)"), _between(8, 65), "copying the experts into RAM"),
+        (re.compile(r"saguaro ds4: CUDA\d+ layers \["), 88, "cards ready: layers placed"),
+    ],
+    "qfn": [
+        (re.compile(r"^\[strata\].*engine started"), 2, "the engine starts"),
+        (re.compile(r"reading the model's geometry from"), 6, "reading the pack"),
+        (re.compile(r"native pack: \d+ experts"), 10, "shards read: the pack's index"),
+        (re.compile(r"PLE table .* in "), 14, "reading the PLE table"),
+        (re.compile(r"experts via mmap"), 18, "mapping the experts from the model files"),
+        (re.compile(r"expert arena:"), 18, "making room for the experts in RAM"),
+        (re.compile(r"(?:CUDA|HIP)\d+ context ready, .* before expert arena registration"), 24, "cards ready"),
+        (re.compile(r"expert arena read "), 68, "experts read into RAM"),
+        (re.compile(r"expert arena checksum"), 74, "experts pinned in RAM"),
+        (re.compile(r"expert cache:?\s+\d+ slots, "), 84, "filling the GPU's expert cache"),
+        (re.compile(r"session is up"), 95, "almost ready"),
+    ],
+    "ik2": [
+        (re.compile(r"saguaro ik2: \d+ layers.*?\d+ shards"), 8, "shards read"),
+        (re.compile(r"kv cache: "), 30, "allocating the K/V cache"),
+        (re.compile(r"experts in pinned "), 60, "experts pinned in RAM"),
+        (re.compile(r"expert cache, GPU \d+: \d+ slots"), 85, "cards ready"),
+    ],
+    "hy4": [
+        (re.compile(r"CPU lane: \d+ experts re-coded at 4 bits"), 55, "recoding the CPU lane's experts"),
+        (re.compile(r"measuring this PC once"), 70, "measuring this PC once"),
+        (re.compile(r"drafting trial: "), 80, "trying the drafters"),
+    ],
+    "minimax": [
+        (re.compile(r"reading the model's files for NaN/Inf"), 45, "checking the model's files"),
+        (re.compile(r"CPU lane"), 68, "measuring the CPU lane"),
+    ],
+}
+
+
+def load_progress(family: str, line: str, pct=None, step: str = "") -> tuple:
+    """One engine log line against the engine's milestone table: the (pct, step) after it.  A line the table does
+    not know keeps the last value - and both stay None/"" until a table line has been seen."""
+    for rx, p, s in LOAD_MILESTONES.get(family) or []:
+        m = rx.search(line)
+        if m:
+            v = p(m) if callable(p) else p
+            return (None if v is None else int(v)), (s(m) if callable(s) else s)
+    return pct, step
+
+
 class LoadState:
     """What the "starting" service answers with while the engine is not there yet (issue #20 phase 1): the model's
     name, and that the load runs.  main() hands the real Service over on the same socket (take_over); a load that
-    fails says so here instead (fail), and the port keeps answering with it."""
+    fails says so here instead (fail), and the port keeps answering with it.  Phase 2 (P125m): /health carries the
+    load's real progress - the engine's own load lines, read as they land in its log, through the family's
+    milestone table (LOAD_MILESTONES): {"pct": 0..100 | null, "step": the current step's words}."""
 
     def __init__(self, model: str, log_path=None, api_key: str = "", supervisor: str | None = None, port=8095,
-                 config_path=None):
+                 config_path=None, switching: bool = False, family: str = ""):
         self.model, self.log_path = model, log_path
         self.api_key, self.supervisor, self.port = api_key, supervisor, port
         self.config_path = str(config_path) if config_path else None
+        self.switching = bool(switching)          # this start is the other half of a model switch (P125m): the page
+                                                  #  that shows the app keeps it and waits, and /v1/models keeps listing
+        self.family = family or ""                # the engine's family: which milestone table its log lines read by
         self.t0 = time.time()
         self.status, self.error = "loading", None
         self.failed_seen = threading.Event()      # a /health that told the supervisor about the failure
+        # the crash of a load (P125m phase 2): the engine process's exit code and its last lines, set by fail()
+        # when the load died (an EngineStartFailed / qfn's EngineDied carries them); None/[] otherwise.
+        self.exit_code, self.crash_lines = None, []
+        # the progress (P125m): the engine's log read as it lands, through the family's milestone table.  The first
+        # look starts where this start began (the log file still holds the earlier starts' lines); a line that
+        # died mid-load keeps the last value, so the bar waits rather than jumping back.
+        self.pct, self.step = None, ""
+        self._pos = None                          # bytes of the log read so far (None: take the size on first look)
+        self.log_start = 0                        # where this start's lines begin (the crash page's log tail)
+        self._log_lock = threading.Lock()
+        if log_path:
+            with contextlib.suppress(OSError):
+                self._pos = self.log_start = Path(log_path).stat().st_size
 
     def fail(self, error) -> None:
-        """The load failed (issue #20): the standing page shows this, /health says {"status": "failed"} with it."""
+        """The load failed (issue #20): the standing page shows this, /health says {"status": "failed"} with it.
+        A load that died with the engine (P125m phase 2) carries its exit code and last lines on the exception
+        (EngineStartFailed from the line engine, the batch driver's EngineDied) - those make it a crash the page
+        draws with the code, the engine's ~20 lines and the two ways out; a config error (no engine died) stays the
+        plain error page."""
         self.status, self.error = "failed", str(error) or type(error).__name__
+        code = getattr(error, "exit_code", None)
+        self.exit_code = code if isinstance(code, int) else None
+        lines = [str(x) for x in (getattr(error, "lines", None) or []) if str(x).strip()]
+        if self.exit_code is not None and not lines:
+            lines = engine_log_tail(self.log_path, self.log_start)   # (died but attached no lines: its log has them)
+        self.crash_lines = lines[-20:]
+
+    @property
+    def crashed(self) -> bool:
+        """The load failed with the engine process having died (not a config error): the crash page shows."""
+        return self.status == "failed" and (self.exit_code is not None or bool(self.crash_lines))
+
+    def restartable(self) -> bool:
+        """Whether this standing page can end the start with RESTART_EXIT so saguaro.py starts a config again: not
+        under a supervisor (it owns the starts) and only where saguaro.sh / START-SAGUARO.bat started this server."""
+        return not self.supervisor and bool(os.environ.get("SAGUARO_RESTART_ON_UPDATE"))
+
+    def _advance_progress(self) -> None:
+        """Read what the engine wrote to its log since the last look and run every new line through the family's
+        milestone table (load_progress): /health's pct and step follow the engine's own load, not a timer."""
+        if not self.log_path:
+            return
+        with self._log_lock:
+            try:
+                with open(self.log_path, "rb") as f:
+                    if self._pos is None:
+                        f.seek(0, 2)
+                        self._pos = f.tell()
+                        return
+                    f.seek(self._pos)
+                    chunk = f.read(262144)                     # (a 256 KiB step of the log, per look at most)
+                    cut = chunk.rfind(b"\n") + 1               # only complete lines: the half one is read again
+                    if cut:
+                        self._pos += cut
+                for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+                    self.pct, self.step = load_progress(self.family, line, self.pct, self.step)
+            except OSError:
+                pass                                           # (no log yet, or it moved: wait for the next look)
 
     def last_log_line(self) -> str:
         """The engine log's last line, trimmed - what the loading screen shows while it waits ("" before the
@@ -8859,15 +9304,36 @@ class LoadState:
         # model name, how long the load has run, and what the engine was last saying.  A failed load adds the error
         # and, when a different config loaded before, what the page's button would start (never under a supervisor,
         # which owns starts and switches itself).
+        self._advance_progress()     # (P125m: the progress the answer carries is the engine's own lines, read now)
         out = {"status": self.status, "model": self.model, "elapsed_s": int(time.time() - self.t0),
-               "line": self.last_log_line(), "supervisor": self.supervisor}
+               "line": self.last_log_line(), "supervisor": self.supervisor,
+               "pct": self.pct, "step": self.step}
+        if self.status == "loading" and self.switching:
+            out["switch"] = True      # (P125m: a page that shows the app keeps it on screen and says "loading <model>")
         if self.status == "failed":
             out["error"] = self.error
             if not self.supervisor:
                 lg = read_last_good()
                 if lg and lg["path"] != self.config_path:
                     out["last_good"] = lg
+            if self.crashed:
+                # (P125m phase 2: the crash page - the engine's exit code, its last ~20 lines, and the way out)
+                out["crashed"] = True
+                out["exit_code"] = self.exit_code
+                out["exit"] = engine_exit_words(self.exit_code)
+                out["lines"] = self.crash_lines
+                if self.config_path and self.restartable():
+                    # (the "load again" button: shown only where this page can actually end the start and retry,
+                    #  i.e. not under a supervisor and only when saguaro.sh / START-SAGUARO.bat started this server)
+                    out["again"] = Path(self.config_path).name
         return out
+
+    def models_listing(self) -> dict:
+        """The /v1/models answer while a SWITCH loads (P125m): the model asked for, listed with status "loading" -
+        the listing a client polls keeps answering across the switch instead of dropping to a bare 503; the chat
+        routes still answer 503 + Retry-After until it is ready."""
+        return {"object": "list", "data": [{"id": self.model, "object": "model", "owned_by": "saguaro",
+                                            "created": int(self.t0), "status": {"value": "loading"}}]}
 
 
 def last_good_note_path() -> Path:
@@ -8931,6 +9397,29 @@ def start_last_good(state: LoadState) -> dict:
     print(f"[saguaro] starting again with {lg['config']} (the last config that worked) ...", flush=True)
     threading.Thread(target=_restart_after_answer, daemon=True).start()
     return lg
+
+
+def start_again(state: LoadState) -> dict:
+    """The crash page's "load again" button (P125m phase 2): start this very config again - the one whose engine
+    died mid-load.  It is the same RESTART_EXIT note the last-good button leaves, only for the current config, so it
+    works when saguaro.py started this server and no supervisor owns the starts; after the operator fixed what the
+    engine's last lines say (or to ride out a one-off crash) the page just tries it once more."""
+    if state.supervisor:
+        raise ValueError(f"this server runs under {state.supervisor}, which starts, stops and switches the "
+                         "models: change models there (pick another model id), not here")
+    if not state.config_path:
+        raise ValueError("this server runs without a config of its own: it cannot start one again by itself")
+    p = Path(state.config_path)
+    if not p.is_file():
+        raise ValueError(f"{p.name} is gone, so it cannot be started again")
+    if not os.environ.get("SAGUARO_RESTART_ON_UPDATE"):
+        raise ValueError("this server was not started by saguaro.sh or START-SAGUARO.bat, so it cannot start "
+                         f"again by itself: start it again: python saguaro.py --config {p}")
+    (ROOT / models.SWITCH_FILE).write_text(json.dumps({"config": str(p), "port": state.port,
+                                                       "why": "load again", "time": time.time()}), encoding="utf-8")
+    print(f"[saguaro] starting again with {p.name} (load again after the crash) ...", flush=True)
+    threading.Thread(target=_restart_after_answer, daemon=True).start()
+    return {"config": p.name, "path": str(p)}
 
 
 def make_loading_handler(state: LoadState):
@@ -9026,6 +9515,11 @@ def make_loading_handler(state: LoadState):
                     state.failed_seen.set()      # (the supervisor has now heard it from us: main() may end)
                 self._json(503, state.health())
                 return
+            if state.switching and path in ("/v1/models", "/models"):
+                # (P125m: a switch keeps the model listing answering: the model asked for, status "loading")
+                if self._authorized():
+                    self._json(200, state.models_listing())
+                return
             if self._authorized():
                 self._loading()
 
@@ -9039,6 +9533,28 @@ def make_loading_handler(state: LoadState):
                         self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
                         return
                     self._json(200, {"starting": lg["config"]})
+                return
+            if path == "/api/load-again":                   # (the crash page's "load again": start this config over)
+                if self._authorized() and not self._foreign_page():
+                    if state.status != "failed":
+                        self._json(409, {"error": {"type": "invalid_request_error",
+                                                   "message": "nothing failed to load again"}})
+                        return
+                    try:
+                        out = start_again(state)
+                    except ValueError as e:
+                        self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                        return
+                    self._json(200, {"starting": out["config"]})
+                return
+            if state.switching and path in ("/v1/chat/completions", "/v1/responses", "/v1/messages"):
+                # (P125m: the chat API keeps answering through a switch, and names the model it is waiting for -
+                #  the same words the running server uses when a request names another installed model)
+                if self._authorized():
+                    self._json(503, {"error": {"type": "model_not_loaded",
+                                               "message": f"loading model {state.model}: Saguaro switched to it and "
+                                                          "answers once the load is done (GET /v1/models shows when)"},
+                                     "loading": state.model}, retry_after=5)
                 return
             if self._authorized():
                 self._loading()
@@ -9709,8 +10225,13 @@ def _qfn_engine_class():
                                     # slot's own line - new_read= its tokens from where the read started (never its
                                     # reused / parked prefix), read_ms= the time that read has actually run.  No
                                     # first-position delta, no shared reader's rate: the legs add up in base.
+                                    # P124v: read_ms minus its stage_ms (the K/V staging, an engine before the
+                                    # field says 0) is the read's own READ time the rate divides by.
                                     new = int(float(kv["new_read"]))
                                     rms = float(kv.get("read_ms") or 0) or None
+                                    sm = float(kv.get("stage_ms") or 0)
+                                    if rms is not None and sm > 0:
+                                        rms = max(0.0, rms - sm) or None
                                     own = new / (rms / 1000.0) if new and rms and rms > 0 else rate
                                     tls.own_pp = ((pos, int(f[3])), own)
                                     cb(base + new, own, False, False, rms)
@@ -9722,7 +10243,8 @@ def _qfn_engine_class():
                             elif f[:2] == ["BRA", str(slot)] and f[2:3] == ["1"]:
                                 kv = dict(x.partition("=")[::2] for x in f[3:] if "=" in x)
                                 new = max(0, int(kv["prompt"]) - int(kv.get("reused") or 0))
-                                ms = float(kv.get("read_ms") or 0)
+                                ms = max(0.0, float(kv.get("read_ms") or 0)   # P124v: the read's own READ time:
+                                              - float(kv.get("stage_ms") or 0))   #  the staging part is left out
                                 tls.read_leg_base = base + new   # (a later leg of the same request counts from here)
                                 cb(base + new, new / (ms / 1000) if ms > 0 and new else None, True, False,
                                    ms if ms > 0 else None)     # (the engine's own read_ms rides along: its clock)
@@ -9827,10 +10349,13 @@ def main() -> int:
     api_key = a.api_key or cfg.get("api_key", "")
     supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
     # the page answers on this port from the first second of the load (issue #20); this bind doubles as the old
-    # "is the port free" check: a second start stops here, before the minutes of loading
+    # "is the port free" check: a second start stops here, before the minutes of loading.  SAGUARO_SWITCH=1 (set by
+    # saguaro.py when it starts again because the page switched models, P125m): this load is a switch - /health says
+    # "switch", /v1/models keeps listing, and a page that already shows the app keeps it on screen and waits.
     load_state = LoadState(cfg.get("model_name", "qwen3.8-flash-next"), log_path=cfg.get("log"),
-                           api_key=api_key, supervisor=supervisor,
-                           config_path=str(Path(a.config).resolve()) if a.config else None)   # (as write_last_good keeps it)
+                           api_key=api_key, supervisor=supervisor, switching=os.environ.get("SAGUARO_SWITCH") == "1",
+                           family=maya_quants.family_of(cfg) if cfg and kind != "mock" else "",   # (P125m: whose
+                           config_path=str(Path(a.config).resolve()) if a.config else None)   # (milestones its log has)
     try:
         httpd = serve_loading(load_state, host=a.host, port=a.port)
     except OSError:

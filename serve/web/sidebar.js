@@ -6,6 +6,7 @@ import {S, confirmDialog, emit, toast} from "./state.js";
 import {chatInstructions, chatTitle, deleteChat, exportChat, moveToFolder, newChat, newFolder, openChat, pinChat,
         renameChat, renameFolder, deleteFolder, toggleFolder} from "./chats.js";
 import {Icon, Kbd, MayaMark, Menu, MenuItem, MenuLabel, MenuSep, ModelLogo, trapTab, useDismiss} from "./ui.js";
+import {switchingView} from "./server.js";
 
 export const showView = (v) => { S.view = v; S.drawer = false; emit(); };
 export const openSettings = (section = "general") => { S.settings = section; S.drawer = false; emit(); };
@@ -16,6 +17,7 @@ export const setSide = (open) => { S.sideOpen = open; store.set("side-open", ope
 export function status(plain = false) {
   const m = S.metrics, live = (m && m.live) || {};
   const ctx = S.health.max_context ? `${ctxfmt(S.health.max_context)} context` : "";
+  if (S.switching) return {tone: "info", text: switchingView(S.switching).text};   // (P125m: a switch: the app stays)
   if (S.conn === "down") return {tone: "danger", text: "Server not reachable"};
   if (S.conn === "key") return {tone: "warn", text: "API key needed"};
   if (S.conn === "unloaded") return {tone: "muted", text: "Unloaded"};   // (behind llama-swap: the next message loads it)

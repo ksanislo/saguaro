@@ -8,7 +8,7 @@ import {api, ctxfmt, esc, fmt, headers, isPhone, modelLabel, relTime} from "./li
 import {S, confirmDialog, copyText, emit, toast} from "./state.js";
 import {newChat} from "./chats.js";
 import {setSide, showView} from "./sidebar.js";
-import {ctxHint, ctxStopsIn, ctxYarn, kvBytesToken, loadCtxInfo} from "./server.js";
+import {ctxHint, ctxStopsIn, ctxYarn, kvBytesToken, loadCtxInfo, unloaded} from "./server.js";
 import {CtxSlider, Icon, ModelLogo, Seg, Switch, trapTab} from "./ui.js";
 
 // the page's own state (beside S: nothing else reads it but the model menu's count)
@@ -16,6 +16,11 @@ export const MS = {data: null, err: null, add: false, details: {}, edit: null, d
                    check: "", saving: false, restart: null, del: null, gone: null, cat: null, catErr: null, loadBusy: null};
 
 export async function loadModels() {
+  if (unloaded()) {                    // (P125n: off the card behind llama-swap api/models is an upstream request -
+    MS.err = "Unloaded - the supervisor (llama-swap) starts the models; nothing to read until one is on the card.";
+    emit();                            //  a supervisor /health names is shown the supervisor's own list anyway
+    return null;                       //  (SupervisedModels); this is the gate closed without the name)
+  }
   try {
     MS.data = await api("api/models");
     MS.err = null;
@@ -58,7 +63,8 @@ const tpChoices = (n, ...own) => [...new Set([1, 2, ...[4, 8, 16].filter((t) => 
 // ------------------------------------------------------------------ Saguaro starting again (a switch, or new settings)
 async function watchRestart(r) {
   MS.restart = r;
-  emit();
+  S.switching = {label: r.name};               // (P125m: the bar stands on the app while Saguaro starts again; the
+  emit();                                      //  reload below is what "returns to normal" once the model is up)
   let down = false;
   for (let i = 0; i < 450; i++) {                      // (15 minutes: a big model's first load can take a while)
     await new Promise((ok) => setTimeout(ok, 2000));
@@ -75,6 +81,7 @@ async function watchRestart(r) {
     }
   }
   MS.restart = null;
+  S.switching = null;                          // (not back: the bar gives its place to "server not reachable")
   emit();
   toast("error", "Saguaro is not back yet", "The terminal it runs in shows why. This page reconnects when it is.", 30000);
 }

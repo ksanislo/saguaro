@@ -4,6 +4,7 @@
 #pragma once
 
 #include "maya/core/glm_model.hpp"
+#include "maya/core/granule_arena.hpp"
 #include "maya/core/remote_experts.hpp"
 #include "maya/kernels/glm_fast.hpp"
 #include "maya/kernels/glm_kv_stream.hpp"
@@ -1031,7 +1032,8 @@ struct Glm5Model::FastState {
 
 // KV streaming (Glm5Model::kv_stream_setup): per DSA layer of this part (the NextN block's too), its latent cache in
 // pinned host memory - the authoritative copy, position order - and the residency map of its VRAM slots, which are
-// state_ + dsa_lat_[il] (slots * page rows).
+// state_ + dsa_lat_[il] (slots * page rows).  Since P125g the copy lives in a GranuleArena: the whole range is
+// reserved at the load and only the granules a conversation has written are pinned (host_bytes stays the ceiling).
 struct Glm5Model::KvStream {
     int64_t slots = 0;     // VRAM pages a layer
     int page = 4;          // positions a page: one indexer pool
@@ -1039,9 +1041,21 @@ struct Glm5Model::KvStream {
     int64_t n_blocks = 0;  // pages of the context
     std::vector<uint8_t*> host;                          // per layer: the host copy (device-mapped), null: not a DSA layer
     std::vector<maya::kernels::KvStreamMap> map;       // per layer
-    uint8_t* host_arena = nullptr;                       // pinned: every layer's host copy
+    uint8_t* host_arena = nullptr;                       // every layer's host copy (device-mapped): the arena's base
     void* map_arena = nullptr;                           // device: every layer's map
-    uint64_t host_bytes = 0;
+    uint64_t host_bytes = 0;                             // the whole cache: what a conversation fills up to
+    // P125g (item M of ref/REPORT-p125c-glm-mem.md): the host copy is a granule arena - the whole range reserved as
+    // address space at the load, a granule cudaHostRegister'ed when a position of it is first named (Glm5Model::
+    // kv_pin) and given back when its conversation resets, parks or ends.  host_bytes pinned at load was 2.95 GB at
+    // 262144 whether or not a conversation wrote a byte of it; pinned_bytes() is what it holds NOW.  Empty for the
+    // eager fallback (a machine where the device cannot use the host pointer of registered memory: one cudaHostAlloc
+    // as before).  pin_slabs: where each DSA layer's rows start in the arena; slab_bytes: one layer's length.
+    maya::core::GranuleArena arena;
+    std::vector<uint64_t> pin_slabs;
+    uint64_t slab_bytes = 0;
+    // what the arena holds pinned NOW (the granules written so far), or the whole cache on the eager fallback -
+    // the figure the INFO kv_ram_bytes, the VRAM lines and the Context card carry
+    uint64_t pinned_now() const { return arena.empty() ? host_bytes : arena.pinned_bytes(); }
 };
 
 // KV streaming's two hooks for a DSA attention at decode (the token path, the verify window, the rows of several

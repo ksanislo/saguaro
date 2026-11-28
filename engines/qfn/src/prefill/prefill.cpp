@@ -5504,8 +5504,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             if (bat) {
                 for (const PromptJob::Seg& sg : job->segs)
                     if (sg.job->on_layer_pass)
-                        sg.job->on_layer_pass(l - LB, LE - LB, pass_staged, LB, job->pos0 + sg.off);
-            } else if (layer_cb) layer_cb(l - LB, LE - LB, pass_staged, LB, p0);
+                        sg.job->on_layer_pass(l - LB, LE - LB, pass_staged, LB, job->pos0 + sg.off, sg.n);
+            } else if (layer_cb) layer_cb(l - LB, LE - LB, pass_staged, LB, p0, T);
             // P125j: a STOP that arrived inside the chunk is taken here, at a layer pass's end: the layers
             // up through l have read this chunk (their K/V cells, GDN/conv state and indexer tails hold
             // its tokens) and layer l + 1 has not.  Finish the layer (its work is done at the heartbeat

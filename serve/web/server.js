@@ -99,6 +99,49 @@ export function watchStarting(onState, onReady) {
   tick();
 }
 
+// ------------------------------------------------------------------ switching models without blanking the app (P125m)
+// A switch ends the process and Saguaro starts again with the other model; the port never stops answering (issue #20).
+// A page that already shows the app keeps it: the chats stay readable, sending waits, and a bar says "loading
+// <model> NN%".  web/models.js sets S.switching at once when this page asked for the switch (watchRestart reloads
+// the page when the new model is up); a switch asked over the API - POST /models/load - is noticed when a poll
+// fails and /health answers with the starting service.  The watch reloads on the first 200 after the gap: every
+// label, default and API id follows the model that runs now, which is how "the app returns to normal".
+export function switchingView(sw) {
+  sw = sw || {};                                   // (S.switching is null before a switch: a default {} is not)
+  const failed = sw.status === "failed";
+  const pct = sw.pct == null || failed ? null : Math.max(0, Math.min(100, Math.round(+sw.pct || 0)));
+  const name = sw.label || (sw.model ? modelLabel(sw, {compact: true}) : "") || "the next model";
+  return {
+    failed, name, pct,
+    step: failed ? (sw.error || "the model did not start") : (sw.step || sw.line || ""),
+    text: failed ? `${name} did not start` : `loading ${name}${pct != null ? ` ${pct}%` : ""}`,
+  };
+}
+
+let switchOn = false;
+export async function watchSwitch() {              // /health of the starting service, once a second, until it is back
+  if (switchOn) return;
+  switchOn = true;
+  for (;;) {
+    await new Promise((ok) => setTimeout(ok, 1000));
+    if (document.hidden) continue;                 // (asks nothing in the dark, as the polls; seen again, it goes on)
+    const h = await startingHealth();              // (null: the gap between the two starts, or a blip: wait on)
+    if (h && h.ready !== undefined) { location.reload(); return; }   // (the new model is up: the app returns to normal)
+    if (h) { S.switching = h; emit(); }
+  }
+}
+
+export async function probeSwitch() {
+  // a booted page whose server stopped answering: a switch when the starting service answers /health, anything
+  // else keeps today's "server not reachable" (a stopped server stays a stopped server)
+  const h = await startingHealth();
+  if (!h || h.ready !== undefined) return false;
+  S.switching = h;
+  emit();
+  watchSwitch();
+  return true;
+}
+
 // ------------------------------------------------------------------ the live metrics (the Monitor, the status, the meter)
 let fails = 0, keyWarned = false, mcpTick = 0, timer = null, polling = false;
 export const reqAll = {on: false};       // the request table: the last 12, or every one the server keeps
@@ -116,26 +159,37 @@ export function identityChanged(h, eng) {
   return false;
 }
 
-// behind llama-swap (the page at /upstream/<id>/, health saying supervisor "llama-swap"), EVERY request under that
-// path LOADS the model - and evicts another one from the card - so one open Monitor tab's per-second /metrics keeps
-// reloading it.  llama-swap's own GET <root>running (the origin two levels up: it loads nothing) says which model is
-// ready; while ours is not, the page asks only that - every 5 s - and the Monitor shows a quiet unloaded state.
-// And in every setup a hidden tab asks nothing at all: visible again, the polls pick up where they stopped.
+// behind llama-swap (the page at /upstream/<id>/), EVERY request under that path LOADS the model - and evicts another
+// one from the card - so one open Monitor tab's per-second /metrics keeps reloading it.  llama-swap's own GET
+// <root>running (the origin two levels up: it loads nothing) says which model is ready; while ours is not, the page
+// asks only that - every 5 s - and the Monitor shows a quiet unloaded state with a Load button for the one deliberate
+// request.  The gate trusts /running's ANSWER, not /health's supervisor name: P125n's card test woke an unloaded model
+// because llama-swap started us through a wrapper script (its parent-process detection missed), /health said no
+// supervisor, and the page took that for "no gate here" - polling /metrics under /upstream/ every second, which is
+// exactly the request llama-swap loads on.  A path under /upstream/ gates on the probe; a probe that does not answer
+// with llama-swap's {"running": [...]} shape (an older llama-swap without /running, a key refusing it, another proxy
+// under that path) is no gate: poll as today.  And in every setup a hidden tab asks nothing at all: visible again, the
+// polls pick up where they stopped.
 const swapAt = () => { const m = (location.pathname || "").match(/^(.*\/)upstream\/([^/]+)/);
                        return m && {root: m[1], id: decodeURIComponent(m[2])}; };
 let swapReady = null;                    // (true ready, false swapped out (the gate), null: no gate - not behind
                                          //  llama-swap, or its /running does not answer (404, a key refused): poll as today)
+let swapWaking = false;                  // (the Load button was clicked: one /health is in flight to start the model)
 export const unloaded = () => swapReady === false;
+export const waking = () => swapWaking;
 export const stopPoll = () => clearTimeout(timer);
 
 // llama-swap's {"running": [{model, state}]}: loads nothing itself.  "ready", "loading" (listed, not ready), "off" (not
-// listed), null = no gate (an older llama-swap without /running (404), or a key it refuses (401, 403): poll as today)
+// listed), null = no gate (an older llama-swap without /running (404), a key that refuses it (401, 403), or an answer
+// that is not its shape - another proxy under /upstream/: poll as today)
 async function swapState(swap) {
   try {
     const r = await fetch(`${swap.root}running`, {headers: headers()});
     if (r.status === 404 || r.status === 401 || r.status === 403) return null;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const x = ((await r.json()).running || []).find((m) => m.model === swap.id);
+    const j = await r.json();
+    if (!j || !Array.isArray(j.running)) return null;    // (P125n: only llama-swap's own shape gates the page)
+    const x = j.running.find((m) => m.model === swap.id);
     return !x ? "off" : x.state === "ready" ? "ready" : "loading";
   } catch (e) { return undefined; }      // (a blip)
 }
@@ -144,14 +198,32 @@ async function swapRunning(swap, was) {
   return at === undefined ? was : at === null ? null : at === "ready";   // (a blip is not "no gate": one opening the
 }                                                                        //  closed gate would load the model back)
 
+// the unloaded Monitor's Load button: ONE deliberate request under /upstream/ - llama-swap starts the model for it and
+// holds the request until it answers.  Until /running says ready the page stays in its quiet state; the polls never
+// load the model by themselves.
+export async function loadNow() {
+  if (swapReady !== false || swapWaking) return;
+  swapWaking = true;
+  emit();
+  try {
+    const r = await fetch("health", {headers: headers(), cache: "no-store"});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  } catch (e) { swapWaking = false; emit(); throw e; }
+}
+
 export async function poll() {
   clearTimeout(timer);
   if (document.hidden || polling) return;                       // (hidden: nothing asked; one poll at a time)
+  if (S.switching) {                                            // (a switch: the starting service answers nothing
+    timer = setTimeout(poll, 3000);                             //  but /health; watchSwitch asks it, quietly)
+    return;
+  }
   polling = true;
   try {
     const swap = swapAt();
     const was = swapReady;
-    swapReady = swap && (S.health.supervisor === undefined || S.health.supervisor === "llama-swap") ? await swapRunning(swap, was) : null;
+    swapReady = swap ? await swapRunning(swap, was) : null;    // (P125n: the path and the probe answer decide, never
+    if (swapReady !== false) swapWaking = false;               //  /health's supervisor name, which can be missing)
     if (swapReady === false) {
       if (was !== false) { S.metrics = null; S.conn = "unloaded"; emit(); }   // (the Monitor's quiet unloaded state)
       timer = setTimeout(poll, 5000);                           // (/running alone, until the model is back on the card)
@@ -179,7 +251,10 @@ export async function poll() {
         throw new Error(`HTTP ${r.status}`);
       }
     } catch (e) {
-      if (++fails >= 3) S.conn = "down";
+      if (++fails >= 3) {
+        S.conn = "down";
+        probeSwitch();                             // (a switch keeps the port answering /health: P125m - the app
+      }                                            //  stays on screen with the bar instead of waiting on "down")
     }
     emit();
     if ((S.view === "monitor" || S.settings === "tools") && ++mcpTick % 10 === 0) loadMcp();   // (they change rarely: every 10 s)
@@ -190,7 +265,8 @@ document.addEventListener("visibilitychange", async () => {
   if (document.hidden) { clearTimeout(timer); return; }           // (hidden: every poll stops, in every setup)
   if (starting) { if (startTick) startTick(); return; }   // (the starting watch resumes; nothing else runs yet)
   const swap = swapAt();                                          // (the gate first: /health or /metrics would load the model)
-  if (swap && (S.health.supervisor === undefined || S.health.supervisor === "llama-swap")) swapReady = await swapRunning(swap, swapReady);
+  if (swap) swapReady = await swapRunning(swap, swapReady);       // (P125n: as in poll, the probe answer decides, not the supervisor name)
+  if (swapReady !== false) swapWaking = false;
   if (healthWait) { healthWait = false; loadHealth(); }           // (seen again: it picks up at once, and makes up
   if (mcpWait) { mcpWait = false; loadMcp(); }                    //  any health or mcp retry the dark swallowed)
   poll();

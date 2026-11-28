@@ -1,0 +1,10 @@
+saguaro ds4: RAM margin 8.0 GiB (DS4_RAM_MARGIN_GB)
+saguaro ds4: loading 61440 experts (regions up to 78.4 MB, blobs up to 61.2 MB)
+saguaro ds4: experts 4096 / 61440 (8.4 GB, 2.45 GB/s)
+saguaro ds4: experts 30720 / 61440 (63.1 GB, 2.60 GB/s)
+saguaro ds4: experts 61440 / 61440 (126.2 GB, 2.58 GB/s)
+saguaro ds4: copying experts 15360 / 61440 (31.5 GB, 3.10 GB/s)
+saguaro ds4: copying experts 61440 / 61440 (126.2 GB, 3.05 GB/s)
+saguaro ds4: CUDA0 layers [0, 42] pinned: weights 2.10 GB, experts 63.10 GB (1400 of 12288 in VRAM), caches 4.20 GB
+saguaro ds4: CUDA1 layers [42, 78] pinned: weights 2.05 GB, experts 63.10 GB (1200 of 12288 in VRAM), caches 4.20 GB
+saguaro ds4 serve: GEN <max_new> [keys] <ids>; GENI <max_new> [keys] <pictures> <ids>; STOP, QUIT

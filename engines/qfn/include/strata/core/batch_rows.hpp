@@ -27,4 +27,16 @@ inline const char* batch_rows_error(const int* rows, int S, const int64_t* pos, 
     return nullptr;
 }
 
+/// P124w (SAGUARO_ELASTIC_SLOTS): the first row whose position lands at or past the cells its slot's session has
+/// backed, or -1 when every row reads inside them.  `backed[t]` is row t's session's `SessionState::slot_cells`:
+/// the cells an elastic `--batch` slot session (session_init's `slot` 2) holds mapped NOW - `session_slot_fit`
+/// maps VMM chunks up and gives them back; -1 marks a session that is not an elastic slot session, whose cells
+/// are backed whole.  A batch row past `slot_cells` reads addresses the session has given back, which is an
+/// illegal memory access on the GPU - the candidate the mangonel verify-batch crashes pointed at.
+inline int first_row_past_backed(int S, const int64_t* pos, const int64_t* backed) {
+    for (int t = 0; t < S; ++t)
+        if (backed[t] >= 0 && pos[t] + 1 > backed[t]) return t;
+    return -1;
+}
+
 }  // namespace strata::core

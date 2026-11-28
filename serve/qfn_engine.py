@@ -330,6 +330,15 @@ def cpu_isa_words() -> tuple:
     missing = [f for f in ("avx", "avx2", "fma", "f16c") if f not in flags]
     return f"{model or 'this CPU'} ({have})", missing
 
+def start_log_tail_lines(log: str | None, offset: int, n: int = 20) -> list:
+    """P125m phase 2: the same last n lines start_log_tail shows, as a list - for the crash page, which draws the
+    engine's own lines one per row beside its exit code ("" dropped, each line trimmed to 500 characters)."""
+    tail = start_log_tail(log, offset, n)
+    head = "\nthe engine log's last lines:\n"
+    if not tail or not tail.startswith(head):
+        return []
+    return [x.strip()[:500] for x in tail[len(head):].splitlines() if x.strip()]
+
 def start_exit_note(rc: int | None, exe=None) -> str:
     """The sentence the start error carries about how the engine process ended (the engine log is silent when the
     system ends it): "" without a status, else a line, with the CPU's AVX flags after an illegal instruction."""
@@ -503,6 +512,31 @@ SLOT_LINES = ("BT ", "BDONE ", "BRP ", "BRA ", "BRE ")
 # finished, #267): the process may stay alive and even print DONE, but it must not take another request.
 FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed out at layer ",
                   "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
+# PLAN-p124x (d): a timed-out window whose GPU waits DRAINED and whose verifier re-armed (the note the
+# engine prints, released_note/timed_out_note in verify.cpp) says the card is clean: the request ends with
+# this error instead of the pump's SIGKILL of a process that is ending itself, and the verifier can take
+# another window. What it does NOT yet do (review F-A): keep this process to the next request. Every serve
+# path that prints a timed-out ERR returns 1 out of the request loop (the solo prompt read and the solo
+# decode window, the batch step and a batch_fatal prompt read in generate.cpp), so the engine exits seconds
+# after this line, "the engine had stopped" is logged and a reload follows - the one-minute reload the
+# 9070 XT box saw on every #267 is avoided only once those paths return to stdin on the re-armed shape.
+# The rule here is the protocol's half: never SIGKILL a recovered line, and a recovered line means what it
+# says. "did not finish within 5 s", a split verifier's still-closed note, and every "an earlier window
+# never finished" still invalidate the engine, and so does a timed-out line with no note at all.
+# The version coupling (review F4): the finished-note means recovered only because the engine printing it is
+# THIS tree's - qfn_engine.py is extracted from this very file and ships with the engine binary it drives,
+# and that engine prints the note only once its verifier really re-armed (F3). Pairing this server with an
+# older engine (which poisoned even a drained window under the same words) is not "safe" the other way: it
+# keeps an engine whose next request then dies on "an earlier window never finished" - one extra failed
+# request before the restart. Keep the server and the engine from one build.
+RECOVERED_267 = "released and the GPU finished (#267)"
+def fatal_engine_line(line: str) -> bool:
+    """True for the engine's #267 words that mean the verifier cannot take another window."""
+    if not line.startswith(FATAL_PREFIXES):
+        return False
+    timed_out = line.startswith("ERR verify: timed out at layer ") or line.startswith("ERR verify batch: timed out at layer ")
+    return not (timed_out and RECOVERED_267 in line)
+
 def parse_engine_stage_line(line: str) -> list[dict] | None:
     """Accept only the engine's final, contiguous stage plan (inclusive layer ends)."""
     line = logctx.unstamp(line)
@@ -816,8 +850,13 @@ class StrataEngine:
             lines = [x for x in tail.split("\n")[2:] if x.strip()]
             if tail and lines and all(logctx.unstamp(x.strip()).startswith("[saguaro]") for x in lines):
                 tail += "\n  (those are the launcher's own lines: the engine itself wrote nothing)"
-            raise EngineDied(why + (f" (see {log})" if log else "") + note +
+            err = EngineDied(why + (f" (see {log})" if log else "") + note +
                              start_failure_hint(log, log_start) + tail)
+            # P125m phase 2: the crash page draws the exit code and the engine's last lines as their own fields,
+            # not only inside the message text (the shared server reads these off the exception in main()).
+            err.exit_code = self.proc.returncode
+            err.lines = start_log_tail_lines(log, log_start)
+            raise err
         self.known_ctx = self.max_context   # survives a failed restart: requests keep their limit and restart it
         # (from PR #41, midhatn) a locally built engine can sit next to another release's BUILD.json: engines that
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
@@ -919,9 +958,11 @@ class StrataEngine:
             if line.startswith("INFO ") and self._session_note(line):
                 continue                                # a session note: shown and kept, never an answer
             # checked before batch routing: a fatal line is never a slot's own
-            if line.startswith(FATAL_PREFIXES):
+            if fatal_engine_line(line):
                 # release_gpu_waits invalidates the verifier, even if the native
-                # process stays alive and prints DONE afterwards.
+                # process stays alive and prints DONE afterwards.  (A timed-out window whose waits drained is not
+                # one of those: the engine re-armed its verifier, P124x - the request ends with the error, the
+                # engine keeps the next one.)
                 if self.proc is proc:
                     self.silent_note = "Unrecoverable native verification failure: " + line[4:].strip()
                     self.ended = True
@@ -1218,48 +1259,64 @@ class StrataEngine:
         hist.append(st)
 
     def _pp_new(self, f):
-        """PLAN-qfn-per-request-read-stats: `PP <pos> <total> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id>` -
-        this request's own counted tokens (from where its read started, never a reused / restored / parked
-        position) over the time its read has actually been running.  Both None for an engine before the fields,
-        so the shared server keeps its old RESUME-based counting."""
+        """PLAN-qfn-per-request-read-stats: `PP <pos> <total> <ms> <tok/s> new_read=<n> read_ms=<ms> rid=<id>
+        [stage_ms=<ms>]` - this request's own counted tokens (from where its read started, never a reused /
+        restored / parked position) over the time its read has actually been running; P124v: the reported
+        read_ms MINUS its stage_ms (the read's K/V staging, floored at 0) is what the server's rate divides by.
+        Both None for an engine before the fields, so the shared server keeps its old RESUME-based counting."""
         self.progress_new = self.progress_read_ms = None
+        read_ms = stage_ms = 0.0
         for kv in f[5:]:
             k, _, v = kv.partition("=")
             try:
                 if k == "new_read":
                     self.progress_new = int(float(v))
                 elif k == "read_ms":
-                    self.progress_read_ms = float(v)
+                    read_ms = float(v)
+                elif k == "stage_ms":
+                    stage_ms = float(v)
             except ValueError:
                 pass
+        if self.progress_new is not None:
+            self.progress_read_ms = max(0.0, read_ms - stage_ms)
 
     def _rdone(self, line):
-        """`RDONE rid=<id> new=<n> ms=<ms>` (PLAN-qfn-per-request-read-stats): one solo read has ended - the exact
-        new tokens for this request's read and its own running time (the batch path says the same on its BRA line).
-        The request's consumer takes it from here; a line nobody consumed must not reach the next request."""
+        """`RDONE rid=<id> new=<n> ms=<ms> [stage_ms=<ms>]` (PLAN-qfn-per-request-read-stats + P124v): one solo
+        read has ended - the exact new tokens for this request's read and its own running time, the staging part
+        (stage_ms) left out: a restored read's rate must not be diluted by the time its K/V spent coming in from
+        RAM (the batch path says the same on its BRA line).  The request's consumer takes it from here; a line
+        nobody consumed must not reach the next request."""
         kv = dict(x.partition("=")[::2] for x in line.split()[1:] if "=" in x)
         try:
-            self.read_done = (int(float(kv["new"])), float(kv["ms"]))
+            self.read_done = (int(float(kv["new"])),
+                              max(0.0, float(kv["ms"]) - float(kv.get("stage_ms") or 0.0)))
         except (KeyError, ValueError):
             pass
         if getattr(self, "read_live", None) is not None:   # (U5: heartbeats over - RDONE carries the final figures)
             self.read_live["solo"] = None
 
     def _rhb(self, line):
-        """`RHB rid=<rid|0> stage=<stage|read> done=<n> new=<n> reused=<n> pass=<i>/<n> ms=<ms> [slot=<b>]`
-        (PLAN-u5-read-heartbeat): a reading request reports itself about once a second, from the engine's host
-        points between layer passes / pipe pieces / KV staging passes - `stage` while its reused prefix is being
-        copied from RAM into VRAM, `read` while its new tokens are read.  The pump keeps the latest per reader:
-        read_live["solo"] for the read on the control lines, read_live["slots"][<slot>] for a read into a batch
-        slot.  The live prefill rate is the tokens between two heartbeats over the time between them (None while
-        nothing moved); it stands until the tokens move again.  U5b (PLAN-u5b-split-progress): `done` is a belt -
-        the most it has been in this read, so a split read's recorded beats never go back and the rate never
-        spikes; a new read (other `new` or `rid`) starts over.  The old engine prints no such lines."""
+        """`RHB rid=<rid|0> stage=<stage|read> done=<n> new=<n> reused=<n> pass=<i>/<n> ms=<ms> [stage_ms=<ms>]
+        [slot=<b>]` (PLAN-u5-read-heartbeat + PLAN-p124v-read-rate): a reading request reports itself about four
+        times a second, from the engine's host points between layer passes / pipe pieces / KV staging passes -
+        `stage` while its reused prefix is being copied from RAM into VRAM, `read` while its new tokens are read.
+        The pump keeps the latest per reader: read_live["solo"] for the read on the control lines,
+        read_live["slots"][<slot>] for a read into a batch slot.  ms is the read's own clock and stage_ms the part
+        of it spent staging its K/V in from RAM (an engine before P124v prints no stage_ms: then 0 - its ms mixes
+        the staging in, and a restored read reads slow until the engine is updated).  The live prefill rate is
+        computed over the READ time (ms - stage_ms, floored at 0): the tokens between two heartbeats over the read
+        time between them, or - the read's first - its tokens done over its own read time so far (None while the
+        read has spent all its time staging: nothing has been READ); it stands until the tokens move again.
+        U5b (PLAN-u5b-split-progress): `done` is a belt - the most it has been in this read, so a split read's
+        recorded beats never go back and the rate never spikes; a new read (other `new` or `rid`) starts over.
+        The old engine prints no such lines."""
         kv = dict(x.partition("=")[::2] for x in line.split()[1:] if "=" in x)
         try:
             done, new, reused, ms = int(kv["done"]), int(kv["new"]), int(kv["reused"]), float(kv["ms"])
+            stage_ms = float(kv.get("stage_ms") or 0.0)
         except (KeyError, ValueError):
             return
+        rt = max(0.0, ms - stage_ms)             # P124v: the read's own elapsed READ time (staging left out)
         live = getattr(self, "read_live", None)     # (an engine built without __init__: the first line lays it out)
         if live is None:
             live = self.read_live = {"solo": None, "slots": {}}
@@ -1275,14 +1332,27 @@ class StrataEngine:
         if prev:
             done = max(done, prev["done"])          # U5b: the belt over this read's beats so far
         entry = {"stage": kv.get("stage") or "read", "done": done, "new": new, "reused": reused, "ms": ms,
-                 "rate": None, "slot": slot, "rid": rid, "t": time.time()}
+                 "stage_ms": stage_ms, "rt": rt, "rate": None, "slot": slot, "rid": rid, "t": time.time()}
         pi, slash, pn = kv.get("pass", "").partition("/")
         entry["pass"] = [int(pi), int(pn)] if pi.isdigit() and slash and pn.isdigit() else None
+        # P124v2 (PLAN-p124v2-read-rate-true): chunk=<tokens of the unit these passes count> and
+        # pos0=<its first token position>.  done= is whole units; the server's readout shares the unit
+        # in flight (chunk x pass_i/pass_n) when done stands exactly at pos0 - reused (a split read's
+        # cross-card figure already holds its share: pos0 - reused < done, nothing is added).  Absent
+        # fields: no share, the server keeps the old figure.
+        try:
+            entry["chunk"] = max(0, int(float(kv.get("chunk") or 0)))
+        except ValueError:
+            entry["chunk"] = 0
+        try:
+            entry["pos0"] = int(float(kv["pos0"])) if "pos0" in kv else None
+        except ValueError:
+            entry["pos0"] = None
         if prev:
-            dd, dm = done - prev["done"], ms - prev["ms"]
+            dd, dm = done - prev["done"], rt - prev["rt"]
             entry["rate"] = dd / (dm / 1000.0) if dd > 0 and dm > 0 else prev.get("rate")
-        elif ms > 0 and done > 0:
-            entry["rate"] = done / (ms / 1000.0)      # the read's first heartbeat: its own mean so far
+        elif rt > 0 and done > 0:
+            entry["rate"] = done / (rt / 1000.0)      # the read's first heartbeat: its own read-time mean so far
         if slot is not None:
             self.read_live["slots"][slot] = entry
             if len(self.read_live["slots"]) > 64:     # (a lost BRA could leave one behind; fresh ones outlive it)
@@ -2275,7 +2345,7 @@ class StrataEngine:
                         "figures": {"generated": 0, "prompt_tokens": n, "prompt_ms": num("read_ms") + num("wait_ms"),
                                     "decode_ms": 0.0, "finish": "length", "reused": reused,
                                     "prompt_read": max(0, n - reused)}}
-            elif line.startswith("RHB "):                    # U5 read heartbeat: the slot's read every ~1 s (the
+            elif line.startswith("RHB "):                    # U5 read heartbeat: the slot's read ~four times a
                 kv = dict(x.partition("=")[::2] for x in f[1:] if "=" in x)   #  pump kept read_live's copy current)
                 try:
                     live["prompt_read"] = int(kv.get("reused") or 0) + int(kv.get("done") or 0)

@@ -105,6 +105,34 @@ int main() {
               plan(four, parked, 90 * G, 0, above, lim, true, true).empty(),
               "1 GiB over the hard floor is the resident mode working again, not pressure");
     }
+    // PLAN-p124x: swap in use above the bar voids the credit - the mortar box ran 2-5 GiB of swap behind a
+    // credited-calm reading while the releases did nothing (report 1.4), so "the kernel already moved working
+    // pages to disk" is what the parks must answer to, however much the engine itself pins.
+    {
+        check(lim.swap_bytes == 256ull << 20,
+              "the swap bar is 256 MiB: above a calm box's residual dust, under every mortar storm (392 MiB+)");
+        check(!swap_high(mortar, lim), "no swap reading: only the floor rules decide, as before");
+        Memory dust = mortar;
+        dust.swap_used = 64ull << 20;   // residual swap under the bar: idle daemons paged out once
+        check(!swap_high(dust, lim) && pressure_need(dust, lim) == 0 &&
+              plan(four, parked, 90 * G, 0, dust, lim, true, true).empty(),
+              "64 MiB of residual swap is dust: the credit holds and the parks stay");
+        Memory edge = dust;
+        edge.swap_used = lim.swap_bytes;
+        check(!swap_high(edge, lim), "swap exactly at the bar is not above it");
+        Memory storm = mortar;
+        storm.swap_used = 2 * G;   // the mortar shape
+        check(swap_high(storm, lim), "swap above the bar: the host is out of RAM, the pinned tier gives no calm");
+        check(pressure_need(storm, lim) == 10 * G,
+              "the raw reading decides again: the same 8 GiB under the 16 GiB floor asks 8 + an eighth back");
+        check(said(plan(four, parked, 90 * G, 0, storm, lim, true, true)) == "1d:pressure 3d:pressure 2w:pressure ",
+              "68 GiB pinned and 2 GiB in swap: on disk first, then written - the parks give back before the storm");
+        Limits off = lim;
+        off.swap_bytes = 0;   // SAGUARO_PARK_SWAP_MIB=0
+        check(!swap_high(storm, off) && pressure_need(storm, off) == 0 &&
+              plan(four, parked, 90 * G, 0, storm, off, true, true).empty(),
+              "the swap rule is off when its env says 0: exactly the P124a behaviour");
+    }
     // memory stalls with RAM above the floor: one entry a round, only when the caller says a round is due
     const Memory stalled{40 * G, 23.5};
     check(said(plan(four, parked, 90 * G, 0, stalled, lim, true, true)) == "1d:pressure ", "memory stalls: the oldest entry on disk");
