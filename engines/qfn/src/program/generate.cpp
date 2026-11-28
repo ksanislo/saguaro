@@ -2771,7 +2771,10 @@ static std::array<std::atomic<uint64_t>, 64> g_vl_slot_backed{};
 #include <execinfo.h>
 // 1.2.4-pre: a fatal signal prints the stack to stderr (the engine log) before the default action - a QFN engine
 // maps 70-100+ GB of pinned host memory, too large for a core to finish before the server restarts it.  Resolve:
-// addr2line -f -C -e saguaro-qfn <frame - (the address printed - nm saguaro-qfn saguaro_fatal_trace)>.
+// addr2line -f -C -e saguaro-qfn <frame - (the address printed - nm saguaro-qfn saguaro_fatal_trace)>.  Debug aid,
+// not a guarantee: backtrace() and snprintf are not formally async-signal-safe (only backtrace_symbols_fd is),
+// there is no sigaltstack so a stack-overflow SIGSEGV prints nothing, and a handler that faults on an already
+// corrupted stack dies by the kernel's hand - a missing or 3-frame trace means the stack itself was the damage.
 static void saguaro_fatal_trace(int sig) {
     void* f[64];
     const int n = backtrace(f, 64);
