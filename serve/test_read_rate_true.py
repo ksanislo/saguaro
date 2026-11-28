@@ -621,7 +621,7 @@ class CounterFallsRestartOrCorrectDown(Base):
         """P124v2 review round 8 (P1, the blocker, re-deriving round 7): round 6's exclusion release in
         _read_start rests on the premise that the hook does NOT zero read_leg_ms - true only while the
         span was not JUST zeroed by the restart branch.  _admission_wait fires _read_start on EVERY
-        admission (serve/server.py:9907-9909, the hook installed at :6326), so the next admission of a
+        admission (serve/server.py:9921-9923, the hook installed at :6340), so the next admission of a
         retried read - its slice's next leg, or a retried read's fresh admission - released the
         exclusion while the span still stood zeroed: the abandoned attempt's 9,600 tokens went back
         into the numerator without their time (the gate test's exact shape, this hook fired between the

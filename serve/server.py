@@ -4599,8 +4599,8 @@ class Service:
             stat.read_share_unit, stat.read_split_share = None, False   # (round 5: a fresh read shares its units
             #  again until a split's two cards show themselves on it)
             #  (round 8, P1: read_count_reset is NOT cleared HERE - round 6's release re-opened
-            #  round 6's own spike.  This hook fires on EVERY _admission_wait (9907-9909, the
-            #  thread-local installed at :6326): the next admission of a read whose span the
+            #  round 6's own spike.  This hook fires on EVERY _admission_wait (:9921-9923, the
+            #  thread-local installed at :6340): the next admission of a read whose span the
             #  restart branch JUST zeroed (a retry's or a slice's next leg) put the abandoned
             #  attempt's counted tokens back over a span that no longer holds their time -
             #  3,500..1,500 tok/s on a 300 tok/s retry (the round-6 gate's own shape with this
@@ -9949,6 +9949,17 @@ def _qfn_engine_class():
                                     hcb = getattr(tls, "on_hb", None)                       #  the line itself
                                     if hcb is not None:
                                         hcb({**entry, "done": base + entry["done"]})        # (legs add up, as on BRP)
+                                        #  (review round 8, low - documented, not fixed: ONLY done
+                                        #  shifts by base; pos0/new/reused stay engine-relative, so
+                                        #  once a slice's base > 0 (set by its BRA below) the share
+                                        #  guard's pos0 - reused == done and new > done cannot hold
+                                        #  and this leg gets NO in-flight share - it books whole
+                                        #  units, the P124v behavior: direction-safe (never above
+                                        #  the engine's pair, the same conservative class as the
+                                        #  split card, REPORT open question 3) but the plan's
+                                        #  never-0-after-the-first-RHB property then holds for a
+                                        #  whole read and its FIRST leg, not for a slice's legs
+                                        #  after their BRA.)
                             if f[:2] == ["BRP", str(slot)] and len(f) >= 4 and f[2].isdigit() and f[3].isdigit():
                                 kv = dict(x.partition("=")[::2] for x in f[5:] if "=" in x)
                                 rate = float(f[5]) if len(f) >= 6 else None

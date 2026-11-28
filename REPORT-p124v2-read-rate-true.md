@@ -49,7 +49,7 @@ over the read's own elapsed span.**
   entry (absent fields stay None: an older engine behaves exactly as before P124v2).
 - `serve/qfn_engine.py` — re-extracted with `tools/saguaro/extract_qfn_engine.py`, never
   hand-edited.
-- `serve/server.py` `_note_hb` (4621) — a beat's figure becomes
+- `serve/server.py` `_note_hb` (4635) — a beat's figure becomes
   `done + min(chunk, new−done) × pass_i/pass_n` **only when `stage != "stage"` and
   `pos0 − reused == done`**: done stands exactly at the reporting card's unit start, so
   the share is this read's own; a split read's cross-card figure already holds the other
@@ -68,8 +68,8 @@ over the read's own elapsed span.**
   read. Committed `SplitReadFollowsEngineFigure` (serve/test_read_rate_true) replays a
   two-card split with a faithful `ReadProgress` replica and gates the counted tokens at
   or below the engine's own cumulative figure at every sample.)*
-- `serve/server.py` `_own_read_rate` (4517) + `_read_span_s` (4501) + `read_leg_ms`
-  (3159, summed by `_read_close` 4474, zeroed on read restart 4767) — the denominator is
+- `serve/server.py` `_own_read_rate` (4519) + `_read_span_s` (4503) + `read_leg_ms`
+  (3159, summed by `_read_close` 4476, zeroed on read restart 4781) — the denominator is
   the read's **own elapsed span**: closed legs' wall time + the open leg's, from
   `engine_t0`, with the engine's `stage_ms` staging subtracted, and the engine's own
   `read_ms − stage_ms` pair as the floor (a slower wall clock can lower but never raise
@@ -163,3 +163,11 @@ to the uniform replay of the engine's summary line, which passes.
 3. The share guard (`pos0 − reused == done`) is deliberately conservative: any engine
    whose `done=` and `pos0=` disagree (a split read's second card reporting mid-chunk)
    gets no in-flight credit — correct but no smoother than before P124v2 for that card.
+   *(Review round 8: the multi-leg base shift is a second instance of the same
+   conservatism — the routed heartbeat adds the previous legs' count to `done` only
+   (`serve/server.py:9951`, comment there; the guard is `:4661-4662`), while `pos0`,
+   `new` and `reused` stay engine-relative, so once a slice's base > 0 (its first BRA)
+   the guard cannot line up and that leg books whole units. The plan's
+   never-0-after-the-first-RHB property therefore holds for whole reads and a read's
+   FIRST leg, not for a slice's legs after their BRA — direction-safe like the split
+   card, stated here as the review asked.)*
