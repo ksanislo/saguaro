@@ -13242,9 +13242,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             // the Monitor's "Where the experts live" layout (parity with the maya engines' Qwen path, which names
             // itself the same way): engine_kind=qfn picks TIER_SETS.qfn (serve/web/monitor.js), and tierShares()
             // (serve/web/server.js) reads experts / vram_slots / vram_gb / ram_slots / ram_gb from here and
-            // vram_used / ram_used / vram_gb / ram_gb / disk_gb from the STAT lines.  QFN has no SSD tier: every
-            // expert lives in RAM (resident or mapped) and the ones VRAM's caches do not hold are computed by the
-            // CPU from there, so the STAT lines report disk=0 / disk_gb=0.
+            // vram_used / ram_used / vram_gb / ram_gb / disk_gb from the STAT lines.  P125s: with a resident
+            // complement (--resident-budget-gib) or --mmap-experts the STAT lines report the experts it holds as
+            // the RAM tier and the rest of the files as the SSD tier; without one every expert lives in RAM (the
+            // resident arena) and those lines keep disk / disk_gb at 0.
             {
                 const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
                 std::printf("INFO engine_kind=qfn experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\n",
