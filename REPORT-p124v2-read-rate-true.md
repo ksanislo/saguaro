@@ -57,6 +57,17 @@ over the read's own elapsed span.**
   nothing is added and nothing is double-counted. `done=0` beats now book their share —
   the first chunk is on the display from its first layer pass (mangonel's first RHB is at
   ~0.23 s, not 6.5 s).
+  *(Review round 5 correction: `pos0 − reused < done` is true only once some
+  `report_full`/other-card boundary above `p0` has been revealed
+  (read_progress.hpp:57-59, 79-83). Between boundaries the figure gives NO part credit
+  (`b == p0`, :93-94), the guard holds for EVERY card of a split, and the belt kept the
+  MAX of their shares: the counter followed the leading card, up to a unit of tokens over
+  the engine's own figure. Round 5 fixed this: a pass fraction coming back DOWN on the
+  same unit flags the read and the share stops — the counter then follows the engine's
+  figure; a lagging whole-cut step corrects the booking down, it does not re-open the
+  read. Committed `SplitReadFollowsEngineFigure` (serve/test_read_rate_true) replays a
+  two-card split with a faithful `ReadProgress` replica and gates the counted tokens at
+  or below the engine's own cumulative figure at every sample.)*
 - `serve/server.py` `_own_read_rate` (4508) + `_read_span_s` (4495) + `read_leg_ms`
   (3159, summed by `_read_close` 4476, zeroed on read restart 4679) — the denominator is
   the read's **own elapsed span**: closed legs' wall time + the open leg's, from
@@ -96,14 +107,56 @@ to the uniform replay of the engine's summary line, which passes.
 - step 2 `63c028574` — the fix (server + engine line + re-extracted qfn_engine)
 - step 3 `59d618841` — heartbeat contract pins the P124v2 line format
 
+## Round 5 addendum (review corrections, 2026-11-28)
+
+- **P1** — round 4's fall tolerance in `_note_read` (belt the whole-cut step UP to the
+  booked share) had no demonstrated trigger: the RHB share is capped at the unit's end by
+  `min(chunk, new − done)`, so the committed replay never steps below `read_pos` (0 steps,
+  measured), and the tolerance could swallow a REAL restart of an early read (live beat at
+  `done=0`). The branch is now gated on the engine's own counter having a whole unit closed
+  (`n_read >=` the live beat's `chunk=`, on top of the beat's agreement), and a tolerated
+  fall books as it came — the counter corrects DOWN to the engine's figure, never up. A
+  real restart (nothing whole closed, a step below the live beat's `done=`, over one unit,
+  or no live beat) still re-opens the interval and re-baselines. Committed tests:
+  `CounterFallsRestartOrCorrectDown` (three shapes).
+- **P2** — split reads: see the `_note_hb` correction above (fraction-falls-back flag,
+  counter follows the engine's own figure, `SplitReadFollowsEngineFigure`).
+- **Nits taken** — `_read_span_s` measures the open leg from `read_cur`'s own start (a leg
+  re-opened after a close without a start hook no longer re-counts the closed legs; test
+  `LateStepAfterClose`); the `pos0=`/`chunk=` parse in the driver is a plain `int()` of the
+  string (a `chunk=1e400` line no longer escapes `_rhb` with `OverflowError`) with the
+  no-field / malformed / piece-boundary (`pos0=-1 chunk=0`) paths tested; the card timeline
+  fixture moved to `serve/fixtures/` (repo convention); comments/docstrings corrected.
+- **Cumulative readout, stated plainly**: over the card's own replay the committed
+  `CardTrueReadout` samples AVERAGE ~1,097 tok/s against the client's 1,580 (−31%) — the
+  read's first cuts run ~711 tok/s and a cumulative value lags a warm-up by construction;
+  the gates that hold are the read's END value (1,581.2, +0.1%), the cap (max ≤ 1.25×), and
+  the last-5 s window (1,600). The plan's 5% time-average holds on the mangonel replay —
+  its read is steady — and a recorded-shape replay of THAT read would average low too
+  (the recorded file holds only its summary line, so both replays are reconstructions).
+- Modules now (one at a time): `serve.test_read_rate_true` 16, `serve.test_read_rate` 34,
+  `serve.test_read_heartbeat` 19; extractor reproduces `serve/qfn_engine.py` from
+  `engines/qfn/serve/server.py` (re-run at the parse-fix commit, byte-identical on a
+  second run).
+
 ## Open questions
 
 1. **The C++ side is not compiled here** (no nvcc in this environment). The
    `on_layer_pass` signature change (prefill.hpp:70/341, prefill.cpp:5438–5440, the four
    generate.cpp lambdas) is mechanical but must be built and the card run before the
-   readout change can be believed on real hardware; until then only the server side is
-   exercised (an engine without `pos0=`/`chunk=` keeps the old, whole-units behaviour —
-   the split is fully behind the missing fields).
+   readout change can be believed on real hardware. *(Review round 5: both changed C++
+   files pass `g++ -std=c++20 -fsyntax-only -Wall -Wextra` on the host path, the
+   6-argument `on_layer_pass` swap has no 5-argument site left, and the two-part RHB
+   printf is format-correct (11 specifiers / 11 args at both sites) — a device/nvcc
+   build and a card run are still owed.)* The in-flight SHARE is fully behind the
+   missing fields (an engine without `pos0=`/`chunk=` keeps the old whole-units
+   booking), but four changes are not field-gated (round 5 nit, stated plainly): the
+   beat belt, the cumulative readout, the `engine_t0` re-baselining in the restart
+   branch, and clearing `read_hb` at `_read_start`/restart. For an engine that beats but
+   prints no fields (the P124v build): a mid-read restart no longer fires from a beat's
+   share, a post-restart rate is measured from the new start instead of carrying the old
+   one, and a fresh read shows no staged hint until its first beat. All safe in
+   direction, but not behind the fields.
 2. The recorded mangonel file has only the summary line, so the inflation's exact
    beat-by-beat pairing is reconstructed from the timeline + code, not observed; the
    replay's shape (uniform chunks) follows that summary.
