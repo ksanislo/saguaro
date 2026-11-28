@@ -9702,6 +9702,13 @@ int main(int argc, char** argv) {
         };
         std::vector<Conv> parked;
         uint64_t conv_clock = 0;
+        bool read_kept = false;   // (P125l review fix 1: the conversation in the cache ENDS at a read STOPped
+        //  between its chunk passes - the cancelled read's keep below set it, cleared whenever a request changes
+        //  the conversation. Only such a conversation is a kept read a different one arrived for; a re-sent
+        //  prompt of a conversation that ran (a timeout retry, a regenerate, a prompt diverging inside the last
+        //  answer) finds this false and rolls back exactly as before the change. A kept read parked by a
+        //  different conversation and unparked again reads it false too: the worst that costs is today's
+        //  rollback over its rows, never a wrong answer)
         // (one conversation in VRAM, its K / V there: not with --parallel's slots or KV streaming)
         const bool conv_ok = g_par <= 1 && !g_kv_streaming && !g_kv_q4;
         const int keep_n = conv_ok ? std::max(0, getenv("SAGUARO_IK2_KEEP") ? std::atoi(getenv("SAGUARO_IK2_KEEP")) : 4) : 0;
@@ -10702,7 +10709,10 @@ int main(int argc, char** argv) {
                 }
                 if (r_best == 0) {   // a new conversation
                     if (!hist.empty()) park_active(), reset();
+                    read_kept = false;
                 } else if (j_best >= 0) {
+                    read_kept = false;   // (a kept conversation back in the cache: a read it had kept there gets
+                    //  today's rollback if yet another conversation arrives before its own request comes back)
                     const auto pts = parked[j_best].loaded ? points_of(parked[j_best].snaps) : parked[j_best].points;
                     const bool fork = r_best < (int) parked[j_best].hist.size() && later_turn(pts, r_best);
                     parked[j_best].used = ++conv_clock;
@@ -10714,6 +10724,7 @@ int main(int argc, char** argv) {
                         if (parked[q].hist == key) j = q;
                     if (j >= 0) unpark(j, fork ? r_best : -1);
                 } else if (r_best < (int) hist.size() && later_turn(act_pts, r_best)) {
+                    read_kept = false;   // (the conversation goes on from a snapshot: it no longer ends at a kept cut)
                     Snap cp;   // back past a later turn: the conversation as it is stays kept, this one goes on from the snapshot
                     for (const auto& sn : snaps)
                         if (sn.pos == r_best) cp = sn;
@@ -10726,6 +10737,17 @@ int main(int argc, char** argv) {
                     snaps[0] = std::move(cp);
                     snap_next = 1 % n_snaps;
                     snap_copy(snaps[0], false);
+                } else if (r_best < (int) hist.size() && read_kept) {
+                    // P125l (review fix 1): the cache holds a read stopped between its chunk passes and NOTHING has
+                    // advanced it since (read_kept) - so this prompt, matching only its start and with no later turn
+                    // above, is a DIFFERENT conversation: it parks the kept read with everything it read
+                    // (park_active takes the full visits' rows too) and starts clean - rolling back over the kept
+                    // read's rows is what lost a paused read's 32,768 tokens. Without read_kept the conversation is
+                    // one that RAN: a re-sent prompt (a timeout retry, a regenerate, the same prompt sampled again)
+                    // or one diverging inside the last answer - it falls through to the rollback below, the shape
+                    // before this change, reusing the conversation's rows up to its newest snapshot.
+                    read_kept = false;   // (parked whole; the cache starts this conversation clean)
+                    park_active(), reset();
                 }
             }
             // (drafting for this request: spec=1 asks for none; the prompt lookup's history its tokens; the Monitor's
@@ -10763,6 +10785,9 @@ int main(int argc, char** argv) {
             if (L < hist.size() || L == ids.size()) {
                 // back to the latest snapshot at or before L that leaves a token to run (one past it is dropped:
                 // its position's state follows from a prefix the request does not share)
+                read_kept = false;   // (a rollback or a reset: the conversation this request leaves is not the
+                //  shape a kept read's cut made - with read_kept set this leg can only be an exact re-send, which
+                //  no kept read can be: its keep cleared the last logits)
                 int best = -1;
                 for (int i = 0; i < (int) snaps.size(); ++i)
                     if (snaps[i].pos >= 0 && snaps[i].pos <= (int) L && snaps[i].pos < (int) ids.size() &&
@@ -10790,6 +10815,12 @@ int main(int argc, char** argv) {
             for (auto& v : g_cnt_hist) v = 0;
             for (auto& v : g_src_hist) v = 0;
             bool cancelled = false;
+            int read_pos = 0;   // (P125l: where a stopped read ended - the chunk boundary its passes had run to,
+            //  caught at the two g_cancel checks below; the stop keeps the conversation exactly there)
+            // (with the drafter only under SAGUARO_IK2_DRAFT_SNAP=1: after a restore its windowed layers' rings may
+            //  hold rows of the dropped continuation - the drafts' context only, never an answer's; the gate arms
+            //  the p_ms snapshot below and - P125l review nit - the stopped read's keep snapshot alike)
+            static const bool draft_snap = getenv("SAGUARO_IK2_DRAFT_SNAP") && std::atoi(getenv("SAGUARO_IK2_DRAFT_SNAP"));
             g_lend.want = (int) ids.size();   // (KV lending: at the answer's first token)
             if (L < ids.size()) {
                 const int T_sup = g_dev[0].W.T_sup;
@@ -10797,9 +10828,6 @@ int main(int argc, char** argv) {
                 // where the prompt's last message starts (past what is kept, with a turn before it): a snapshot
                 // there, so that message edited or asked again reads only itself (SAGUARO_IK2_SNAP_MSG=0: none)
                 size_t p_ms = 0;
-                // (with the drafter only under SAGUARO_IK2_DRAFT_SNAP=1: after a restore its windowed layers' rings may
-                //  hold rows of the dropped continuation - the drafts' context only, never an answer's)
-                static const bool draft_snap = getenv("SAGUARO_IK2_DRAFT_SNAP") && std::atoi(getenv("SAGUARO_IK2_DRAFT_SNAP"));
                 if (keep_n > 0 && !(getenv("SAGUARO_IK2_SNAP_MSG") && !std::atoi(getenv("SAGUARO_IK2_SNAP_MSG"))) &&
                     (!drafter || draft_snap))
                     for (size_t i = ids.size(); i-- > L + 1;)
@@ -10814,8 +10842,8 @@ int main(int argc, char** argv) {
                         const int T_pass = big_begin(M, g_dev[0].W, dev_cache(0), (int) (s1 - s0), (int) s1, bs);
                         for (size_t p0 = s0; p0 < s1; p0 += T_pass) {
                             beat("a prompt pass (the layer-major path)");
-                            if (g_cancel) {   // (a prompt half run: back to a snapshot it kept)
-                                cancelled = true;
+                            if (g_cancel) {   // (a prompt half run: the passes so far are kept, P125l)
+                                cancelled = true, read_pos = (int) p0;
                                 break;
                             }
                             const int n = (int) std::min<size_t>(T_pass, s1 - p0);
@@ -10836,7 +10864,7 @@ int main(int argc, char** argv) {
                         for (size_t p0 = s0; p0 < s1; p0 += chunk) {
                             beat("a prompt pass");
                             if (g_cancel) {
-                                cancelled = true;
+                                cancelled = true, read_pos = (int) p0;
                                 break;
                             }
                             const int n = (int) std::min<size_t>(chunk, s1 - p0);
@@ -10868,20 +10896,51 @@ int main(int argc, char** argv) {
                 }
             }
             if (cancelled) {   // (back to the latest snapshot the request kept, else nothing is kept)
-                int best = -1;
-                for (int i = 0; i < n_snaps; ++i)
-                    if (snaps[i].pos >= 0 && snaps[i].pos <= (int) ids.size() && (best < 0 || snaps[i].pos > snaps[best].pos))
-                        best = i;
-                if (best >= 0 && snaps[best].pos > 0 && snaps[best].pos < (int) ids.size()) {
-                    const int sp = snaps[best].pos;
-                    snap_copy(snaps[best], false);
-                    for (auto& sn : snaps)
-                        if (sn.pos > sp) sn.pos = -1;
-                    hist.assign(ids.begin(), ids.begin() + sp);
-                    hist_sig.assign(sig.begin(), sig.begin() + sp);
+                // P125l: with conversation keeping the stopped read KEEPS what it read: the conversation stays at
+                // read_pos - every pass up to it ran, none half-run, their rows are still the cache's (nothing has
+                // run between the STOP and here) - and takes a snapshot there, the same save park_active takes at
+                // a conversation's end (the conv states and the sliding visits' windows; the full visits' rows
+                // need none, they rewrite cleanly). The request coming back for the rest matches its end exactly
+                // and its PP/DONE report cached = read_pos as the reused figure; a DIFFERENT conversation parks it
+                // whole (the r_best == 0 leg and, on this read_kept shape, the leg above) instead of reading over
+                // its rows. Without keeping (SAGUARO_IK2_KEEP=0, KV-streaming, KV-Q4: keep_n 0; or a drafter
+                // without SAGUARO_IK2_DRAFT_SNAP) the old shape below stands.
+                if (keep_n > 0 && read_pos > 0 && (!drafter || draft_snap)) {   // (with a drafter and no
+                    //  SAGUARO_IK2_DRAFT_SNAP the keep's snapshot would carry the same dropped-continuation risk
+                    //  the p_ms gate above documents: the old rollback shape below stands instead - REPORT's
+                    //  "no drafter (or SAGUARO_IK2_DRAFT_SNAP=1)" conditioned the keep on it all along)
+                    read_kept = true;   // (the cache now ends exactly at this cut - the one shape the
+                    //  different-conversation leg above parks instead of rolling back over)
+                    hist.assign(ids.begin(), ids.begin() + read_pos);
+                    hist_sig.assign(sig.begin(), sig.begin() + read_pos);
                     last.clear();
-                } else {
-                    reset();
+                    bool have = false;   // (a stop exactly at a segment's snapshot: that one is it)
+                    for (const auto& sn : snaps) have = have || sn.pos == read_pos;
+                    if (!have) {
+                        Snap& sn = snaps[snap_next];
+                        snap_next = (snap_next + 1) % n_snaps;
+                        sn.pos = read_pos, sn.slot = 0;
+                        sn.last.clear();
+                        snap_copy(sn, true);
+                    }
+                } else {   // (no keeping: the shape before - back to the latest snapshot at or below the prompt)
+                    read_kept = false;
+                    int best = -1;
+                    for (int i = 0; i < n_snaps; ++i)
+                        if (snaps[i].pos >= 0 && snaps[i].pos <= (int) ids.size() &&
+                            (best < 0 || snaps[i].pos > snaps[best].pos))
+                            best = i;
+                    if (best >= 0 && snaps[best].pos > 0 && snaps[best].pos < (int) ids.size()) {
+                        const int sp = snaps[best].pos;
+                        snap_copy(snaps[best], false);
+                        for (auto& sn : snaps)
+                            if (sn.pos > sp) sn.pos = -1;
+                        hist.assign(ids.begin(), ids.begin() + sp);
+                        hist_sig.assign(sig.begin(), sig.begin() + sp);
+                        last.clear();
+                    } else {
+                        reset();
+                    }
                 }
                 if (serve_maya) std::printf("DONE 0 %zu %.1f 0 cancel 0 0 %d 0 0\n", ids.size(), (now() - t0) * 1e3, cached);
                 else std::printf("@END cancelled %zu %d %.3f %.3f\n", ids.size(), cached, now() - t0, 0.0);
@@ -10891,6 +10950,8 @@ int main(int argc, char** argv) {
                 continue;
             }
             if (L < ids.size()) {
+                read_kept = false;   // (the read ran to the prompt's end: the conversation advances past any kept
+                //  cut and now ends at a snapshot WITH logits - a re-send of it takes the rollback, as before)
                 hist = ids;
                 hist_sig = sig;
                 Snap& sn = snaps[snap_next];

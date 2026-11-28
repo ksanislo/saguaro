@@ -8,7 +8,10 @@ batch slot drops a cancelled read, so a batch read is never cut) - and GLM pause
 stopped read solo too (hy4_main.cpp:1086, :1106-1110; P124i: the driver reports keeps_stopped_read for its INFO
 engine_kind=hy4, and a LOW read steps aside for a waiting NORMAL one as well; saguaro-mm3 the same by its INFO line,
 P124j - and from P124u any line engine can claim it itself: READY carrying `keepread`, what saguaro-ds4 says when it
-keeps a stopped read live, keeps the read at the point it stored). Who steps aside
+keeps a stopped read live, keeps the read at the point it stored); P125l gives it to saguaro-ik2 SOLO by its INFO engine_kind=ik2 line - its
+STOP lands between the prompt's chunk passes and (after the lost_read.sh fix) the engine keeps the read AT that
+boundary, snapshot and rows (ik2_main.cu:10821-10846, :10888-10900), while its --parallel line drops a cut read
+(:10494-10499), so only the solo driver is given it. Who steps aside
 (Ken's 11-25 block): a LOW answer gives its place up whenever a normal or high request runs or waits - even when
 a place is free, all running lows at once; a NORMAL one only for a waiting high one that does not fit; a HIGH one
 never.
@@ -200,6 +203,80 @@ class Hy4Read(ReadEngine):
     can_pause = False
     multi = 0
     info = {"engine_kind": "hy4"}
+
+
+class Ik2Read(ReadEngine):
+    """saguaro-ik2 solo as the line driver sets it up (P125l: READY ... stop, no PAUSE, INFO engine_kind=ik2):
+    a STOP is seen only BETWEEN the prompt's chunk passes (ik2_main.cu:10821-10846 - a chunk pass is never
+    split), and the read is KEPT exactly there (the fixed engine: its conversation stays at the boundary with a
+    snapshot taken at the stop, :10888-10900; the shape before kept only its last snapshot - a first prompt has
+    none before the last message's start, which for a card-shaped prompt is 0 - and reset the read away, the
+    lost_read.sh finding). The driver knows the figure the resume starts from: the engine's PP line carries a
+    reuse field, and the fixed driver keeps it as `progress_reuse` (serve/server.py) - None for a line engine
+    whose PP says no number, a real int here, 0 included."""
+    keeps_stopped_read = True
+    can_pause = False
+    multi = 0
+    reports_reused = False
+    info = {"engine_kind": "ik2"}
+    keeps_cut = True                          # False: the pre-fix engine, rolled back to its last snapshot
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.snaps, self.resumed_from, self.chunk_reads = {}, [], {}
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        with self.lock:
+            self.calls.append((list(ids), max_new, dict(sampling or {})))
+            base = next((b for b in self.bases if ids[:len(b)] == b), None)
+            if base is None:
+                base = list(ids)
+                self.bases.append(base)
+        key, total = id(base), len(base)
+        step = max(1, -(-total // self.CHUNKS))
+        pos = start = self.read_pos.get(key, 0)
+        if 0 < start < total:
+            self.resumed_from.append(start)   # (this call continues a cut read - from where the engine kept it)
+        self._tls.own_pp = None
+        self.progress_reuse = start           # (the call's PP lines will report it, fixed driver's parse)
+        try:
+            while pos < total:
+                pos = min(total, pos + step)
+                if cancel.is_set():
+                    return
+                self._tls.own_pp = ((pos, total), None)
+                self.progress = (pos, total, start, 0.0)
+                with self.rlock:
+                    self.read_pos[key] = pos
+                    self.ticks[key] = self.ticks.get(key, 0) + 1
+                    reads = self.chunk_reads.setdefault(key, [0] * self.CHUNKS)
+                    reads[min((pos - 1) // step, self.CHUNKS - 1)] += 1
+                time.sleep(self.delay)
+                yield None                      # a PP line: a keep-alive, a read tick, and the reuse figure
+        except GeneratorExit:                   # the STOP, seen between the chunk passes
+            if pos < total:
+                if not self.keeps_cut:          # the pre-fix engine: back to the latest snapshot it kept - a
+                    self.read_pos[key] = self.snaps.get(key, 0)   #  card-shaped first prompt has none: 0
+                self.last = {"finish": "cancel", "generated": 0, "prompt_ms": 0.0, "decode_ms": 0.0}
+            raise
+        self._tls.own_pp = None
+        text = self.tok.decode(base)
+        answer = next(v for k, v in self.answers.items() if k in text)
+        script = self.tok.encode(answer) + self.end
+        for t in script[len(ids) - len(base):][:max_new]:
+            if cancel.is_set():
+                return
+            time.sleep(self.delay)
+            yield t
+
+
+class Ik2LostRead(Ik2Read):
+    """The card test's engine, as measured by the card host's lost_read run (the run behind FIX-REPORT.md's
+    fix 1): a cut read rolls back to the latest snapshot the conversation kept, and a FIRST prompt has none
+    before its last user message's start - which for a card-shaped prompt sits below the engine's arming bar
+    (ik2_main.cu:10807) - so the stopped read resets to 0 and the resume reads the prompt again from 0. Its PP
+    line still reports its reuse: 0. (The keep that fixes the engine is Ik2Read's shape.)"""
+    keeps_cut = False
 
 
 class FairLockPriority(Env):
@@ -416,6 +493,26 @@ class ServicePreempts(Env):
         self.assertEqual(self.svc.fifo.waiting(), 0)
         self.assertEqual(self.svc.fifo._yields, 0)
         self.assertEqual(self.svc.status["queued"], 0)
+
+    def test_a_low_ik2_answer_steps_aside_and_resumes_from_its_token(self):
+        # P125l: saguaro-ik2's answer loop honours the STOP between tokens (solo ik2_main.cu:10968, the
+        # multi one's writer check :10531) and keeps the conversation through the prompt it read - the
+        # token-tick step-aside was never gated on an engine flag, and this is what the card test mirrors
+        self.engine = ResumingEngine(self.tok, {"long": LONG, "short": SHORT})
+        self.engine.info = {"engine_kind": "ik2"}
+        self.svc.engine = self.engine
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            out = self.race()
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertEqual(out["long one"][0], LONG)                 # resumed intact at the token it reached
+        self.assertLess(out["short one"][1], out["long one"][1])   # the high one answered first
+        calls = self.long_calls()
+        self.assertGreaterEqual(len(calls), 2)                     # cut at a token, and continued
+        written = len(calls[1][0]) - len(calls[0][0])
+        self.assertGreater(written, 0)                             # prompt + the tokens it had written
+        self.assertIn("[saguaro] priority: a low answer paused at", log.getvalue())
+        self.assertIn("[saguaro] priority: the low answer continues", log.getvalue())
 
     def test_the_pause_engine_keeps_the_state_and_the_stream(self):
         self.engine = PausingEngine(self.tok, {"long": LONG, "short": SHORT})
@@ -733,6 +830,96 @@ class ReadsPreempt(Env):
         self.assertIn("prompt tokens for a normal-priority request", log)
         self.assertIn("priority: the low prompt read continue", log)   # (continued: N reused, or continues - P124b)
 
+    def test_an_ik2_solo_read_steps_aside_for_a_normal_and_continues_at_the_cut(self):
+        # P125l (fixed, the lost_read.sh finding): a LOW read stops at the next chunk boundary (never inside a
+        # pass) and CONTINUES THERE - the conversation stays at the boundary it stopped at, and the resume's PP
+        # reuse figure says so; nothing read before the pause is read again
+        engine = Ik2Read(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        out, log = self.race_read(engine, second=PRIORITY_NORMAL)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])   # the normal one went first, the low after
+        self.assertEqual(out["long one"][0], LONG)                 # nothing lost or repeated at the seam
+        long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
+        self.assertEqual(len(long_calls), 2)                       # cut once, and continued
+        self.assertEqual(long_calls[1][0], long_calls[0][0])       # the same prompt: nothing written yet
+        self.assertEqual(len(engine.resumed_from), 1)              # the resume started where the read stopped ...
+        total = len(engine.bases[0])
+        step = max(1, -(-total // ReadEngine.CHUNKS))
+        self.assertTrue(0 < engine.resumed_from[0] < total)        # ... not from 0 (the card run's shape) ...
+        self.assertEqual(engine.resumed_from[0] % step, 0)         # ... at a chunk boundary, where it stopped
+        reads = engine.chunk_reads[id(engine.bases[0])]
+        self.assertEqual(set(reads), {1})                          # every chunk read EXACTLY once: the pause
+        #                                                    # threw no read away (the card lost 32,768 tokens)
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt tokens for a normal-priority request", log)
+        self.assertIn(f"prompt read continued: {engine.resumed_from[0]:,} of {total:,} tokens reused", log)
+        self.assertNotIn("prompt read continues from where the engine kept it", log)   # a figure: the claim is not
+
+    def test_a_high_request_goes_first_and_the_ik2_read_continues(self):
+        # the high one answers while the low read waits, and only then does the read go on from its cut
+        engine = Ik2Read(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        out, log = self.race_read(engine)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])   # high first: its answer ended long before
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(len(engine.resumed_from), 1)
+        self.assertGreater(engine.resumed_from[0], 0)              # continued from the cut, not from 0
+        self.assertIn(f"prompt read continued: {engine.resumed_from[0]:,} of", log)   # the engine's own figure
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt tokens for a high-priority request", log)
+
+    def test_an_ik2_read_cut_keeps_everything_it_read(self):
+        # the fixed engine, tested straight (no race): the STOP between the chunk passes keeps the read at the
+        # boundary its passes ran to (ik2_main.cu:10888-10900) - never a rollback to 0, never a snapshot short
+        # of it: THE test the card run needed - it fails when the resumed read starts at 0 (or anywhere short
+        # of the cut), which is exactly what lost 32,768 tokens per cut on the card
+        engine = Ik2Read(self.tok, {"long": LONG}, delay_s=0.0)
+        ids = self.tok.encode("long one " + LONG)
+        total, step = len(ids), max(1, -(-len(ids) // ReadEngine.CHUNKS))
+        gen = engine.generate(ids, 4096, {}, threading.Event())
+        for _ in range(3):
+            self.assertIsNone(next(gen))                   # chunks 1..3 read
+        gen.close()                                        # the STOP, seen between the passes
+        key = next(iter(engine.read_pos))
+        self.assertEqual(engine.read_pos[key], 3 * step)   # kept EXACTLY there: no rollback, no half chunk
+        self.assertEqual(sum(engine.chunk_reads[key]), 3)  # nothing read beyond the three passes that ran
+        gen2 = engine.generate(ids, 4096, {}, threading.Event())
+        self.assertIsNone(next(gen2))                      # (the call starts: at the cut, not at 0)
+        self.assertEqual(engine.progress_reuse, 3 * step)  # its PP lines report where the read starts: the cut
+        self.assertEqual(engine.resumed_from, [3 * step])
+        for _ in gen2:
+            pass
+        self.assertEqual(engine.read_pos[key], total)
+        reads = engine.chunk_reads[key]
+        self.assertEqual(set(reads), {1})                  # every chunk, once: the pause threw nothing away
+
+    def test_an_ik2_lost_read_reports_zero_never_a_claim(self):
+        # FIX-REPORT fix 3: the server logs "continues" only when the engine reports kept tokens. The card's
+        # engine shape (Ik2LostRead): the resume re-reads from 0 and its PP reuse figure is 0 - the line must
+        # carry that 0 and never claim the read continues (the numberless wording is for engines that report no
+        # figure at all; a reported 0 is a lost read, said as one - the P124b rule)
+        engine = Ik2LostRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        out, log = self.race_read(engine, second=PRIORITY_NORMAL)
+        self.assertEqual(out["long one"][0], LONG)               # the re-read answers in the end anyway
+        self.assertEqual(engine.resumed_from, [])                # it came back to 0: no resume, only a restart
+        self.assertIn("prompt read continued: 0 of", log)
+        self.assertNotIn("prompt read continues from where the engine kept it", log)
+
+    def test_an_ik2_request_that_never_waits_is_unchanged(self):
+        # alone on an idle server the read answers exactly as before: one engine call, every chunk read
+        # exactly once, no pause line of any kind
+        engine = Ik2Read(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        svc = Service(engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        out, log = {}, io.StringIO()
+        with contextlib.redirect_stdout(log):
+            ask(svc, "long one", 4096, out)                        # normal priority: it never waits
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(len(engine.calls), 1)                     # never cut
+        self.assertEqual(engine.resumed_from, [])
+        self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
+        self.assertEqual(set(engine.chunk_reads[id(engine.bases[0])]), {1})   # every chunk, exactly once
+        self.assertNotIn("priority:", log.getvalue())
+
     def test_a_glm_read_pauses_by_its_pause(self):
         engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
         out, log = self.race_read(engine)
@@ -877,7 +1064,10 @@ class TheReadKeepDriver(Env):
     engine_kind=hy4 (its own line: hy4_main.cpp:932) the keeps_stopped_read the read preemption gates on -
     its stopped read keeps the conversation live at the chunk reached.  P124j did the same for mm3, and P124u let
     any engine claim it itself: READY carrying `keepread` (saguaro-ds4 says it with its keep on, P124k) - the word
-    is the truth, not the engine's name.  An engine neither named nor saying the word is not given it."""
+    is the truth, not the engine's name.  P125l gave it to saguaro-ik2 SOLO (its STOP stops at a chunk boundary
+    and the engine keeps the read at its last snapshot, ik2_main.cu:10815-10841/:10870-10892); its --parallel
+    line slot_resets a stopped reader (:10494-10499), so the multi one is not given it.  An engine neither named
+    nor saying the word is not given it."""
 
     def start(self, kind, ready="stop"):
         path = Path(tempfile.mkdtemp()) / "saguaro-x.py"
@@ -934,9 +1124,27 @@ class TheReadKeepDriver(Env):
         finally:
             eng.close()
 
+    def test_the_ik2_driver_is_given_it_solo_but_not_parallel(self):
+        # P125l: solo saguaro-ik2 keeps a cut read at its last snapshot (the STOP lands between chunk
+        # passes, ik2_main.cu:10815-10841) - its --parallel slot_resets a stopped reader (:10494-10499,
+        # audit 8.5), so ONLY the solo line gets the flag and its multi reads still run to their end
+        eng = self.start("ik2")                        # READY ... stop: solo
+        try:
+            self.assertEqual(eng.multi, 0)
+            self.assertFalse(eng.can_pause)
+            self.assertTrue(eng.keeps_stopped_read)
+        finally:
+            eng.close()
+        eng = self.start("ik2", "stop multi=2")        # READY ... stop multi=2: --parallel
+        try:
+            self.assertEqual(eng.multi, 2)
+            self.assertFalse(eng.keeps_stopped_read)
+        finally:
+            eng.close()
+
     def test_another_line_engine_is_not_given_it(self):
-        eng = self.start("ik2")                        # Inkling 2 drops a cut read in multi (audit 8.5): not given it
-        try:                                           #   (hy4 by P124i, mm3 by P124j, any READY keepread by P124u are)
+        eng = self.start("some-new-name")              # an engine neither named nor saying keepread: not given it
+        try:
             self.assertFalse(getattr(eng, "keeps_stopped_read", False))
         finally:
             eng.close()

@@ -1497,6 +1497,9 @@ class StrataEngine:
         self.vram = []                   # VRAM lines: what each part holds on its GPU (the Monitor's GPU map)
         self.prefill_tok_s_mean = None
         self.progress = None             # (read, total, reuse, ms) prompt progress while a prompt is read, from PP lines
+        self.progress_reuse = None       # (P125l) the PP line's OWN reuse field - where its read started - or None
+        #  when the engine's PP lines carry no such field (saguaro-ik2 prints one, a GLM line does not): Service.
+        #  _sliced reports a resumed read's continuation from it, and a 0 is a lost read, not an unknown one
         try:                             # a ready-made engine's BUILD.json says its version
             self.info["version"] = json.loads((Path(exe).parent / "BUILD.json").read_text()).get("version")
         except (OSError, ValueError):
@@ -1557,6 +1560,11 @@ class StrataEngine:
             for k, v in ik2_log_facts("".join(head), self.max_context).items():
                 self.info.setdefault(k, v)                # (an engine that says it itself, INFO: its own figure)
             self._ik2_log(head)
+            if not self.multi:   # P125l: SOLO saguaro-ik2 honours a STOP only between a prompt's chunk passes
+                self.keeps_stopped_read = True   #  (ik2_main.cu:10815-10841) and keeps the conversation at its last
+                #  snapshot then (the last turn's end, or the last message's start - :10870-10892), so a cut read
+                #  continues from where the engine kept it; --parallel slot_resets a stopped READER - "nothing of its
+                #  prompt is kept" (:10494-10499) - so the multi one is not given it and its reads run to their end.
         if self.info.get("engine_kind") == "hy4":
             self.keeps_stopped_read = True   # R122: a STOP between its prompt's chunks keeps the conversation live at the chunk reached (solo, hy4_main.cpp:1086, :1106-1110)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
@@ -2039,6 +2047,7 @@ class StrataEngine:
             yield from self._generate_multi(ids, max_new, sampling, cancel, embeddings)
             return
         self.progress = None
+        self.progress_reuse = None       # (P125l) this call's PP lines report their reuse field or they don't
         self.prefill_tok_s_mean = None
         if getattr(self, "_tls", None) is not None:   # (this request's own prompt progress: Service._progress)
             self._tls.own_pp = None
@@ -2103,6 +2112,10 @@ class StrataEngine:
                         self.progress = (int(f[1]), int(f[2]),
                                          int(f[5]) if len(f) >= 6 and f[5].isdigit() else 0,
                                          float(f[3]) if len(f) >= 4 else 0.0)
+                        self.progress_reuse = int(f[5]) if len(f) >= 6 and f[5].isdigit() else None
+                        #  (P125l: kept apart from progress[2] - that one defaults to 0 for a line with no field,
+                        #  this one is None there: saguaro-ik2's PP carries it and a resumed read's continuation
+                        #  line is its figure, 0 included - a GLM line says nothing)
                         self.prefill_tok_s_mean = float(f[4]) if len(f) >= 5 else None
                         if getattr(self, "_tls", None) is not None:
                             self._tls.own_pp = (self.progress, self.prefill_tok_s_mean)
@@ -2263,6 +2276,7 @@ class StrataEngine:
         self._tls.rid = rid
         self._tls.pp = None                 # this request's last prompt-progress report (fair reads)
         self.progress = None
+        self.progress_reuse = None
         self.prefill_tok_s_mean = None
         self._tls.own_pp = None
         keys = self.gen_keys(sampling or {}) + f" rid={rid}"
@@ -5860,13 +5874,25 @@ class Service:
                 for t in gen:
                     if resume_note is not None:         # P124b: the resumed read logs the engine's OWN reused
                         kept = getattr(self.engine, "reused", None)   #  figure (QFN's RESUME line, the same one its
-                        if isinstance(kept, int) and not isinstance(kept, bool) and 0 <= kept <= resume_note:
+                        if isinstance(kept, bool):                    #  DONE carries). P125l: saguaro-ik2 says no
+                            kept = None                               #  RESUME, but its PP line carries a reuse
+                        if kept is None:                              #  field (progress_reuse) - and its 0 means
+                            kept = getattr(self.engine, "progress_reuse", None)   #  the read was LOST, said as one
+                        if isinstance(kept, int) and 0 <= kept <= resume_note:
                             print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} prompt read continued: "
-                                  f"{kept:,} of {resume_note:,} tokens reused", flush=True)   #  DONE carries), or
-                        else:                           #  the old numberless wording for an engine that reports no
-                            print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} prompt read continues "  #  figure
-                                  f"from where the engine kept it", flush=True)   #  over the pipe: never a reuse
-                        resume_note = None                                    #  that did not happen
+                                  f"{kept:,} of {resume_note:,} tokens reused", flush=True)
+                            resume_note = None
+                        elif t is not None or getattr(self.engine, "progress", None) is not None:
+                            #  the old numberless wording for an engine that reports no figure over the pipe
+                            #  (GLM's PAUSE keeps by protocol, its line says no number). P125l: it waits for the
+                            #  read to report SOMETHING (its first PP line, or a token): the quiet-10 s heartbeat
+                            #  that can precede that first line says nothing about whether the engine kept the
+                            #  read - the card run logged "continues from where the engine kept it" while its
+                            #  first PP reported reuse 0 - and "continues" is only ever claimed once the read
+                            #  has actually started reporting
+                            print(f"[saguaro] priority: the {PRIORITY_NAMES[prio]} prompt read continues "
+                                  f"from where the engine kept it", flush=True)
+                            resume_note = None
                     if guard is None:
                         yield t
                     elif t is None:
