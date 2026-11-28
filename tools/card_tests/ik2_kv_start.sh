@@ -133,8 +133,7 @@ else:
     _slot = [k for k in _env if k.endswith("_SLOT_DIR")]
     for _k in _slot:
         _env[_k] = sess
-    if not _slot:
-        args += ["--session-dir", sess]
+    # (no session setting at all: nothing to redirect - saguaro-ik2 has no --session-dir, it exits on one)
 cfg["args"] = args
 cfg["port"] = int(port)
 cfg.pop("api_key", None)                               # (a test copy: no key, the readiness poll needs none)
@@ -150,6 +149,7 @@ PYEOF
     for _ in $(seq 1 240); do
         curl -sf -o /dev/null "http://127.0.0.1:$PORT/metrics" 2>/dev/null && break
         kill -0 "$SRV_PID" 2>/dev/null || { echo "the server died; see $SRV"; exit 1; }
+        grep -q "the model failed to load" "$SRV" 2>/dev/null && { echo "the model failed to load; see $SRV / $LOG"; exit 1; }
         sleep 5
     done
     curl -sf -o /dev/null "http://127.0.0.1:$PORT/metrics" || { echo "the API did not come up in 20 min; see $SRV"; exit 1; }
