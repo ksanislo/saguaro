@@ -1744,7 +1744,9 @@ bool follow_map_locked(SlotPool& p, int64_t cells, std::vector<strata::core::Vmm
         for (int64_t c = c0; c < c1; ++c)
             if (!p.range.mapped(c)) fresh.push_back(c);
         if (fresh.empty()) continue;
-        if (!p.range.map_range(c0, c1, [&] { return gi < got.size() ? got[gi++] : (strata::core::VmmChunk) 0; })) {
+        // P124y: take_grown_chunk removes a handed chunk from `got`, so the caller's "what the map did
+        // not take" release loop (and this failure loop) never re-releases a handle the range holds.
+        if (!p.range.map_range(c0, c1, [&] { return strata::core::take_grown_chunk(got, gi); })) {
             report_vmm_grow_failure(dev, "mapped", (int64_t) fresh.size(), G, room);
             for (const int64_t c : fresh)   // what the probe promised but the map still could not take
                 if (const strata::core::VmmChunk h = p.range.unmap(c)) strata::core::vmm_chunk_free(h);
@@ -1964,7 +1966,7 @@ bool scores_grow_locked(ScoresPool& sp, int64_t cells, std::vector<strata::core:
     int64_t fresh = 0;
     for (int64_t c = 0; c < c1; ++c) fresh += !sp.range.mapped(c);
     size_t gi = 0;
-    if (!sp.range.map_range(0, c1, [&] { return gi < got.size() ? got[gi++] : (strata::core::VmmChunk) 0; })) {
+    if (!sp.range.map_range(0, c1, [&] { return strata::core::take_grown_chunk(got, gi); })) {   // P124y: hand the taken chunks over (see follow_map_locked)
         report_vmm_grow_failure(sp.range.device(), "mapped", fresh, G, room);   // P124e round 6: named, not silence
         g_dev_failed.store(true);
         return false;
@@ -2271,7 +2273,7 @@ bool qsa_rope_grow(const QsaState& st, int64_t cells) {
     std::lock_guard<std::mutex> lk(g_rope_mu);
     size_t i = 0;
     const int64_t had = r->cells;
-    if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) {
+    if (!rope_map(*r, cells, [&] { return strata::core::take_grown_chunk(got, i); })) {   // P124y: hand the taken chunks over
         report_vmm_grow_failure(dev, "mapped", need, G, room);   // P124e round 7: the rope map names its refusal too
         for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);   // (never handed to the map)
         g_dev_failed.store(true);
@@ -2351,7 +2353,7 @@ bool qsa_rope_yarn_fit(const QsaState& st, int64_t cells) {
     std::lock_guard<std::mutex> lk(g_rope_mu);
     size_t i = 0;
     const int64_t had = r->cells;
-    if (!rope_map(*r, cells, [&] { return i < got.size() ? got[i++] : (strata::core::VmmChunk) 0; })) {
+    if (!rope_map(*r, cells, [&] { return strata::core::take_grown_chunk(got, i); })) {   // P124y: hand the taken chunks over
         report_vmm_grow_failure(dev, "mapped", need, G, room);
         for (; i < got.size(); ++i) strata::core::vmm_chunk_free(got[i]);   // (never handed to the map)
         g_dev_failed.store(true);
