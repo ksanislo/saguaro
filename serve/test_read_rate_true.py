@@ -359,7 +359,7 @@ class MangonelTrueReadout(Base):
 
 class CardTrueReadout(Base):
     """P124v2 review round 4 (the manager's card run, saguaro/rc124-cand2): replay of the recorded
-    /metrics timeline serve/testdata/card-rc2-read-rate-timeline.txt - a fresh 27,299-token read on
+    /metrics timeline serve/fixtures/card-rc2-read-rate-timeline.txt - a fresh 27,299-token read on
     the card's Q4 QFN config, polled 4x a second: the client got its answer in 17.8 s (7 tokens)
     and the engine's own summary (the last prefill_tok_s_mean, 1,582.9 over 27,292 read) says the
     TRUE read is ~1,580 tok/s; the Monitor at the time showed mean ~2,393 (+51 %), MAX 9,881 (6x),
@@ -381,7 +381,7 @@ class CardTrueReadout(Base):
     (read_pos never steps down, the open interval is never re-opened), and the peak it feeds
     (the same readout, windows >= 5 s) stays under 1.25 x 1,580."""
 
-    FIXTURE = ROOT / "serve" / "testdata" / "card-rc2-read-rate-timeline.txt"
+    FIXTURE = ROOT / "serve" / "fixtures" / "card-rc2-read-rate-timeline.txt"
     TOTAL = 27299                 # prompt_total on the timeline
     TARGET = 1580.0               # the client's figure (27,299 read in 17.8 s; engine 1,582.9)
     BEAT_MS = 230                 # the engine's recorded RHB cadence

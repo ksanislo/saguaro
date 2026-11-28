@@ -4518,7 +4518,7 @@ class Service:
         over the time since THIS read started - the read's OWN elapsed span: now minus its own
         start, legs summed, staging left out, the engine's own read_ms pair as the floor.  Never an
         interval rate and never a figure measured from a re-baselined start: the card rc2 read
-        (serve/testdata/card-rc2-read-rate-timeline.txt: the client's 17.8 s / 27,299 tokens, the true
+        (serve/fixtures/card-rc2-read-rate-timeline.txt: the client's 17.8 s / 27,299 tokens, the true
         ~1,580) showed ~2,393 mean and a 9,881 max - the shape an interval readout after a false
         mid-read restart would give ((tokens since the restart) / (the ~0.5 s since it)); the capture
         held no RHB lines and the replay that first blamed a whole-cut step falling below the booked
