@@ -4622,7 +4622,28 @@ class Service:
         new = hb.get("new") or 0
         if chunk > 0 and pr and pr[1] > 0 and hb.get("stage") != "stage" and new > n and pos0 is not None \
                 and pos0 - (hb.get("reused") or 0) == n:
-            n = int(n + min(chunk, new - n) * min(1.0, max(0.0, pr[0] / pr[1])))
+            frac = min(1.0, max(0.0, pr[0] / pr[1]))
+            # P124v2 (review round 5, P2): on a layer split this guard holds for EVERY card beating the
+            # unit in flight (read_progress.hpp:89-101: no part credit while no boundary above the
+            # reporting card's position has been revealed, so done stands exactly at the unit start for
+            # all of them) - and the belt below keeps the MAX of their shares, so the counter would
+            # follow the leading card, up to a whole unit of tokens over the engine's own cross-card
+            # figure.  A pass fraction that comes back DOWN on the SAME unit is two cards reporting it
+            # (one card's passes never go back): flag the read - from the flag on no share is added
+            # anywhere in it and the counter follows the engine's own figure, which is never behind its
+            # own steps.  Until a lower fraction lands the cards are indistinguishable from a single
+            # card (the line carries no card id) - what was booked for that unit stands, and a later
+            # step below it corrects DOWN in _note_read, it does not re-open the read (P1).
+            unit = getattr(stat, "read_share_unit", None)
+            if unit is None or unit[0] != pos0:
+                unit = [pos0, frac]
+            elif frac < unit[1]:
+                stat.read_split_share = True
+            if frac > unit[1]:
+                unit[1] = frac
+            stat.read_share_unit = unit
+            if not getattr(stat, "read_split_share", False):
+                n = int(n + min(chunk, new - n) * frac)
         if n > 0:
             if n < stat.read_pos:
                 # P124v2 (review round 2): the booking is belted like the engine belts done= - a beat never

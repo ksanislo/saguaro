@@ -12,6 +12,7 @@ and two reads at once must sum.  A stalled read's rate must FALL, not freeze at 
 """
 from __future__ import annotations
 
+import bisect
 import queue
 import re
 import sys
@@ -573,6 +574,111 @@ class CounterFallsRestartOrCorrectDown(Base):
         eng.feed(7, "BRA 7 1 prompt=9216 reused=0 read_ms=4500.0 stage_ms=0")
         self.assertTrue(eng.step(it)["start"])
         self.assertEqual(self.svc._read_counted(stat), 9216)              # BRA's exact tops it up, right
+
+
+class SplitReadFollowsEngineFigure(Base):
+    """P124v2 review round 5 (P2): a two-card layer split (each card half the layers, 78 passes each), one
+    fresh 13,824-token read in three 4,608-token units, replayed as the engine really prints it: RHB lines
+    every 230 ms from EITHER card's host points, done= the read's ONE shared figure - ReadProgress
+    (engines/qfn/include/strata/program/read_progress.hpp) gives no part credit while no boundary above a
+    card's unit position has been revealed, so between boundaries done == pos0 - reused for BOTH cards and
+    their pass fractions differ - and BRP steps carrying that figure at the chunk ends.  Before this round
+    every such beat added its own share and the belt kept the MAX: the counter followed the leading card,
+    up to a whole unit of tokens above the engine's own cross-card figure, and the figure's next step below
+    it was the fall P1 talks about.  A pass fraction coming back DOWN on the same unit (the lagging card
+    reports) flags the read: from there no share is added and the counter follows the engine's figure,
+    never above it.  Gates: once the engine has printed a cumulative figure, the counted tokens never
+    exceed it at any sample; read_pos never steps back, the open interval is never re-opened, engine_t0
+    never moves; and the read closes at exactly 13,824."""
+
+    NEW = 13824
+    U = 4608
+    PASSES = 78
+
+    def seq(self):
+        """(engine_cum, line) in clock order; the RHB done= fields come from a faithful replica of
+        ReadProgress::refresh_ (two cards x 78 layers of 156): the same host points in the same order."""
+        cards, bounds, full, best, evs = {}, [], 0, 0, []
+
+        def m():                                        # the engine's own clock: 230 ms per printed line
+            return 1000 + 230 * len(evs)
+
+        def report(card, pos0, pi):
+            nonlocal best
+            cards[card] = (pos0, pi)
+            if pos0 not in bounds:
+                bisect.insort(bounds, pos0)
+            s = 0.0
+            for p0, k in cards.values():
+                i = bisect.bisect_right(bounds, p0)
+                b = bounds[i] if i < len(bounds) else p0
+                s += p0 * self.PASSES + (b - p0) * k
+            best = max(best, full, int(s / (2 * self.PASSES) + 0.5))
+            return best
+
+        def beat(card, pos0, pi):
+            d = report(card, pos0, pi)
+            evs.append((d, f"RHB rid=0 stage=read done={d} new={self.NEW} reused=0 pass={pi}/{self.PASSES} "
+                           f"ms={m()} stage_ms=0 pos0={pos0} chunk={self.U if pos0 < self.NEW else 0} slot=7"))
+
+        # unit 0: card A first (share booked: one card is indistinguishable from two until B's lower
+        # fraction lands), then card B's lagging beat - the flag
+        for pi in (10, 20, 30, 40):
+            beat("A", 0, pi)
+        beat("B", 0, 5)                                   # fraction DOWN on the same unit: split flagged
+        beat("A", self.U, 1)                              # A crosses: B gets part credit, done moves above 0
+        beat("B", 0, 20)
+        beat("A", self.U, 50)
+        for pi in (40, 60):
+            beat("B", 0, pi)
+        beat("A", self.U, 70)
+        full = self.U
+        evs.append((full, f"BRP 7 {full} {self.NEW} {m()} {full / (m() / 1000.0):.1f} "
+                          f"new_read={full} read_ms={m()}.0 stage_ms=0"))
+        # unit 1: both cards aligned on it - the guard holds for every beat, and with the flag none of
+        # them books a share (unflagged, A's 40/78 would have booked 6,971 above the engine's 4,608)
+        beat("B", self.U, 1)
+        beat("A", self.U, 40)
+        beat("B", self.U, 10)
+        beat("A", 2 * self.U, 1)
+        beat("B", self.U, 40)
+        full = 2 * self.U
+        evs.append((full, f"BRP 7 {full} {self.NEW} {m()} {full / (m() / 1000.0):.1f} "
+                          f"new_read={full} read_ms={m()}.0 stage_ms=0"))
+        beat("B", 2 * self.U, 1)
+        beat("A", 2 * self.U, 40)
+        full = self.NEW
+        evs.append((full, f"BRP 7 {full} {self.NEW} {m()} {full / (m() / 1000.0):.1f} "
+                          f"new_read={full} read_ms={m()}.0 stage_ms=0"))
+        evs.append((full, f"BRA 7 1 prompt={self.NEW} reused=0 read_ms={m()}.0 stage_ms=0"))
+        return evs
+
+    def test_the_split_counter_never_exceeds_the_engine_s_figure(self):
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        prev_pos, cum, leg0, t0 = 0, 0, None, None
+        for cum_line, line in self.seq():
+            cum = max(cum, cum_line)
+            eng.feed(7, line)
+            if not line.startswith("BRA"):
+                self.assertIsNone(eng.step(it))
+            if leg0 is None:                            # (the first step opens the read: _admission_wait
+                leg0, t0 = id(stat.read_cur), stat.engine_t0   #  only runs its body - the start hook - there)
+                self.assertIsNotNone(leg0)
+            else:
+                self.assertEqual(id(stat.read_cur), leg0, f"{line[:18]}: the open interval was re-opened")
+                self.assertEqual(stat.engine_t0, t0, f"{line[:18]}: engine_t0 moved - a restart")
+            self.assertGreaterEqual(stat.read_pos, prev_pos,
+                                    f"{line[:18]}: read_pos went back ({prev_pos} -> {stat.read_pos})")
+            prev_pos = stat.read_pos
+            if cum > 0:                                   # (the engine's own cumulative figure, at every
+                self.assertLessEqual(svc_count := self.svc._read_counted(stat), cum,   #  sample, once it has
+                                     f"{line[:18]}: counted {svc_count} over the engine's {cum}")   # one)
+            self.tick(0.23)
+        self.assertEqual(self.svc._read_counted(stat), self.NEW)      # closed exact on the BRA
+        self.assertEqual(stat.read_pos, self.NEW)
 
 
 class PeaksTellTheTruth(Base):
