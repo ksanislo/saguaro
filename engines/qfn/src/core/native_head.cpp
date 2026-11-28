@@ -1,4 +1,5 @@
 #include "strata/core/native_head.hpp"
+#include "strata/core/devnotes.hpp"
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -53,9 +54,13 @@ bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int6
         }
         void* weights = nullptr;
         void* scratch = nullptr;
-        cudaError_t status = cudaMalloc(&weights, bytes);
-        if (status == cudaSuccess)
-            status = cudaMalloc(&scratch, strata::kernels::native_q8_1_bytes((int) n_in, 1));
+        cudaError_t status;
+        {   // P124e (round 5, manager card): accounted by name (the load's table before the expert cache sizes)
+            const strata::core::DeviceNote head_note("the native head (output.weight on the card)", bytes);
+            status = cudaMalloc(&weights, bytes);
+            if (status == cudaSuccess)
+                status = cudaMalloc(&scratch, strata::kernels::native_q8_1_bytes((int) n_in, 1));
+        }
         strata::platform::advise_willneed(gguf.tensor_data(*tensor), bytes);
         if (status == cudaSuccess)
             status = cudaMemcpy(weights, gguf.tensor_data(*tensor), bytes, cudaMemcpyHostToDevice);

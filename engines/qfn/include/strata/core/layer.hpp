@@ -252,6 +252,10 @@ struct QsaState {
     /// SAGUARO_KV_HOST_ELASTIC: an elastic slot state's KV-streaming host copy has addresses for the whole context and
     /// RAM pinned only as far as qsa_host_grow has reached - its index in layer.cpp's registry; -1: pinned whole.
     int32_t host_elastic = -1;
+    /// P124e (round 4, manager card test): this streamed state's context-scaled device arrays (page table, pooled
+    /// indexer keys) live in a FOLLOW pool (qsa_set_vram_elastic): addresses for the whole context, VRAM for the
+    /// start step, grown with the conversation by qsa_follow_grow - its index in layer.cpp's pool registry; -1: carved.
+    int32_t follow_elastic = -1;
     strata::kernels::KvHostPools host;
     strata::kernels::KvStreamMap map;
     int64_t idx_pooled_rows = 0;     ///< rows of `idx_pooled` (a ring, which has no indexer, keeps 2)
@@ -292,7 +296,7 @@ struct QsaState {
 /// `elastic_slot`: a --batch slot's state whose arrays larger than one VMM chunk (the K/V pool slots, the indexer's
 /// pooled rows) get addresses of their own and no memory until qsa_slots_grow backs them (CUDA, a VMM device).
 uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_rope = true, int64_t ring_cells = 0,
-                         bool elastic_slot = false);
+                         bool elastic_slot = false, bool follow = false);
 /// KV streaming: keep `cells` cells of each QSA layer in VRAM and the rest in pinned host memory (0: all in VRAM,
 /// the default). Set before sizing and initializing the session; a context that fits in `cells` is not streamed.
 /// Also puts the MTP drafter's K/V in a ring of its window (`ring_cells` of qsa_state_bytes/init; -1 forces a fully
@@ -327,16 +331,88 @@ uint64_t qsa_kv_host_bytes();
 uint64_t qsa_kv_bytes_per_cell(const ModelGeometry& g);
 /// The host copies' addresses (pinned or not): what a host copy pinned whole would take.
 uint64_t qsa_kv_host_reserved_bytes();
+/// One growth step across every elastic host copy, in bytes (P124e round 12): the lead the copies run ahead of
+/// their conversations with.  The P124x resident-budget margin counts qsa_kv_host_bytes() + this - what the
+/// copies COMMIT - and never the reserved ceiling (resident_policy.hpp's committed_kv_bytes).
+uint64_t qsa_kv_host_step_bytes();
 /// SAGUARO_KV_HOST_ELASTIC: the states qsa_state_init makes from now on with a streamed host copy (not only the elastic
 /// slots') get one that grows (session_host_fit); --serve sets it around the solo session and the stages' sessions.
 void qsa_set_host_elastic_main(bool on);
+/// ... and around the --batch slot sessions and their drafters (P124e manager card test: at load every conversation
+/// holder pins the small start, not the whole --max-context - the slots' host copies grow with their conversations
+/// whatever the VRAM ring does).  Off again once the slots are built: later states pin whole as before.
+void qsa_set_host_elastic_slots(bool on);
+/// Cells an elastic host copy is pinned for now (-1: not elastic - pinned whole).  Together with
+/// qsa_host_step_cells() (the step in cells; INT64_MAX where elastic host copies do not exist) this answers
+/// "is this copy already backed for `cells` / does it hold more than its start" without growing anything.
+int64_t qsa_host_backed_cells(const QsaState& st);
+int64_t qsa_host_step_cells();
 /// ... and their VRAM K/V pools and pooled indexer keys in a slot pool of their own (backed as the context grows:
 /// session_vram_fit; the first cells at once, from new chunks: they are used before a slot budget exists).
 void qsa_set_vram_elastic_main(bool on);
+/// P124e (manager card test, round 4): THE VRAM HALF OF THE HOST-ELASTIC RULE.  With it on (generate.cpp sets it
+/// around the conversation holders' states where SAGUARO_KV_HOST_ELASTIC is on, KV streaming runs, the card does
+/// VMM, and the expert cache can give the room back), a streamed state's arrays that scale with --max-context -
+/// the page table and the indexer's pooled keys (and the session's block-score scratch) - get addresses for the
+/// whole context and PHYSICAL VRAM only for the start step (the same ~32768 cells the host copy pins), and grow /
+/// give way with the conversation from new chunks (`vmm_chunk_new`), the card's expert cache giving way (the
+/// `vram_relief` hook) when the card has nothing free.  The K/V ring itself is window-sized whatever --max-context
+/// says, so it stays carved; only what follows the CONTEXT follows the conversation.  A state's page table is
+/// written (reset, ring fill) and read only below its live cells, and pooled rows likewise, so an unmapped tail
+/// is never touched; a fresh chunk arrives filled (pending / ring formula) as `SlotArray::fill` says.
+void qsa_set_vram_elastic(bool on);
+/// The rule is ON (scoped like qsa_set_host_elastic_main) and this card can do it.
+bool qsa_vram_follow_wanted();
+/// The load decided the context state cannot grow (no relief will ever come): back it whole and turn the rule off
+/// for the process.  Grows and trims become no-ops, the extents answer "always backed" - today's behaviour.
+void qsa_vram_follow_off();
+/// At least one follow pool exists (the cache must be in VMM, the relief hook must be installed).
+bool qsa_vram_follow_active();
+/// P124e (round 5, manager card): why the rule does NOT run - the load's one line says ENGAGED or fell back with
+/// this (nullptr when the rule wants to run: the decision then is the give path's, made in generate.cpp).
+const char* qsa_vram_follow_why();
+/// A state whose pool is a follow pool (its drafter's state follows when its session's primary does).
+bool qsa_state_follow(const QsaState& st);
+/// How far a streamed state's page table may be written now (P124e: a follow pool's is filled chunk by chunk;
+/// kv_stream_reset must stay inside what is mapped).  Its whole extent for a carved table.
+int64_t qsa_table_backed_pages(const QsaState& st);
+/// The cells a follow state's pooled arrays cover now (INT64_MAX: not a follow state).
+int64_t qsa_follow_backed_cells(const QsaState& st);
+/// Backs `cells` cells from new chunks; the card's relief once when the driver refuses.  False: the VRAM is not
+/// there (nothing of the failed step stays mapped); sets the "VRAM, not RAM" flag (qsa_dev_pin_failed).
+bool qsa_follow_grow(const QsaState& st, int64_t cells);
+/// ... at an explicit extent (qsa_follow_grow floors at the start step; the give-back on trim calls it directly).
+bool qsa_follow_grow_at(const QsaState& st, int64_t cells);
+/// The state's first start step, from the driver's own room (no relief: called while the card is being built).
+bool qsa_follow_start(const QsaState& st);
+/// Unmaps what `cells` cells do not need, the chunks freed to the driver (no budget); returns the bytes.
+uint64_t qsa_follow_trim(const QsaState& st, int64_t cells);
+/// Backs the whole context now (the fallback when no relief can come: the give path is off).
+bool qsa_follow_back_whole(const QsaState& st);
+/// The last qsa_follow_grow failed on VRAM (a "no room" after it means the card, not the RAM).
+bool qsa_dev_pin_failed();
+/// The bytes of one follow state's pooled arrays at the full context (the load line's "if one conversation grew").
+uint64_t qsa_follow_reserved_bytes(const QsaState& st);
+/// ... and backed now (all follow states).
+uint64_t qsa_follow_backed_bytes();
+/// The session's block-score scratch (one fp32 per cell): addresses + the start step now, before qsa_buffers_init
+/// carves its arena (which then skips the scratch).  -1: not made - carve it whole as always.
+int32_t qsa_scores_make(int64_t cells);
+float* qsa_scores_base(int32_t i);
+bool qsa_scores_grow(int32_t i, int64_t cells);
+uint64_t qsa_scores_trim(int32_t i, int64_t cells);
+bool qsa_scores_back_whole(int32_t i, int64_t cells);
+uint64_t qsa_scores_reserved_bytes(int32_t i);
+uint64_t qsa_scores_backed_bytes(int32_t i);
 /// A slot pool backed for `cells` from new chunks of its device (not a budget): a solo session's first cells.
 bool qsa_slots_grow_fresh(const QsaState& st, int64_t cells);
 /// The last qsa_host_grow found no RAM to pin (what a "no room" after a failed slot growth means: RAM, not VRAM).
 bool qsa_host_pin_failed();
+/// P124e round 2: the elastic host copies register ONE prefix per array, so an elastic state's `host` pointers are
+/// the DEVICE bases cudaHostGetDevicePointer answered with - not the arrays' CPU addresses (a card that cannot use
+/// a registered page's host address; flat-VA cards answer with the host address and pick the pieces mode instead).
+/// A CPU memcpy through such a pointer is a GPU-alias access: only driver copies may touch those bytes.
+bool qsa_host_elastic_prefix();
 /// SAGUARO_KV_HOST_ELASTIC: an elastic state's host copy pinned for its first `cells` cells (whole steps of
 /// SAGUARO_KV_HOST_STEP cells); false: RAM or the driver refused (nothing of the failed step stays pinned).
 bool qsa_host_grow(const QsaState& st, int64_t cells);
@@ -351,6 +427,10 @@ void qsa_rope_release(const float* cos_tab);
 void qsa_set_rope_yarn(const strata::kernels::RopeScaling* yarn);
 bool qsa_rope_yarn_fit(const QsaState& st, int64_t cells);
 int64_t qsa_rope_yarn_need(const QsaState& st, int64_t cells);
+/// P124e (round 8, manager card): the positions the table `st` reads is BACKED for now (P124e: its whole extent when
+/// it is not a grown table; `yarn` asks the SAGUARO_YARN_ELASTIC table instead of the plain one).  A read at the
+/// YaRN level rotates position p through row p: past this many rows the table's VMM tail is unmapped.
+int64_t qsa_rope_backed_cells(const QsaState& st, bool yarn);
 /// No YaRN conversation is live: every YaRN table's chunks back to its card's slot budget (or freed).  Returns them.
 int64_t qsa_rope_yarn_trim();
 /// One conversation's stored keys from plain RoPE (as the kernels computed it) to the YaRN level, its first `cells`
@@ -384,7 +464,8 @@ inline int qsa_kv_format(const QsaState& st) {
 }
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
                         const QsaState* share_rope = nullptr, int64_t ring_cells = 0, bool elastic_slot = false,
-                        bool host_elastic = false);   // a ring (the drafter's) whose host copy grows with its slot
+                        bool host_elastic = false,   // a ring (the drafter's) whose host copy grows with its slot
+                        bool follow = false);        // P124e: and its context-scaled arrays in a follow pool (its own)
 /// THE ELASTIC SLOT STATES' MEMORY.  Each device has a budget of physical chunks made once (qsa_slot_budget_add) that its
 /// slot states map as their conversations grow and give back when trimmed.
 uint64_t qsa_slot_budget_add(int dev, uint64_t bytes);   ///< returns the bytes made
@@ -402,6 +483,11 @@ int64_t qsa_slot_budget_release(int dev, int64_t n);
 using VramRelief = std::function<uint64_t(int dev, uint64_t bytes)>;
 void set_vram_relief(VramRelief f);
 uint64_t vram_relief(int dev, uint64_t bytes);
+/// P124e host relief: a K/V host-copy grow (qsa_host_grow) that the RAM refuses asks for `bytes`; the server's handler
+/// gives the resident expert tier's coldest bytes back; returns the bytes freed, 0 when none.
+using HostRelief = std::function<uint64_t(uint64_t bytes)>;
+void set_host_relief(HostRelief f);
+uint64_t host_relief(uint64_t bytes);
 /// Chunks the states still lack to hold `cells` cells.
 int64_t qsa_slots_need(const std::vector<const QsaState*>& states, int64_t cells);
 /// Backs `cells` cells in every state (all on one device): all or nothing, false when the budget is short.  New chunks
@@ -467,7 +553,10 @@ struct QsaBuffers {
 };
 
 uint64_t qsa_buffers_bytes(const ModelGeometry& g, int64_t max_cells);
-uint64_t qsa_buffers_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaBuffers& b);
+/// `cell_scores_follow` (P124e): the block-score scratch's address in the session's follow range (qsa_scores_make) -
+/// qsa_buffers_bytes left its bytes out of the arena for it.  Null: carve the scratch in the arena, as always.
+uint64_t qsa_buffers_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaBuffers& b,
+                          float* cell_scores_follow = nullptr);
 
 /// `x` (n_embd f32) through one QSA layer to `out` (n_embd f32) at sequence position `pos`.
 ///

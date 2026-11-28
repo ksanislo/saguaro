@@ -13,6 +13,12 @@ struct SlotArray {
     int64_t units = 0;       ///< units at the full context
     bool kv = true;          ///< the units are K/V page slots (else pooled rows)
     uint64_t off = 0;        ///< offset in the range, whole chunks (slot_layout)
+    /// P124e (VRAM follows use): what the engine writes into a freshly mapped chunk of THIS array.  A zeroed page
+    /// table would name slot 0 for pages that are not resident and (for a ring) read as the wrong slot, so the
+    /// fill is per array, run over the fresh chunks' unit span right after the grow maps them.
+    int fill = kSlotFillZero;
+    int64_t ring_slots = 0;  ///< kSlotFillRing: the ring's slot count (`block % ring_slots`)
+    enum : int { kSlotFillZero = 0, kSlotFillPending = 1, kSlotFillRing = 2 };
 };
 
 /// Only an array larger than one chunk is worth a range of its own; the rest are carved as before.

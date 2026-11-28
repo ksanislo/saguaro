@@ -216,6 +216,12 @@ public:
     /// A file-backed source: this expert lives in VRAM, so its pages need not stay in RAM - hand them back to the
     /// kernel (a later read re-reads the file; no result depends on it).  Returns the bytes released; 0 elsewhere.
     virtual uint64_t release(int64_t layer, int64_t expert) { (void) layer; (void) expert; return 0; }
+    /// P124e: the resident RAM tier gives way to a growing conversation's K/V - at least `bytes` of its coldest
+    /// resident experts handed back (their reads fall back to the files; no result depends on them).  Returns the
+    /// bytes given back, 0 when the tier cannot shrink (nothing resident, pinned whole, or no handler).  May wait
+    /// a grace window for CPU readers that latched a trimmed blob before its offset was trimmed; the caller must
+    /// have the devices quiet, and the engine holds it as a slow path (a K/V pin that RAM refused).
+    virtual uint64_t relieve_ram(uint64_t bytes) { (void) bytes; return 0; }
     /// Whether the verify window may give the GPU a PCIe share of this layer's misses at all (each expert is still
     /// checked with `pinned`).  The arena answers per layer through its expert 0; the resident RAM mode's compact
     /// copy has no expert 0 when the GPU cache holds it, so it answers for the whole copy.
@@ -902,6 +908,9 @@ public:
     /// Windows, opt-in with SAGUARO_FILE_RELEASE=1: trim the file mapping's full pages after their expert reaches
     /// VRAM. Never touches the resident complement or staging buffers. Disabled by default.
     uint64_t release(int64_t layer, int64_t expert) override;
+    /// P124e: give the resident complement's coldest experts back to the OS (madvise, and their working-set lock
+    /// undone) so a growing conversation's K/V can be pinned; reads of a trimmed expert go back to the files.
+    uint64_t relieve_ram(uint64_t bytes) override;
     bool pinned(int64_t layer, int64_t expert) const override;
     const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
     bool pcie_layer(int64_t layer) const override;
@@ -1193,6 +1202,10 @@ private:
     const uint8_t* complement_device_ = nullptr;
     uint64_t complement_bytes_ = 0;
     std::vector<uint64_t> complement_offsets_;
+    mutable std::mutex complement_mu_;          ///< P124e r2: relief's phase-1 offset trims (relieve_ram) are excluded
+                                                ///< with every complement_offsets_ writer (commit_exchanges,
+                                                ///< commit_flip, install_resident), or a writer adopts a just-freed
+                                                ///< place and phase 2 zeroes the expert it named there
     detail::ExchangeStorage exchange_storage_; // authoritative when active; original arenas still own memory
     bool complement_pinned_ = false;
     bool complement_partial_ = false;         ///< CS-T: only the first complement_pin_limit_ bytes are registered

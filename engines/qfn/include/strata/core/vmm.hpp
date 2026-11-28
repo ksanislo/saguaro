@@ -2,10 +2,14 @@
 // CUDA virtual memory (the elastic K/V, --kv-grow; the elastic --batch slot sessions): an address range reserved once, whose physical memory is mapped and
 // unmapped in chunks of the device's granularity (2 MiB).  The K/V pools grow with the context by taking chunks the
 // expert cache gives up, and neither moves: every captured graph and stored pointer stays valid.  The driver calls
-// are reached through the runtime's entry-point query, so nothing links the driver library.  Not under HIP.
+// are reached through the runtime's entry-point query, so nothing links the driver library.  Under HIP (ROCm 6+) the
+// same range runs on hipMemAddressReserve / hipMemCreate where the card reports it; vmm_reason() says which cards
+// do and which do not (P124e round 5: the load's one line says ENGAGED or fell back with this).
 
 #include <cstdint>
 #include <vector>
+
+#include "strata/core/va_debug.hpp"   // SAGUARO_DEBUG_VA (manager card 12b/B1): the op lines
 
 namespace strata::core {
 
@@ -14,11 +18,19 @@ using VmmChunk = unsigned long long;
 
 /// Device `dev` (-1: the current one) supports it and the entry points resolved.
 bool vmm_available(int dev = -1);
+/// P124e (round 5, manager card): the load's one line says whether the elastic VRAM path is ENGAGED or fell back -
+/// this is its reason.  A static string: what vmm_available() found (the check runs once per device, and the
+/// failure that stands is the one kept): "available ..." when it does, otherwise why it does not.
+const char* vmm_reason(int dev = -1);
 /// That device's chunk size (0 when not available).
 uint64_t vmm_granularity(int dev = -1);
 /// A new physical chunk on device `dev` (-1: the current one; 0: out of memory), and its release.
 VmmChunk vmm_chunk_new(int dev = -1);
 void vmm_chunk_free(VmmChunk h);
+/// P124e (round 6, manager card): what the last failing driver call of this thread said - the call and the
+/// driver's own words ("cuMemCreate: out of memory"), "" when nothing failed since.  A driver-API refusal
+/// never sets cudaGetLastError(), which is why a refused map used to read as cudaGetErrorString's "no error".
+const char* vmm_last_error();
 
 class VmmRange {
 public:
@@ -42,6 +54,10 @@ public:
     template <class Take> bool map_range(int64_t lo, int64_t hi, Take take);
     /// Unmaps chunk i and hands back its physical chunk (0 when it was not mapped).
     VmmChunk unmap(int64_t i);
+    /// SAGUARO_DEBUG_VA: who owns this range - the name in every op line ("rope cos", "follow pool", ...).
+    /// Set it BEFORE reserve(): the reserve line carries it too.  A string literal (never freed).
+    void set_va_tag(const char* tag) { va_tag_ = tag; }
+    const char* va_tag() const { return va_tag_; }
 
 private:
     bool map_one(int64_t i, VmmChunk h);
@@ -49,19 +65,27 @@ private:
     /// Readable and writable [lo, hi) (all newly mapped); when that fails they are unmapped and freed again, so no
     /// chunk counts as mapped without access.
     bool commit_run(int64_t lo, int64_t hi);
+    /// (SAGUARO_DEBUG_VA) One "map" line naming [lo, hi) when this call mapped anything (the header side, shared
+    /// by the CUDA and HIP backends; the reserve/unmap/release lines live with their driver calls).
+    void va_note_map(int64_t lo, int64_t hi, int64_t fresh) const {
+        if (fresh <= 0 || base_ == 0) return;
+        va_log("map", dev_, (uint64_t) base_ + (uint64_t) lo * gran_, (uint64_t) (hi - lo) * gran_, va_tag_);
+    }
     unsigned long long base_ = 0;
     uint64_t gran_ = 0;
     int dev_ = -1;
     std::vector<VmmChunk> h_;   // per chunk: its physical chunk, 0 = unmapped
+    const char* va_tag_ = "vmm";   // (SAGUARO_DEBUG_VA: the owner's name; set_va_tag before reserve)
 };
 
 template <class Take> bool VmmRange::map_range(int64_t lo, int64_t hi, Take take) {
     lo = lo < 0 ? 0 : lo;
     hi = hi > chunks() ? chunks() : hi;
     int64_t run = -1;   // access is set once per run of newly mapped chunks (it costs as much as the map)
+    int64_t fresh = 0;  // (SAGUARO_DEBUG_VA: chunks this call mapped - one "map" line names the run)
     for (int64_t i = lo; i < hi; ++i) {
         if (mapped(i)) {
-            if (run >= 0 && !commit_run(run, i)) return false;
+            if (run >= 0 && !commit_run(run, i)) return false;   // (the run came back unmapped: nothing to note)
             run = -1;
             continue;
         }
@@ -69,12 +93,15 @@ template <class Take> bool VmmRange::map_range(int64_t lo, int64_t hi, Take take
         if (h == 0) h = vmm_chunk_new(dev_);
         if (h == 0 || !map_one(i, h)) {
             if (h != 0) vmm_chunk_free(h);
-            if (run >= 0) commit_run(run, i);
+            if (run >= 0) { commit_run(run, i); va_note_map(run, i, fresh); }   // (what landed stays landed)
             return false;
         }
+        ++fresh;
         if (run < 0) run = i;
     }
-    return run < 0 || commit_run(run, hi);
+    const bool ok = run < 0 || commit_run(run, hi);
+    va_note_map(run < 0 ? lo : run, hi, fresh);
+    return ok;
 }
 
 }  // namespace strata::core

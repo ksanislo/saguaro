@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 // `_mm_pause` for the doorbell spin.  Guarded because it is x86-only; a target without it still builds, the
@@ -136,6 +137,16 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     const uint64_t first = qsa_state_bytes(g, max_cells, true), rest = qsa_state_bytes(g, max_cells, false);
     s.qsa_state_arena = take(g.n_qsa_layers() > 0 ? first + (uint64_t) (s.qsa_alloc - 1) * rest : 0);
     s.qsa_states = new QsaState[(size_t) g.n_qsa_layers()]();
+    // P124e (round 4): the block-score scratch (one fp32 per cell of the selection) is part of the context, not of
+    // the session's fixed shape: with the VRAM-follow rule on it gets addresses + the start step here, and
+    // qsa_buffers_bytes left its bytes out of the arena.  (It grows with the host copies: session_host_fit.)
+    if (qsa_vram_follow_wanted() && g.n_qsa_layers() > 0) {
+        s.scores_elastic = qsa_scores_make(max_cells);
+        if (s.scores_elastic < 0) {
+            std::fprintf(stderr, "saguaro: the block-score scratch's device addresses failed\n");
+            return 0;
+        }
+    }
     s.qsa_buf_arena = take(qsa_buffers_bytes(g, max_cells));
 
     uint8_t* qp = (uint8_t*) s.qsa_state_arena;
@@ -145,7 +156,8 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
         if (qsa_state_init(g, max_cells, qp + (j == 0 ? 0 : first + (uint64_t) (j - 1) * rest),
                            s.qsa_states[s.qsa_ord0 + j], j == 0 ? nullptr : &s.qsa_states[s.qsa_ord0]) == 0)
             return 0;
-    qsa_buffers_init(g, max_cells, s.qsa_buf_arena, s.qsa_bufs);
+    qsa_buffers_init(g, max_cells, s.qsa_buf_arena, s.qsa_bufs,
+                     s.scores_elastic >= 0 ? qsa_scores_base(s.scores_elastic) : nullptr);
 
     s.moe_arena = take(moe_buffers_bytes(g, k));
     moe_buffers_init(g, k, s.moe_arena, s.moe);
@@ -158,8 +170,70 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     return used;
 }
 
+bool session_host_elastic(const SessionState& s) {
+    if (s.scores_elastic >= 0) return true;   // P124e round 4: the scratch follows too (it lives in a follow range)
+    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
+        if (s.qsa_states[s.qsa_ord0 + j].host_elastic >= 0 || s.qsa_states[s.qsa_ord0 + j].follow_elastic >= 0)
+            return true;
+    return s.host_follow != nullptr &&
+           (s.host_follow->host_elastic >= 0 || s.host_follow->follow_elastic >= 0);
+}
+
+int64_t session_host_backed_cells(const SessionState& s) {
+    if (!session_host_elastic(s)) return -1;   // every copy pinned whole: always backed
+    int64_t n = std::numeric_limits<int64_t>::max();
+    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j) {
+        const QsaState& st = s.qsa_states[s.qsa_ord0 + j];
+        const int64_t c = qsa_host_backed_cells(st);
+        if (c >= 0) n = std::min(n, c);
+        // P124e (round 4): a window must not touch cells the DEVICE state has not mapped either (same fit grows
+        // both halves, so this min is the same number in practice - the guard is for a failed half-grow).
+        n = std::min(n, qsa_follow_backed_cells(st));
+    }
+    if (s.host_follow != nullptr) {
+        const int64_t c = qsa_host_backed_cells(*s.host_follow);
+        if (c >= 0) n = std::min(n, c);
+        n = std::min(n, qsa_follow_backed_cells(*s.host_follow));
+    }
+    return n;
+}
+
+int64_t session_backed_cells(const SessionState& s) {
+    // P124e (round 8, manager card): every array a prompt read indexes by cell, in ONE number: the pinned host
+    // copy and the device follow state (session_host_backed_cells) AND the RoPE rows the read rotates positions
+    // through - the tables are registered for the whole context while only their backed prefix is mapped.
+    int64_t n = session_host_backed_cells(s);
+    n = n < 0 ? std::numeric_limits<int64_t>::max() : n;
+    if (s.qsa_states != nullptr && s.qsa_alloc > 0) {
+        const QsaState& p0 = s.qsa_states[s.qsa_ord0];   // (the stage's tables, shared: the first state's)
+        n = std::min(n, qsa_rope_backed_cells(p0, false));
+        if (s.rope_level) n = std::min(n, qsa_rope_backed_cells(p0, true));
+    }
+    return std::min(n, s.max_cells);
+}
+
 bool session_slot_fit(SessionState& s, int64_t cells, bool trim) {
-    if (s.slot_cells < 0) return true;
+    if (s.slot_cells < 0) {
+        // P124e (manager card test, 11-26): not an elastic-VRAM slot (SAGUARO_ELASTIC_SLOTS off, or no VMM on the
+        // card) - but its HOST copies can still grow with the conversation (qsa_set_host_elastic_slots): the same
+        // helper and the same step as the solo session's, given back on trim.  P124e round 4: session_host_fit is
+        // both halves now - it grows/trims the follow pools, the scratch and the RoPE rows too; `slot_cells` stays
+        // -1 - it counts the budget's ring, which does not move here.
+        if (!session_host_elastic(s)) return true;
+        cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
+        if (trim) {
+            for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j) {
+                qsa_host_trim(s.qsa_states[s.qsa_ord0 + j], cells);
+                qsa_follow_trim(s.qsa_states[s.qsa_ord0 + j], cells);   // P124e round 4: the device half too
+            }
+            if (s.host_follow != nullptr) {
+                qsa_host_trim(*s.host_follow, cells);
+                qsa_follow_trim(*s.host_follow, cells);
+            }
+            qsa_scores_trim(s.scores_elastic, cells);
+        }
+        return session_host_fit(s, cells);
+    }
     cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
     if (!trim && cells <= s.slot_cells) return true;
     std::vector<const QsaState*> sts;
@@ -168,31 +242,62 @@ bool session_slot_fit(SessionState& s, int64_t cells, bool trim) {
         for (const QsaState* st : sts) {
             qsa_slot_trim(*st, cells);
             qsa_host_trim(*st, cells);   // SAGUARO_KV_HOST_ELASTIC: the host copy too
+            qsa_follow_trim(*st, cells); // P124e round 4: ... and the context's device state
         }
-        if (s.host_follow != nullptr) qsa_host_trim(*s.host_follow, cells);
+        if (s.host_follow != nullptr) {
+            qsa_host_trim(*s.host_follow, cells);
+            qsa_follow_trim(*s.host_follow, cells);
+        }
+        qsa_scores_trim(s.scores_elastic, cells);
         s.slot_cells = std::min(s.slot_cells, cells);
     }
     if (!sts.empty() && !qsa_rope_grow(*sts[0], cells)) return false;   // (the stage's table, shared)
     if (!sts.empty() && s.rope_level && !qsa_rope_yarn_fit(*sts[0], cells)) return false;   // its YaRN rows too
     if (!qsa_slots_grow(sts, cells)) return false;
-    for (const QsaState* st : sts)   // the cells past the VRAM ring live in the host copy only
+    if (!qsa_scores_grow(s.scores_elastic, cells)) return false;   // P124e round 4: the scratch follows the same fit
+    for (const QsaState* st : sts) {   // the cells past the VRAM ring live in the host copy only
+        if (!qsa_follow_grow(*st, cells)) return false;   // P124e round 4: page table and pooled keys on the card
         if (!qsa_host_grow(*st, cells)) return false;
-    if (s.host_follow != nullptr && !qsa_host_grow(*s.host_follow, cells)) return false;
+    }
+    if (s.host_follow != nullptr &&
+        (!qsa_follow_grow(*s.host_follow, cells) || !qsa_host_grow(*s.host_follow, cells))) return false;
     s.slot_cells = std::max(s.slot_cells, cells);
     return true;
 }
 
 bool session_host_fit(SessionState& s, int64_t cells) {
     cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
-    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
-        if (!qsa_host_grow(s.qsa_states[s.qsa_ord0 + j], cells)) return false;
-    return s.host_follow == nullptr || qsa_host_grow(*s.host_follow, cells);
+    // P124e (round 4): ONE conversation, TWO halves - the device state (page table, pooled indexer keys, the
+    // block-score scratch, the RoPE rows) and the pinned host copy - grown by the same call at the same sites
+    // (the admit, the read, the slot fit): the device half from new chunks, the card's expert cache giving way
+    // (vram_relief) when the card has nothing free; the host half with its RAM give-way.  Either refusing means
+    // the conversation is not backed, and the caller answers "no memory" as a failed host grow always did.
+    if (!qsa_scores_grow(s.scores_elastic, cells)) return false;
+    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j) {
+        const QsaState& st = s.qsa_states[s.qsa_ord0 + j];
+        if (!qsa_follow_grow(st, cells) || !qsa_host_grow(st, cells)) return false;
+    }
+    if (s.host_follow != nullptr &&
+        (!qsa_follow_grow(*s.host_follow, cells) || !qsa_host_grow(*s.host_follow, cells))) return false;
+    if (s.qsa_states != nullptr && s.qsa_alloc > 0) {
+        const QsaState& p0 = s.qsa_states[s.qsa_ord0];
+        if (!qsa_rope_grow(p0, cells) || (s.rope_level && !qsa_rope_yarn_fit(p0, cells))) return false;
+    }
+    return true;
 }
 
 uint64_t session_host_trim(SessionState& s, int64_t cells) {
     uint64_t n = 0;
-    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j) n += qsa_host_trim(s.qsa_states[s.qsa_ord0 + j], cells);
-    return n + (s.host_follow != nullptr ? qsa_host_trim(*s.host_follow, cells) : 0);
+    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j) {
+        n += qsa_host_trim(s.qsa_states[s.qsa_ord0 + j], cells);
+        qsa_follow_trim(s.qsa_states[s.qsa_ord0 + j], cells);   // P124e round 4 (device bytes back to the driver,
+    }                                                          // not counted as pinned RAM given back)
+    if (s.host_follow != nullptr) {
+        n += qsa_host_trim(*s.host_follow, cells);
+        qsa_follow_trim(*s.host_follow, cells);
+    }
+    qsa_scores_trim(s.scores_elastic, cells);
+    return n;
 }
 
 namespace {
@@ -203,17 +308,25 @@ std::vector<const QsaState*> session_states(const SessionState& s) {
 }
 }  // namespace
 
-bool session_vram_fit(SessionState& s, int64_t cells) {
+bool session_vram_fit(SessionState& s, int64_t cells, int64_t rope_cells) {
     const std::vector<const QsaState*> sts = session_states(s);
     cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
-    return (sts.empty() || (qsa_rope_grow(*sts[0], cells) && (!s.rope_level || qsa_rope_yarn_fit(*sts[0], cells)))) &&
+    // P124e (round 7, manager card): the RoPE rows are sized by the positions in use, not by this fit's
+    // worst-case end: a 546K request whose max_new runs to the end of a 1M context must not back the whole
+    // table at the YaRN switch (0.75 GiB at load's accounting) - the rows past `rope_cells` arrive as the
+    // conversation reaches them, chunk by chunk, from the fits that track its position.
+    rope_cells = rope_cells <= 0 ? cells : std::min(std::max(rope_cells, (int64_t) 1), cells);
+    return (sts.empty() || (qsa_rope_grow(*sts[0], rope_cells) &&
+                            (!s.rope_level || qsa_rope_yarn_fit(*sts[0], rope_cells)))) &&
            qsa_slots_grow(sts, cells);
 }
 
-int64_t session_vram_need(const SessionState& s, int64_t cells) {
+int64_t session_vram_need(const SessionState& s, int64_t cells, int64_t rope_cells) {
     const std::vector<const QsaState*> sts = session_states(s);
     cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
-    return (sts.empty() ? 0 : qsa_rope_need(*sts[0], cells) + (s.rope_level ? qsa_rope_yarn_need(*sts[0], cells) : 0)) +
+    rope_cells = rope_cells <= 0 ? cells : std::min(std::max(rope_cells, (int64_t) 1), cells);
+    return (sts.empty() ? 0
+                        : qsa_rope_need(*sts[0], rope_cells) + (s.rope_level ? qsa_rope_yarn_need(*sts[0], rope_cells) : 0)) +
            qsa_slots_need(sts, cells);
 }
 

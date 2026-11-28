@@ -26,6 +26,8 @@
 #include "strata/core/batch_telemetry.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/device.hpp"
+#include "strata/core/devnotes.hpp"
+#include "strata/core/vmm.hpp"
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/conversation_snapshot.hpp"
@@ -47,6 +49,8 @@
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/peer_experts.hpp"
+#include "strata/core/read_backing.hpp"
+#include "strata/core/slot_give_guard.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/layout.hpp"
 #include "strata/core/session.hpp"
@@ -5739,10 +5743,22 @@ int main(int argc, char** argv) {
             strata::core::ExpertCache::set_vmm(on);
         }
         strata::core::qsa_set_host_elastic_main(o.serve);   // SAGUARO_KV_HOST_ELASTIC: the solo session and the stages' too
+        // P124e (round 4, manager card test): and the VRAM half of the same rule (SAGUARO_KV_VRAM_ELASTIC, on unless
+        // =0): the states' context-scaled device arrays hold a start step, not --max-context.  Checked per state
+        // (streaming + host elastic + VMM card); off on the CLI and on a card that cannot do it - byte-identical.
+        strata::core::qsa_set_vram_elastic(o.serve && host_vram_main_env());
         // ... and their VRAM pools and pooled keys grow too, under the elastic slots (they draw on the same budget)
         const bool vram_main = o.serve && o.batch > 0 && elastic_slots_mode() == 2 && host_vram_main_env();
         strata::core::qsa_set_vram_elastic_main(vram_main && strata::core::vmm_available(primary_device));
-        if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K, 0, hi0)) != cudaSuccess) {
+        // P124e (round 5, manager card): every load-time device allocation of the conversation holders is accounted
+        // by name (the load's table before the expert cache sizes itself prints them with the delta the card charged).
+        const uint64_t solo_carve = strata::core::session_bytes(g, o.max_context, K, 0, hi0);
+        cudaError_t solo_alloc;
+        {
+            const strata::core::DeviceNote dn("the solo session's device state (one carve: ring, state, tables)", solo_carve);
+            solo_alloc = cudaMalloc(&sbuf, solo_carve);
+        }
+        if (solo_alloc != cudaSuccess) {
             std::fprintf(stderr, "saguaro generate: session state allocation failed\n");
             return 1;
         }
@@ -5750,11 +5766,20 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "saguaro generate: session_init failed\n");
             return 1;
         }
-        if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1)
+        if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1) {
+            // P124e: with an elastic host copy this counts only the backed start (~32768 cells), whatever
+            // --max-context says - the copy grows with the conversation, not with the setting.
+            const uint64_t pin = strata::core::qsa_kv_host_bytes(), res = strata::core::qsa_kv_host_reserved_bytes();
+            char grow_note[160] = "";
+            if (pin < res)
+                std::snprintf(grow_note, sizeof grow_note,
+                              "; it grows with the conversation (%.2f GiB if one filled --max-context)",
+                              (double) res / 1073741824.0);
             std::fprintf(stderr, "saguaro generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
-                                 "%.2f GiB of pinned RAM\n",
+                                 "%.2f GiB of pinned RAM%s\n",
                          (long long) (ss.qsa_states[ss.qsa_primary()].n_slots * 4),
-                         (long long) o.max_context, (double) strata::core::qsa_kv_host_bytes() / 1073741824.0);
+                         (long long) o.max_context, (double) pin / 1073741824.0, grow_note);
+        }
         // the PLE block above built everything but the history, which session_init has just carved
         ss.ple.hist = ss.ple_hist;
         // (#167) generate mode starts from an empty sequence, and nothing else zeroes this state before the prompt
@@ -5780,7 +5805,13 @@ int main(int argc, char** argv) {
         strata::core::qsa_set_vram_elastic_main(o.serve && o.batch > 0 && elastic_slots_mode() == 2 && host_vram_main_env() &&
                                                 strata::core::vmm_available(st.dev));
         void* sbuf_s = nullptr;
-        if (cudaMalloc(&sbuf_s, strata::core::session_bytes(g, o.max_context, K, st.lb, st.le)) != cudaSuccess ||
+        const uint64_t stage_carve = strata::core::session_bytes(g, o.max_context, K, st.lb, st.le);
+        cudaError_t stage_alloc;
+        {   // P124e (round 5, manager card): accounted by name (the tight scope: the init's pools note themselves)
+            const strata::core::DeviceNote dn("a stage session's device state (one carve)", stage_carve);
+            stage_alloc = cudaMalloc(&sbuf_s, stage_carve);
+        }
+        if (stage_alloc != cudaSuccess ||
             strata::core::session_init(g, o.max_context, K, sbuf_s, st.ss, st.lb, st.le) == 0) {
             std::fprintf(stderr, "saguaro generate: layer split, CUDA%d: the session state failed\n", st.dev);
             return 1;
@@ -5929,6 +5960,11 @@ int main(int argc, char** argv) {
                              "one group\n", o.batch_groups, o.batch);
         o.batch_groups = 1;
     }
+    // SAGUARO_KV_HOST_ELASTIC (P124e manager card test, 11-26): the slots' host K/V is now the slots' OWN rule,
+    // separate from the VRAM one made below - under --serve every batch slot and its drafter pins the small start
+    // at load and grows with its conversation, whatever --max-context says and whatever the VRAM ring does.
+    // Without --serve the slots keep today's pinned-whole copies (the CLI path is byte-identical).
+    strata::core::qsa_set_host_elastic_slots(o.serve && o.batch > 0);
     uint64_t slot_bytes0 = 0, slot_budget0 = 0;   // CUDA0's: each slot session's carve, and the elastic slots' budget
     if (o.batch > 0) {
         bslot_ss.resize(1 + stages.size());
@@ -5948,7 +5984,12 @@ int main(int argc, char** argv) {
             for (int b = 0; b < fit; ++b) {
                 auto u = std::make_unique<strata::core::SessionState>();
                 void* buf = nullptr;
-                if (cudaMalloc(&buf, bytes) != cudaSuccess ||
+                cudaError_t slot_alloc;
+                {   // P124e (round 5, manager card): accounted by name, merged across the slots
+                    const strata::core::DeviceNote dn("each --batch slot's session state (one carve, merged over the slots)", bytes);
+                    slot_alloc = cudaMalloc(&buf, bytes);
+                }
+                if (slot_alloc != cudaSuccess ||
                     strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi, slot_kind, rope) == 0) {
                     (void) cudaGetLastError();
                     if (buf != nullptr) (void) cudaFree(buf);
@@ -6203,20 +6244,13 @@ int main(int argc, char** argv) {
             }
         }
     }
-    if (const uint64_t all = strata::core::qsa_kv_host_reserved_bytes(); all > 0) {   // (the line after the main session counts its first stage only)
-        const uint64_t now = strata::core::qsa_kv_host_bytes();
-        std::fprintf(stderr, "saguaro generate: KV streaming: %.2f GiB of pinned RAM for the K/V of every session at "
-                             "--max-context %lld (the solo session %.2f GiB, the batch slots and the drafters %.2f GiB)",
-                     (double) now / 1073741824.0, (long long) o.max_context, (double) kv_host_solo / 1073741824.0,
-                     (double) (now - kv_host_solo) / 1073741824.0);
-        if (now < all)   // SAGUARO_KV_HOST_ELASTIC
-            std::fprintf(stderr, "; the slots' copies grow with their conversations, %.2f GiB if every one were full",
-                         (double) all / 1073741824.0);
-        std::fprintf(stderr, "\n");
-    }
+    strata::core::qsa_set_host_elastic_slots(false);   // (later states pin whole again - nothing else builds slots here)
+    strata::core::qsa_set_vram_elastic(false);         // P124e round 4: the device half is scoped exactly the same
     // SAGUARO_KV_HOST_ELASTIC: the solo session's host copies (every stage, its drafter) pinned for `cells` before anything
     // writes them: a request's prompt and max_new, a restored conversation.  They only grow (the conversation they hold
-    // is parked from them after a new request has started)
+    // is parked from them after a new request has started).  P124e: `cells` 1 pins one growth step (about 32768 cells) -
+    // the start every conversation pays at load, the same at --max-context 262144 and 1048576 - done BEFORE the line
+    // below, which is the manager's load-time number.
     auto solo_host_fit = [&](int64_t cells) -> bool {
         if (!strata::core::session_host_fit(ss, cells)) return false;
         for (auto& st : stages)
@@ -6226,6 +6260,34 @@ int main(int argc, char** argv) {
     if (!solo_host_fit(1)) {
         std::fprintf(stderr, "saguaro generate: no RAM to pin the first cells of the solo session's K/V copy\n");
         return 1;
+    }
+    // P124e (manager card test, 11-26): the SAME start step for every conversation holder - each batch slot's own
+    // states and, through its `host_follow`, its drafter - before the line below counts it and before the expert
+    // tier sizes itself from the free RAM.  A slot with a pinned-whole host copy (no --serve) says false here:
+    // it pinned everything at session_init already, as today.
+    for (size_t k = 0; k < bslot_ss.size(); ++k) {
+        const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
+        for (auto& u : bslot_ss[k])
+            if (strata::core::session_host_elastic(*u) && !strata::core::session_host_fit(*u, 1)) {
+                std::fprintf(stderr, "saguaro generate: no RAM to pin the first cells of a batch slot's K/V copy\n");
+                return 1;
+            }
+    }
+    if (const uint64_t all = strata::core::qsa_kv_host_reserved_bytes(); all > 0) {   // (the line after the main session counts its first stage only)
+        const uint64_t now = strata::core::qsa_kv_host_bytes();
+        uint64_t solo_now = kv_host_solo;
+        if (now < all) {   // elastic: the solo line is what it holds BACKED now, not what the whole context would take
+            solo_now = strata::core::session_host_backed(ss);
+            for (auto& st : stages) solo_now += strata::core::session_host_backed(st->ss);
+        }
+        std::fprintf(stderr, "saguaro generate: KV streaming: %.2f GiB of pinned RAM for the K/V of every session at "
+                             "--max-context %lld (the solo session %.2f GiB, the batch slots and the drafters %.2f GiB)",
+                     (double) now / 1073741824.0, (long long) o.max_context, (double) solo_now / 1073741824.0,
+                     (double) (now > solo_now ? now - solo_now : 0) / 1073741824.0);
+        if (now < all)   // SAGUARO_KV_HOST_ELASTIC
+            std::fprintf(stderr, "; the sessions' copies grow with their conversations, %.2f GiB if every one were full",
+                         (double) all / 1073741824.0);
+        std::fprintf(stderr, "\n");
     }
     // SAGUARO_KV_VRAM_ELASTIC needs the elastic slots' budget to grow from; when the batch ended up without them (off,
     // or no slot fitted), the solo session's VRAM pools are backed whole now, as when they were carved
@@ -6245,7 +6307,7 @@ int main(int argc, char** argv) {
     }
     // SAGUARO_KV_VRAM_ELASTIC: the solo session's VRAM pools and pooled keys for `cells` (every stage), the expert cache
     // giving the budget room when it is short; set where the elastic slots' give is (null: nothing to grow)
-    std::function<bool(int64_t)> solo_vram_fit;
+    std::function<bool(int64_t, int64_t)> solo_vram_fit;   // (cells, rope cells - the RoPE rows trail the positions in use)
     // no RAM left to pin a conversation's context: one idle conversation parked (its pinned copy given back), else the
     // RAM conversation cache's oldest dropped.  0: room was made, try again; 1: nothing left to give; 2: not now (a read
     // or windows in flight).  `keep`: the slot asking (-1: the solo session).  Set with the batch slots
@@ -6254,6 +6316,14 @@ int main(int argc, char** argv) {
         while (!solo_host_fit(cells))
             if (!strata::core::qsa_host_pin_failed() || !ram_reclaim || ram_reclaim(-1) != 0) return false;
         return true;
+    };
+    // P124e (round 8, manager card): the cells a prompt read on the solo conversation may index - where its
+    // host copies, device follow state and RoPE rows ALL have memory behind them (every stage's session; the
+    // context's own end caps it).  Reads run inside it; the fits grow it ahead of the chunk that needs more.
+    auto solo_backed_cells = [&]() -> int64_t {
+        int64_t b = strata::core::session_backed_cells(ss);
+        for (auto& st : stages) b = std::min(b, strata::core::session_backed_cells(st->ss));
+        return b;
     };
     // (the host copies only: the VRAM ring's residency map may name any of its slots, so the solo session's VRAM pools
     // keep what they grew to - a slot trims its own only with its state reset)
@@ -6287,7 +6357,12 @@ int main(int argc, char** argv) {
     std::vector<float> logits((size_t) n_vocab);
     mem_mark("the native head");
     float* d_logits = nullptr;
-    if (cudaMalloc(&d_logits, (size_t) n_vocab * 4) != cudaSuccess) {
+    cudaError_t logits_alloc;
+    {   // P124e (round 5, manager card): accounted by name
+        const strata::core::DeviceNote dn("the logits buffer (n_vocab fp32)", (uint64_t) n_vocab * 4);
+        logits_alloc = cudaMalloc(&d_logits, (size_t) n_vocab * 4);
+    }
+    if (logits_alloc != cudaSuccess) {
         (void) cudaGetLastError();
         std::fprintf(stderr, "saguaro generate: the logits buffer failed%s\n", vram_free_note().c_str());
         return 1;
@@ -6441,9 +6516,16 @@ int main(int argc, char** argv) {
                                               return v != nullptr && std::string(v) == "0"; }();
     if (o.resident_budget > 0 && !resident_cap_off) {
         const uint64_t host_total = strata::platform::total_physical_memory();
-        const uint64_t kv_pool = strata::core::qsa_kv_bytes_per_cell(g) *
-                                 (uint64_t) std::max<int64_t>(0, g.n_qsa_layers()) * (uint64_t) o.max_context *
-                                 (uint64_t) std::max(o.batch, 1);
+        // P124e (round 12, manager card A): the margin counts the K/V the host copies COMMIT - what is
+        // BACKED now plus the one growth step the elastic copies run ahead - never --max-context x slots.
+        // The elastic starts (every conversation holder pinned its 32768-cell step above, before the
+        // "pinned RAM for the K/V of every session" line) are the same at 262144 and 1048576, so the expert
+        // tier is sized the same at both: the merged rule counted the ceiling and cut the 68 GiB asked to
+        // 30.78 at 1048576 beside a 1.30 GiB start (mortar, 2026-11-27: -37 GiB of experts, +20% read time).
+        // Growth past the start takes its room when it arrives (the park / ram_reclaim give-back paths); a
+        // pinned-whole layout has already committed the whole context, and is counted whole by the same rule.
+        const uint64_t kv_pool = strata::core::resident::committed_kv_bytes(
+            strata::core::qsa_kv_host_bytes(), strata::core::qsa_kv_host_step_bytes());
         const uint64_t cap = strata::core::resident::budget_cap(host_total, kv_pool);
         if (host_total > 0 && o.resident_budget > cap) {
             if (cap == 0)
@@ -6759,6 +6841,23 @@ int main(int argc, char** argv) {
     if (srcp == &arena_src && strata::kernels::cpu::active_numa_split().on && !strata::kernels::cpu::active_numa_split().test)
         std::fprintf(stderr, "saguaro generate: NUMA split on, but this model's experts come from the arena path: memory is "
                              "not placed per node (known limitation)\n");
+    // P124e: a K/V host copy that cannot pin for lack of RAM asks HERE first - the resident expert tier gives way from
+    // its coldest end (as DS4's take-from-experts does in VRAM), and a conversation is only parked when that is not
+    // enough.  The card must be quiet: a trimmed expert must not be mid-DMA out of the complement.
+    strata::core::set_host_relief([srcp](uint64_t bytes) -> uint64_t {
+        if (srcp == nullptr || bytes == 0) return 0;
+        int ndev = 0;
+        if (cudaGetDeviceCount(&ndev) == cudaSuccess)
+            for (int d = 0; d < ndev; ++d) {
+                const strata::core::OnDevice on(d);
+                (void) strata::core::device_sync();
+                (void) cudaGetLastError();
+            }
+        return srcp->relieve_ram(bytes);
+    });
+    struct HostReliefScope {
+        ~HostReliefScope() { strata::core::set_host_relief(nullptr); }
+    } host_relief_scope;
     if (pool.is_hybrid() && pool.affinity() != strata::kernels::cpu::PoolAffinity::All) {
         const char* aff_str = pool.affinity() == strata::kernels::cpu::PoolAffinity::PCores ? "p-cores" :
                               pool.affinity() == strata::kernels::cpu::PoolAffinity::All ? "all" : "auto";
@@ -6791,6 +6890,25 @@ int main(int argc, char** argv) {
     // sees the memory this process actually has left rather than the card's idle figure - and refuses with both
     // numbers if the slots do not fit, instead of handing back a cache smaller than it was asked for.
     mem_mark("the weights, the session and the drafter");
+    // P124e (round 5, manager card): the load-time VRAM accounting the card asked for - every named device allocation
+    // since startup, with what the card actually CHARGED for it (the free-memory delta: addresses can cost nothing
+    // while their backing costs GiB), printed before the expert cache sizes itself from that same free figure.
+    {
+        size_t nb_free = 0, nb_total = 0;
+        if (cudaMemGetInfo(&nb_free, &nb_total) != cudaSuccess) { (void) cudaGetLastError(); nb_total = 0; }
+        if (nb_total > 0)
+            std::fprintf(stderr, "saguaro generate: VRAM in use before the expert cache: %.2f GiB of %.2f (%.2f GiB free): the allocations, named\n",
+                         (double) (nb_total - nb_free) / 1073741824.0, (double) nb_total / 1073741824.0,
+                         (double) nb_free / 1073741824.0);
+        for (const strata::core::DeviceNoteRec& r : strata::core::device_notes_taken()) {
+            const uint64_t used = r.used > 0 ? (uint64_t) r.used : 0;
+            if (r.bytes < (64ull << 20) && used < (64ull << 20) && r.bytes == 0) continue;   // the card: >= 64 MiB
+            if (r.bytes >= (64ull << 20) || used >= (64ull << 20))
+                std::fprintf(stderr, "saguaro generate:   VRAM: %s: %.2f GiB asked, %.2f GiB in use%s (%d allocation%s)\n",
+                             r.what.c_str(), (double) r.bytes / 1073741824.0, (double) used / 1073741824.0,
+                             (r.used < 0 ? " (the card GAVE back)" : ""), r.n, r.n == 1 ? "" : "s");
+        }
+    }
     strata::core::ExpertCache xcache;
     // THE HEAD BEFORE THE CACHE: the native head and the logits are allocated above, before the expert arena (#620)
     const bool auto_cache = o.expert_cache < 0;
@@ -7104,6 +7222,72 @@ int main(int argc, char** argv) {
                                  "(layer, expert) pair lifts it - tools/make_profile.py)\n", o.expert_cache,
                          profile.size(), o.expert_profile.c_str(), profile.size());
         o.expert_cache = (int) sized_slots.size();
+    }
+    // P124e (round 4, manager card test): the VRAM follow rule (qsa_set_vram_elastic) made the sessions' context-scaled
+    // device state - page tables, pooled indexer keys, the block-score scratch, the RoPE tables - VMM ranges backed
+    // for one start step each.  A conversation that grows past it takes new chunks, and on a card the expert cache
+    // has filled, the room can only come from the cache: the serve loop's give path (SAGUARO_ELASTIC_SLOTS_GIVE),
+    // which needs the cache in VMM.  Where that cannot run, back the context state whole NOW (the free-VRAM figure
+    // the cache then sizes from is today's, and so is every number the card test compares).
+    // P124e (round 5, manager card): round 4 also required the RAM-arena expert tier (srcp == &arena_src), and the
+    // card's own rig cannot have it: --resident-budget-gib implies --mmap-experts (the argument parse sets it), so
+    // on MORTAR - the acceptance rig - the rule ALWAYS fell back to backing --max-context whole: that is the
+    // ~3.4 GiB the card measured between 262144 and 1048576 (and the reason 262144 cost more than round 3's carve).
+    // The arena was never actually needed: the give evicts the cache's COLDEST resident experts, and an evicted
+    // expert answers from wherever the source keeps it - the mapped file tier is exactly the mode where the file
+    // answers (blob_stable/prefetch are the same interface), as they do for every cache miss already.  Any expert
+    // source can feed the relief; only the OTHER guards (below) genuinely stop the give.
+    bool vram_follow_on = strata::core::qsa_vram_follow_active();
+    const bool vram_follow_give =
+        vram_follow_on && srcp != nullptr && o.adapt_async == 0 && !o.prefill_head_alias && o.peer_device < 0 &&
+        !o.vram_elastic && !remote_caches;
+    if (vram_follow_on && !vram_follow_give) {
+        const char* why = srcp == nullptr ? "there is no expert source to read evicted experts from"
+                        : o.adapt_async ? "--adapt-async is on"
+                        : o.prefill_head_alias ? "--prefill-head-alias is on"
+                        : o.peer_device >= 0 ? "--peer-device is on"
+                        : o.vram_elastic ? "--vram-elastic owns the cache's segments"
+                                         : "a helper cache is on another GPU";
+        std::fprintf(stderr, "saguaro generate: VRAM follows use: FELL BACK on CUDA%d (%s): the expert cache gives no "
+                             "room, backing the context's device state whole for --max-context %lld now, as before P124e\n",
+                     primary_device, why, (long long) o.max_context);
+        auto back_whole = [&](strata::core::SessionState& u, int dev) {
+            const strata::core::OnDevice on(dev);
+            if (!strata::core::qsa_scores_back_whole(u.scores_elastic, o.max_context)) return false;
+            for (int64_t j = 0; u.qsa_states != nullptr && j < u.qsa_alloc; ++j)
+                if (!strata::core::qsa_follow_back_whole(u.qsa_states[u.qsa_ord0 + j])) return false;
+            return u.host_follow == nullptr || strata::core::qsa_follow_back_whole(*u.host_follow);
+        };
+        bool ok = back_whole(ss, primary_device);
+        for (auto& st : stages) ok = ok && back_whole(st->ss, st->dev);
+        for (size_t k = 0; k < bslot_ss.size(); ++k) {
+            const int dev = k == 0 ? primary_device : stages[k - 1]->dev;
+            for (auto& u : bslot_ss[k]) ok = ok && back_whole(*u, dev);
+        }
+        if (!ok) {
+            std::fprintf(stderr, "saguaro generate: the context's device state does not fit in VRAM%s\n",
+                         vram_free_note().c_str());
+            return 1;
+        }
+        vram_follow_on = false;   // (the load's numbers and the fits are today's from here: nothing trails)
+        strata::core::qsa_vram_follow_off();
+    } else if (vram_follow_on) {
+        strata::core::ExpertCache::set_vmm(true);   // the caches (this card and the stages') give chunks through it
+        std::fprintf(stderr, "saguaro generate: VRAM follows use: ENGAGED on CUDA%d (%s): the sessions' context device "
+                             "state (page tables, the indexer's keys, the selection scratch, the RoPE tables) holds "
+                             "%llu MiB at load and grows with each conversation past --max-context's start\n",
+                     primary_device, strata::core::vmm_reason(primary_device),
+                     (unsigned long long)
+                         ((strata::core::qsa_follow_backed_bytes() + strata::core::qsa_scores_backed_bytes(ss.scores_elastic)) >> 20));
+    } else {
+        // P124e (round 5, manager card): the ONE line saying whether the elastic VRAM path is engaged or fell back
+        // is said even when the rule never reached the decision above - with the condition that stopped it.
+        const char* why = strata::core::qsa_vram_follow_wanted()
+                              ? "no streamed session state exists to follow (nothing was made elastic at build time)"
+                              : strata::core::qsa_vram_follow_why();
+        std::fprintf(stderr, "saguaro generate: VRAM follows use: OFF on CUDA%d (%s): the sessions' context device "
+                             "state is carved whole for --max-context %lld, as before P124e\n",
+                     primary_device, why, (long long) o.max_context);
     }
     // #533: --vram-elastic: the cache in physical segments (the VRAM command resizes it between requests).  One GPU,
     // no helper caches, serve mode: anything else keeps the one cudaMalloc, said once.
@@ -8750,6 +8934,11 @@ int main(int argc, char** argv) {
     // request hands them back and the slots are refilled with the profile's hottest experts.  Neither side's
     // addresses move, so every captured graph stays valid.  The context is never smaller: --max-context cells always
     // fit, the cache simply holds fewer experts while a long one is live.
+    // P124e (round 10, manager card): SAGUARO_DEBUG_SLOT_GUARD=1 (core/slot_give_guard.hpp).  The two providers
+    // are set where their data exists (guard_loans where pf_parts has its lend lines, guard_regions with gv);
+    // every give path calls them when the guard is on.  They read LIVE state: kvg.lo/top, gv.lo/top, first_now.
+    std::function<std::vector<strata::core::GiveLoan>(const void*)> guard_loans;
+    std::function<std::vector<strata::core::GiveRegion>(const void*)> guard_regions;
     struct KvGrow {
         bool on = false;
         int64_t top = 0, lo = 0;          // slots [lo, top) hold no expert; their whole chunks may be with the K/V
@@ -8785,6 +8974,13 @@ int main(int argc, char** argv) {
         quiesce();
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
+        // SAGUARO_DEBUG_SLOT_GUARD: the snapshot the loop's gives check against (the live loan, gv's region).
+        std::vector<strata::core::GiveLoan> s_loans;
+        std::vector<strata::core::GiveRegion> s_regions;
+        if (strata::core::slot_give_guard_on()) {
+            if (guard_loans) s_loans = guard_loans(&xcache);
+            if (guard_regions) s_regions = guard_regions(&xcache);
+        }
         std::vector<int32_t> owner;   // slot -> residency index
         // The slots given up are the ones just below the prompt path's loan, and the loan is most of the cache: they
         // hold experts of middling heat.  So an expert there that is hotter than the coldest one in the loan region
@@ -8805,6 +9001,10 @@ int main(int argc, char** argv) {
             for (int64_t c = c0; c < c1; ++c) k += r.mapped(c) ? 1 : 0;
             return k;
         };
+        // P124e r11: a move never lands in an active prompt loan (the read's buffers live in [first_now, slots))
+        int64_t lend_lo = xcache.slots();
+        if (guard_loans)
+            for (const auto& l : guard_loans(&xcache)) if (l.first >= 0) lend_lo = std::min<int64_t>(lend_lo, l.first);
         while ((int64_t) kvg.spare.size() + freeable() < need && kvg.lo > kvg.floor) {
             if (owner.empty()) {
                 owner.assign((size_t) xcache.slots(), -1);
@@ -8814,17 +9014,26 @@ int main(int argc, char** argv) {
                 for (size_t r = 0; r < profile.size(); ++r)
                     rank[(size_t) profile[r].first * (size_t) g.n_expert + (size_t) profile[r].second] = (int32_t) r;
                 for (size_t i = 0; i < host_res.size(); ++i)
-                    if (host_res[i] >= kvg.top) cold.emplace_back(heat((int32_t) i), (int32_t) i);
+                    if (host_res[i] >= kvg.top && host_res[i] < lend_lo) cold.emplace_back(heat((int32_t) i), (int32_t) i);
                 std::sort(cold.begin(), cold.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
             }
             --kvg.lo;
             ++gave;
+            if (strata::core::slot_give_guard_on())   // the slot itself must be the cache's to give
+                strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "gives a slot up for the K/V", kvg.lo,
+                                                        kvg.lo + 1,
+                                                        (int64_t) (xcache.slot_offset(kvg.lo) / G),
+                                                        (int64_t) ((xcache.slot_offset(kvg.lo + 1) + G - 1) / G)},
+                                               s_loans, s_regions);
             if (const int32_t oi = owner[(size_t) kvg.lo]; oi >= 0) {
                 const int64_t layer = oi / g.n_expert;
                 int32_t vi = -1;
                 if (!cold.empty() && cold.back().first < heat(oi)) {
                     vi = cold.back().second;
                     const int32_t vs = host_res[(size_t) vi];
+                    if (strata::core::slot_give_guard_on())   // the hot expert's target is a cache slot, never a loan's
+                        strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "moves a hotter expert into a slot",
+                                                                vs, vs + 1, -1, -1}, s_loans, s_regions);
                     if (xcache.slot_offset(vs + 1) - xcache.slot_offset(vs) < lay.blob_bytes(layer) ||
                         cudaMemcpy(xcache.device_slot(vs), xcache.device_slot((int32_t) kvg.lo),
                                    (size_t) lay.blob_bytes(layer), cudaMemcpyDeviceToDevice) != cudaSuccess)
@@ -8849,6 +9058,9 @@ int main(int argc, char** argv) {
         {
             const int64_t c0 = (int64_t) ((xcache.slot_offset(kvg.lo) + G - 1) / G);
             const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
+            if (strata::core::slot_give_guard_on())   // the whole region goes to the K/V: no other owner
+                strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "unmaps the given slots' chunks for the K/V",
+                                                        kvg.lo, kvg.top, c0, c1}, s_loans, s_regions);
             for (int64_t c = c0; c < c1; ++c)
                 if (r.mapped(c))
                     if (const strata::core::VmmChunk h = r.unmap(c)) kvg.spare.push_back(h);
@@ -8894,10 +9106,19 @@ int main(int argc, char** argv) {
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
         const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
+        std::vector<strata::core::GiveLoan> s_loans;   // (SAGUARO_DEBUG_SLOT_GUARD)
+        std::vector<strata::core::GiveRegion> s_regions;
+        if (strata::core::slot_give_guard_on()) {
+            if (guard_loans) s_loans = guard_loans(&xcache);
+            if (guard_regions) s_regions = guard_regions(&xcache);
+        }
         {   // one run from the lowest unmapped chunk, as long as the chunks handed back last (one access call)
             const int64_t c0 = (int64_t) (xcache.slot_offset(kvg.lo) / G);
             int64_t cend = c0, need = (int64_t) kvg.spare.size();
             while (cend < c1 && need > 0) need -= r.mapped(cend++) ? 0 : 1;
+            if (strata::core::slot_give_guard_on())   // mapping back into slots another give-way holds is the crossing
+                strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "takes chunks back from the K/V", kvg.lo,
+                                                        kvg.top, c0, cend}, s_loans, s_regions);
             if (!r.map_range(c0, cend, [&]() -> strata::core::VmmChunk {
                     if (kvg.spare.empty()) return 0;
                     const strata::core::VmmChunk h = kvg.spare.back();
@@ -8942,6 +9163,9 @@ int main(int argc, char** argv) {
         kvg.refilled += (int64_t) filled.size();
         // res_put waits for its copy: the next reader can be a verify window (a non-blocking stream) right away
         if (res_put(d_res) != cudaSuccess) return false;
+        if (strata::core::slot_give_guard_on())   // (the freed handles carry no slot: the region is the named range)
+            strata::core::slot_give_guard(&xcache, {"kvg CUDA0", "frees the K/V's leftover chunks to the driver",
+                                                    kvg.lo, kvg.top, -1, -1}, s_loans, s_regions);
         for (const strata::core::VmmChunk h : kvg.spare) strata::core::vmm_chunk_free(h);   // new ones, if any
         kvg.spare.clear();
         ++kvg.trims;
@@ -9094,6 +9318,30 @@ int main(int argc, char** argv) {
             src.set_extra_drop_files(std::move(drop));
         }
         const std::vector<std::pair<int32_t, int32_t>>& rank_all = profile_all.empty() ? profile : profile_all;
+#if defined(__linux__)
+        // P124e: with the K/V host copy elastic, a GPU-registered page cannot be given back (relieve_ram skips the
+        // registered prefix), so a complement registered WHOLE leaves a growing conversation no RAM but swap (mortar:
+        // the 546K read stalled at 90 %).  Register only the hottest share and leave the K/V one conversation can reach
+        // at --max-context (~15.4 KiB a cell, measured) as a releasable, page-locked tail.  Defaults only: a value the
+        // operator set wins.
+        if (o.serve && o.resident_pin && o.resident_budget > 0) {
+            const char* he = std::getenv("SAGUARO_KV_HOST_ELASTIC");
+            if (he == nullptr || std::atoi(he) != 0) {
+                const double gib = (double) o.resident_budget / 1073741824.0;
+                const double kv_gib = (double) o.max_context * 15.4 * 1024.0 / 1073741824.0;
+                const double cap = std::max(gib * 0.5, gib - kv_gib - 2.0);
+                char v[32];
+                std::snprintf(v, sizeof v, "%.1f", cap);
+                setenv("SAGUARO_PIN_GUARD", "2", 0);
+                setenv("SAGUARO_PARTIAL_PIN", "1", 0);
+                setenv("SAGUARO_PARTIAL_PIN_GIB", v, 0);
+                std::fprintf(stderr, "saguaro generate: elastic K/V host copy: the expert RAM tier registers its hottest %s "
+                                     "of %.1f GiB for the GPU; the rest can give way to a conversation that grows to "
+                                     "--max-context %lld (SAGUARO_PARTIAL_PIN_GIB sets it)\n",
+                             std::getenv("SAGUARO_PARTIAL_PIN_GIB"), gib, (long long) o.max_context);
+            }
+        }
+#endif
         bool resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, stage_pairs, lend_from,
                                                     o.resident_headroom, o.resident_budget, &rank_all);
         std::string whole_err;
@@ -9387,6 +9635,7 @@ int main(int argc, char** argv) {
             int32_t first_now = -1;        // where its buffers are laid out now
             int64_t lent_chunk = 0;
             std::vector<std::pair<int32_t, int32_t>> lent;
+            std::string gname;             // (SAGUARO_DEBUG_SLOT_GUARD) the loan's name in the crossing line
         };
         // bytes -> slots for one cache: exact when it knows its per-slot offsets (a native pack's blobs differ
         // per layer), otherwise max_blob each.
@@ -9416,9 +9665,9 @@ int main(int argc, char** argv) {
         // whose cache already filled its reserve, that is the over-subscription the auto sizing avoids - so the
         // chunk is the largest one EVERY participant can lend (a smaller chunk only reads slower)
         if (pf_borrow && d_res != nullptr) {
-            pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}});
+            pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}, ""});
             for (auto& st : stages)
-                pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}});
+                pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}, ""});
             // The two tests plan_lend makes for CUDA0 alone, one participant at a time: a loan must leave the
             // 128-slot floor.  The percentage cap is an AUTO-chunk rule and only the auto scan applies it - an
             // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
@@ -9888,6 +10137,17 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // SAGUARO_DEBUG_SLOT_GUARD: the live loans every give below is checked against (the read's buffers are
+        // [p.first_now, slots) - nothing may be unmapped, moved into, or handed out under them).
+        guard_loans = [&](const void* xc) {
+            std::vector<strata::core::GiveLoan> ls;
+            for (const PfPart& p : pf_parts)
+                if ((const void*) p.cache == xc && p.first_now >= 0)
+                    ls.push_back({p.cache, p.gname.c_str(), p.first_now, p.cache->slots()});
+            return ls;
+        };
+        for (PfPart& p : pf_parts)
+            if (p.first >= 0) p.gname = "CUDA" + std::to_string(p.dev < 0 ? 0 : p.dev) + " prompt loan";
         kvg_start(borrow != nullptr ? (int64_t) lend_first : xcache.slots());
         // the penalty-history buffer: one row per verify-window row (`penalty_rows`), each the last
         // `penalty_last_n` tokens that row's pick follows, -1 padded in front.  Allocated once at the cap for
@@ -13688,13 +13948,34 @@ vs.d_skip_usage = gs.d_skip_usage;
             for (const auto& v : bslot_ss) if (!v.empty() && v[0]->slot_cells >= 0) return true;
             return false;
         }();
+        // SAGUARO_KV_HOST_ELASTIC (P124e manager card test): the slots whose HOST copies grow with their conversations,
+        // VRAM-elastic or not - `efit_on` is every place the old code fitted the slots, now including the host-only
+        // kind.  `ehost_step`: past this many cells backed a slot holds more than its start step, so parking it gives
+        // RAM back (what `ram_reclaim` and the admit-time drops look for, beside the VRAM `slot_cells > 1`).
+        const bool ehost_on = !bslot_ss.empty() && [&] {
+            for (const auto& v : bslot_ss) if (!v.empty() && strata::core::session_host_elastic(*v[0])) return true;
+            return false;
+        }();
+        const bool efit_on = eslots_on || ehost_on;
+        const int64_t ehost_step = strata::core::qsa_host_step_cells();
+        // P124e (round 4, manager card test): the follow pools (the sessions' context-scaled DEVICE state) are live
+        // when the give path can feed them - decided with the cache at 7057 (backed whole if not).  This is the same
+        // fact re-read: pools still marked follow.
+        const bool efollow_on = strata::core::qsa_vram_follow_active();
         auto eslot_dev = [&](size_t k) { return k == 0 ? 0 : stages[k - 1]->dev; };
         // per card: MiB the slot's elastic arrays hold, and the budget's free MiB
         auto slot_mem_note = [&](int b) {
             std::string r;
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 const strata::core::SessionState& u = *bslot_ss[k][(size_t) b];
-                if (u.slot_cells < 0) continue;
+                if (u.slot_cells < 0) {   // host copies only (the ring is carved whole): what the K/V copy is pinned for
+                    if (!strata::core::session_host_elastic(u)) continue;
+                    char x[96];
+                    std::snprintf(x, sizeof x, "%sCUDA%d %.0f MiB (host K/V)", r.empty() ? "" : ", ", eslot_dev(k),
+                                  (double) strata::core::session_host_backed(u) / 1048576.0);
+                    r += x;
+                    continue;
+                }
                 uint64_t bt = 0, bf = 0;
                 strata::core::qsa_slot_budget(eslot_dev(k), bt, bf);
                 char x[96];
@@ -13716,30 +13997,43 @@ vs.d_skip_usage = gs.d_skip_usage;
             std::vector<std::pair<int32_t, int32_t>> prof;   // the card's layers' share of the profile, hottest first
             int64_t top = 0, lo = 0;                          // slots [lo, top) hold no expert
             int64_t gives = 0, backs = 0, evicted = 0, moved = 0, refilled = 0;
+            std::string gpath;   // (SAGUARO_DEBUG_SLOT_GUARD) this give-way's name: the region's owner tag
         };
         std::vector<Give> gv;
         const int64_t give_floor = 128;
         std::string give_off_why;   // why the give path is off (what VLEND / VRECLAIM answer then)
+        // P124e (round 4): the give path has a second customer now - the follow pools ask for the card's VRAM through
+        // the relief hook - and it runs with no --batch at all (one Give per card: CUDA0 + the stages).
+        const size_t gv_parts = 1 + stages.size();
         const bool give_on = [&] {
-            if (!elastic_give_env() || !eslots_on) {
-                give_off_why = elastic_give_env() ? "no --batch slot budget to give to" : "SAGUARO_ELASTIC_SLOTS_GIVE is off";
+            if (!elastic_give_env() && !efollow_on) {
+                give_off_why = efollow_on ? "" : (elastic_give_env() ? "no --batch slot budget to give to"
+                                                                     : "SAGUARO_ELASTIC_SLOTS_GIVE is off");
                 return false;
             }
-            const char* why = srcp != &arena_src ? "the experts are not all in the RAM arena"
+            if (!eslots_on && !efollow_on) {
+                give_off_why = "no elastic slots and no VRAM-follow state";
+                return false;
+            }
+            // P124e (round 5, manager card): the give serves the follow relief with ANY expert source, not just the
+            // RAM arena - an evicted expert answers from the mapped file tier exactly as from the arena (round 4's
+            // srcp == &arena_src made the card's rig - --resident-budget-gib, hence the file tier - fall back).
+            const char* why = srcp == nullptr ? "there is no expert source to read evicted experts from"
                             : ajob ? "--adapt-async is on"
                             : o.prefill_head_alias ? "--prefill-head-alias is on"
                             : d_res == nullptr || host_res.empty() ? "there is no residency table"
                             : nullptr;
-            for (size_t k = 0; why == nullptr && k < bslot_ss.size(); ++k) {
+            for (size_t k = 0; why == nullptr && k < gv_parts; ++k) {
                 strata::core::ExpertCache& xc = k == 0 ? xcache : stages[k - 1]->cache;
                 if (xc.vmm_range() == nullptr || xc.segmented()) why = "an expert cache is not in VMM";
             }
             if (why != nullptr) {
                 give_off_why = why;
-                std::fprintf(stderr, "saguaro batch: SAGUARO_ELASTIC_SLOTS_GIVE is off: %s\n", why);
+                std::fprintf(stderr, "saguaro batch: SAGUARO_ELASTIC_SLOTS_GIVE is off: %s%s\n", why,
+                             efollow_on ? " (the context's device state cannot grow from the cache's room)" : "");
                 return false;
             }
-            for (size_t k = 0; k < bslot_ss.size(); ++k) {
+            for (size_t k = 0; k < gv_parts; ++k) {
                 Give v;
                 v.cache = k == 0 ? &xcache : &stages[k - 1]->cache;
                 v.dev = eslot_dev(k);
@@ -13755,9 +14049,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                 for (const PfPart& p : pf_parts)
                     if (p.cache == v.cache && p.first >= 0) v.top = std::min<int64_t>(v.top, p.first);
                 v.lo = v.top;
-                std::fprintf(stderr, "saguaro batch: elastic slots on CUDA%d: the expert cache (%lld slots) gives the slots "
-                                     "room below slot %lld when its budget runs short\n", v.dev,
-                             (long long) v.cache->slots(), (long long) v.top);
+                std::fprintf(stderr, "saguaro batch: %s on CUDA%d: the expert cache (%lld slots) gives the %s room "
+                                     "below slot %lld when %s runs short\n",
+                             eslots_on ? "elastic slots" : "the context's elastic device state", v.dev,
+                             (long long) v.cache->slots(), eslots_on ? "slots" : "context state", (long long) v.top,
+                             eslots_on ? "its budget" : "a conversation grows past the start step");
                 gv.push_back(std::move(v));
             }
             return true;
@@ -13766,6 +14062,32 @@ vs.d_skip_usage = gs.d_skip_usage;
             std::printf("INFO vision_lend=1\n");
             std::fflush(stdout);
         }
+        // SAGUARO_DEBUG_SLOT_GUARD (round 10, manager card): the give-ways' LIVE crossing data.  A give of one
+        // cache is checked against the OTHER one's region [lo, top) on the same cache (kvg's, CUDA0's, and each
+        // card's gv band) plus the loan; both start from the same lend line, which is the suspected crossing.
+        if (give_on)
+            for (Give& v : gv) v.gpath = "gv CUDA" + std::to_string(v.dev);
+        guard_regions = [&](const void* xc) {
+            std::vector<strata::core::GiveRegion> rs;
+            const uint64_t kG = kvg.on ? strata::core::vmm_granularity() : 0;
+            if (kvg.on && (const void*) &xcache == xc && kvg.lo < kvg.top && kG != 0)
+                rs.push_back({&xcache, "kvg CUDA0", kvg.lo, kvg.top,
+                              (int64_t) (xcache.slot_offset(kvg.lo) / kG),
+                              (int64_t) (xcache.slot_offset(kvg.top) / kG)});
+            for (const Give& v : gv)
+                if ((const void*) v.cache == xc && v.lo < v.top && v.cache->vmm_range() != nullptr) {
+                    const uint64_t G = v.cache->vmm_range()->granularity();
+                    rs.push_back({v.cache, v.gpath.c_str(), v.lo, v.top,
+                                  (int64_t) (v.cache->slot_offset(v.lo) / G),
+                                  (int64_t) (v.cache->slot_offset(v.top) / G)});
+                }
+            return rs;
+        };
+        if (strata::core::slot_give_guard_on())
+            std::fprintf(stderr, "saguaro generate: SAGUARO_DEBUG_SLOT_GUARD=1: every handout of an expert-cache "
+                                 "slot or chunk (kvg, gv, the relief, free-to-driver, the trims, the loan's "
+                                 "relayout) is checked against the active prompt loan and the other give-way's "
+                                 "region; a crossing prints one line naming them and aborts\n");
         // STRATA_ELASTIC_IDLE without a cache that gives: the slots get their whole budget after all (what VRAM is left)
         if (eslots_on && !give_on && elastic_idle_env())
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
@@ -13853,6 +14175,12 @@ vs.d_skip_usage = gs.d_skip_usage;
             const strata::core::OnDevice on(v.dev);
             apply_pending(true);   // a swap still copying could write a slot given up here
             if (strata::core::device_sync() != cudaSuccess) return 0;
+            std::vector<strata::core::GiveLoan> s_loans;   // (SAGUARO_DEBUG_SLOT_GUARD)
+            std::vector<strata::core::GiveRegion> s_regions;
+            if (strata::core::slot_give_guard_on()) {
+                if (guard_loans) s_loans = guard_loans(v.cache);
+                if (guard_regions) s_regions = guard_regions(v.cache);
+            }
             auto freeable = [&]() -> int64_t {   // mapped chunks wholly inside [lo, top): a chunk a live slot shares stays
                 const int64_t c0 = (int64_t) ((xc.slot_offset(v.lo) + G - 1) / G), c1 = (int64_t) (xc.slot_offset(v.top) / G);
                 int64_t n = 0;
@@ -13869,6 +14197,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             const auto& lay = strata::kernels::cpu::expert_layout();
             int64_t gave = 0, moved = 0;
             std::vector<int32_t> out;   // experts evicted
+            // P124e r11: a move never lands in an active prompt loan (the read's buffers live in [first_now, slots))
+            int64_t lend_lo = xc.slots();
+            if (guard_loans)
+                for (const auto& l : guard_loans(v.cache)) if (l.first >= 0) lend_lo = std::min<int64_t>(lend_lo, l.first);
             while (freeable() < need && v.lo > give_floor) {
                 if (owner.empty()) {
                     owner.assign((size_t) xc.slots(), -1);
@@ -13878,11 +14210,17 @@ vs.d_skip_usage = gs.d_skip_usage;
                     for (size_t q = 0; q < v.prof.size(); ++q)
                         rank[(size_t) v.prof[q].first * (size_t) g.n_expert + (size_t) v.prof[q].second] = (int32_t) q;
                     for (size_t i = i0; i < i1; ++i)
-                        if (host_res[i] >= v.top && host_res[i] < xc.slots()) cold.emplace_back(heat((int32_t) i), (int32_t) i);
+                        if (host_res[i] >= v.top && host_res[i] < lend_lo) cold.emplace_back(heat((int32_t) i), (int32_t) i);
                     std::sort(cold.begin(), cold.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
                 }
                 --v.lo;
                 ++gave;
+                if (strata::core::slot_give_guard_on())   // this slot must be the cache's to give (kvg's own?)
+                    strata::core::slot_give_guard(v.cache, {v.gpath.c_str(), "gives a slot up to the budget", v.lo,
+                                                            v.lo + 1,
+                                                            (int64_t) (xc.slot_offset(v.lo) / G),
+                                                            (int64_t) ((xc.slot_offset(v.lo + 1) + G - 1) / G)},
+                                                   s_loans, s_regions);
                 const int32_t oi = owner[(size_t) v.lo];
                 if (oi < 0) continue;
                 const int64_t layer = oi / g.n_expert;
@@ -13890,6 +14228,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (!cold.empty() && cold.back().first < heat(oi)) {   // a hotter expert takes the coldest one's slot
                     vi = cold.back().second;
                     const int32_t vs = host_res[(size_t) vi];
+                    if (strata::core::slot_give_guard_on())   // the target slot is the cache's, never the loan's
+                        strata::core::slot_give_guard(v.cache, {v.gpath.c_str(), "moves a hotter expert into a slot",
+                                                                vs, vs + 1, -1, -1}, s_loans, s_regions);
                     if (xc.slot_room(vs) < lay.blob_bytes(layer) ||
                         cudaMemcpy(xc.device_slot(vs), xc.device_slot((int32_t) v.lo), (size_t) lay.blob_bytes(layer),
                                    cudaMemcpyDeviceToDevice) != cudaSuccess)
@@ -13917,6 +14258,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             if (gave > 0 && !give_upload(v)) return 0;
             int64_t given = 0;
             const int64_t c0 = (int64_t) ((xc.slot_offset(v.lo) + G - 1) / G), c1 = (int64_t) (xc.slot_offset(v.top) / G);
+            if (strata::core::slot_give_guard_on())   // the region goes to the slot budget: no other owner
+                strata::core::slot_give_guard(v.cache, {v.gpath.c_str(), "unmaps the given slots' chunks for the budget",
+                                                        v.lo, v.top, c0, c1}, s_loans, s_regions);
             for (int64_t c = c0; c < c1; ++c)
                 if (r.mapped(c))
                     if (const strata::core::VmmChunk h = r.unmap(c)) {
@@ -13926,8 +14270,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             for (const int32_t i : out) srcp->prefetch((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
             ++v.gives;
             v.moved += moved;
-            std::fprintf(stderr, "saguaro batch: elastic slots: CUDA%d's expert cache gives %lld MiB to the slots (%lld slots, "
-                                 "%lld hotter experts moved to colder ones' slots); %lld of %lld slots hold experts\n",
+            std::fprintf(stderr, "saguaro batch: elastic slots: CUDA%d's expert cache gives %lld MiB to the slots or the "
+                                 "context state (%lld slots, %lld hotter experts moved to colder ones' slots); %lld of "
+                                 "%lld slots hold experts\n",
                          v.dev, (long long) (given * (int64_t) G >> 20), (long long) gave, (long long) moved,
                          (long long) (v.lo + (xc.slots() - v.top)), (long long) xc.slots());
             return given;
@@ -13943,6 +14288,12 @@ vs.d_skip_usage = gs.d_skip_usage;
             const strata::core::OnDevice on(v.dev);
             apply_pending(true);
             if (strata::core::device_sync() != cudaSuccess) return false;
+            std::vector<strata::core::GiveLoan> s_loans;   // (SAGUARO_DEBUG_SLOT_GUARD)
+            std::vector<strata::core::GiveRegion> s_regions;
+            if (strata::core::slot_give_guard_on()) {
+                if (guard_loans) s_loans = guard_loans(v.cache);
+                if (guard_regions) s_regions = guard_regions(v.cache);
+            }
             const int64_t c0 = (int64_t) (xc.slot_offset(v.lo) / G), c1 = (int64_t) (xc.slot_offset(v.top) / G);
             int64_t holes = 0;
             for (int64_t c = c0; c < c1; ++c) holes += r.mapped(c) ? 0 : 1;
@@ -13950,10 +14301,14 @@ vs.d_skip_usage = gs.d_skip_usage;
             strata::core::qsa_slot_budget_take(v.dev, std::min(n, holes), got);
             int64_t cend = c0, want = (int64_t) got.size();   // one run from the lowest hole, as many holes as chunks taken
             while (cend < c1 && want > 0) want -= r.mapped(cend++) ? 0 : 1;
+            if (strata::core::slot_give_guard_on())   // a hole the K/V handed out is not this budget's to refill
+                strata::core::slot_give_guard(v.cache, {v.gpath.c_str(), "maps budget chunks back into the cache",
+                                                        v.lo, v.top, c0, cend}, s_loans, s_regions);
             size_t gi = 0;
             const bool mapped = r.map_range(c0, cend, [&]() -> strata::core::VmmChunk { return gi < got.size() ? got[gi++] : 0; });
             for (; gi < got.size(); ++gi) strata::core::qsa_slot_budget_give(v.dev, got[gi]);   // (not used)
-            if (!mapped) std::fprintf(stderr, "saguaro: elastic slots: CUDA%d's expert cache could not map its chunks back\n", v.dev);
+            if (!mapped) std::fprintf(stderr, "saguaro: elastic slots: CUDA%d's expert cache could not map its chunks "
+                                              "back: %s\n", v.dev, strata::core::vmm_last_error());   // round 6: named
             const int64_t lo0 = v.lo;
             while (v.lo < v.top) {   // a slot whose chunks are all mapped again holds an expert again
                 const int64_t a = (int64_t) (xc.slot_offset(v.lo) / G), b = (int64_t) ((xc.slot_offset(v.lo + 1) + G - 1) / G);
@@ -14063,10 +14418,17 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t target = strata::core::slot_grow_target(need, eslot_step, o.max_context);
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 strata::core::SessionState& u = *bslot_ss[k][(size_t) b];
-                if (u.slot_cells < 0 || (!trim && need <= u.slot_cells)) continue;
+                // P124e (manager card test): a slot can now be elastic in either half - the VRAM ring (slot_cells)
+                // or its host copies (hc >= 0) - and it is fitted while either one trails the conversation.
+                const int64_t hc = strata::core::session_host_backed_cells(u);   // -1: host copy pinned whole
+                if (u.slot_cells < 0 && hc < 0) continue;   // nothing elastic about this slot: nothing to back
+                if (!trim && (u.slot_cells < 0 || need <= u.slot_cells) && (hc < 0 || need <= hc)) continue;
                 const strata::core::OnDevice on_k(eslot_dev(k));
                 if (strata::core::session_slot_fit(u, target, trim) || strata::core::session_slot_fit(u, need, false))
                     continue;
+                if (u.slot_cells < 0) return 1;   // host copies (+ P124e's follow pools) only: no VRAM budget to
+                                                  // hand over - the RAM give-way ran inside the failed qsa_host_grow
+                                                  // and the expert cache's relief inside the failed qsa_follow_grow
                 if (!give_on || gv[k].lo <= give_floor) return 1;
                 if (!quiet(k)) return 2;
                 int64_t fr = 0;
@@ -14082,16 +14444,16 @@ vs.d_skip_usage = gs.d_skip_usage;
         // SAGUARO_KV_VRAM_ELASTIC: the solo session on stage k grows from that card's slot budget as the slots do (a solo
         // request runs with the slots' windows quiet, so the cache may give at once)
         if (eslots_on)
-            solo_vram_fit = [&](int64_t cells) -> bool {
+            solo_vram_fit = [&](int64_t cells, int64_t rope_cells) -> bool {
                 for (size_t k = 0; k < bslot_ss.size(); ++k) {
                     strata::core::SessionState& u = k == 0 ? ss : stages[k - 1]->ss;
                     const strata::core::OnDevice on_k(eslot_dev(k));
-                    if (strata::core::session_vram_fit(u, cells)) continue;
+                    if (strata::core::session_vram_fit(u, cells, rope_cells)) continue;
                     if (!give_on || gv[k].lo <= give_floor) return false;
                     int64_t fr = 0;
                     strata::core::qsa_slot_budget_chunks(eslot_dev(k), &fr, nullptr);
-                    give(k, std::max<int64_t>(strata::core::session_vram_need(u, cells) - fr, 16));
-                    if (!strata::core::session_vram_fit(u, cells)) return false;
+                    give(k, std::max<int64_t>(strata::core::session_vram_need(u, cells, rope_cells) - fr, 16));
+                    if (!strata::core::session_vram_fit(u, cells, rope_cells)) return false;
                 }
                 return true;
             };
@@ -14116,7 +14478,29 @@ vs.d_skip_usage = gs.d_skip_usage;
             strata::core::qsa_slot_budget_chunks(eslot_dev(k), &fr, nullptr);
             const int64_t spare = std::max<int64_t>(fr - slots_low_water(k), 0);
             if (spare < n && may_give && give_on && gv[k].lo > give_floor) give(k, n - spare);
-            return strata::core::qsa_slot_budget_release(eslot_dev(k), give_on ? n : std::min(n, spare));
+            if (strata::core::slot_give_guard_on() && give_on && k < gv.size() && gv[k].lo < gv[k].top) {
+                // what the release hands the driver are budget chunks - chunk identities, not slots: the named
+                // range is the top `n` chunks of the card's given band (the budget holds what give() gave it)
+                Give& vg = gv[k];
+                const uint64_t G = vg.cache->vmm_range()->granularity();
+                const int64_t c1 = (int64_t) (vg.cache->slot_offset(vg.top) / G);
+                if (G != 0)
+                    strata::core::slot_give_guard(vg.cache,
+                        {vg.gpath.c_str(), "frees budget chunks to the driver", -1, -1, std::max(c1 - n, (int64_t) 0), c1},
+                        guard_loans ? guard_loans(vg.cache) : std::vector<strata::core::GiveLoan>{},
+                        guard_regions ? guard_regions(vg.cache) : std::vector<strata::core::GiveRegion>{});
+            }
+            const int64_t freed = strata::core::qsa_slot_budget_release(eslot_dev(k), give_on ? n : std::min(n, spare));
+            // P124e round 9 (manager card): a grow that retries right after this relief must find the released
+            // chunks back in the driver's free pool.  Physical memory a chunk release lets go of is reclaimed
+            // when the card's work has drained, so a create issued in the same breath can still read the card
+            // as full (run 2: the cache was "asked to give 70 MiB and gave 70 MiB" and hipMemCreate failed
+            // with 0.13 of 15.92 GiB free).  The sync drains that reclamation before the grow's retry.
+            if (freed > 0) {
+                const strata::core::OnDevice on(eslot_dev(k));
+                strata::core::device_sync();
+            }
+            return freed;
         };
         // SAGUARO_VRAM_FLOOR_MIB (default 160 with --batch; 0: off): the VRAM a card keeps free for what is allocated
         // outside the expert cache and the slot budget (the solo windows' graphs, the drafter's prompt records, cuBLAS
@@ -14342,7 +14726,8 @@ vs.d_skip_usage = gs.d_skip_usage;
         std::function<void(int, const char*)> kv_check_hook;   // SAGUARO_KV_VERIFY (debug; set below)
         std::function<void(int, const char*)> slot_drop_save;   // --session-dir: a kept conversation saved before it is dropped
         auto slot_admit_fit = [&](int b, int64_t upto, std::string& e) -> bool {
-            if (!eslots_on) return true;
+            if (!efit_on) return true;   // (P124e: elastic VRAM ring OR elastic host copies - the slots' memory follows
+                                         // their conversations in both kinds; pinned-whole slots keep the old fast return)
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 const strata::core::OnDevice on_k(eslot_dev(k));
                 if (strata::core::device_sync() != cudaSuccess) { e = "elastic slots: device sync failed"; return false; }
@@ -14352,12 +14737,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                 for (int j = 0; !ok && j < (int) bs.size(); ++j) {
                     BSlot& sj = bs[(size_t) j];
                     bool big = false;
-                    for (const auto& v : bslot_ss) big = big || v[(size_t) j]->slot_cells > 1;
+                    for (const auto& v : bslot_ss)
+                        big = big || v[(size_t) j]->slot_cells > 1 ||
+                              strata::core::session_host_backed_cells(*v[(size_t) j]) > ehost_step;
                     if (j == b || j == admit_slot || sj.active || sj.reading || sj.partial != (pass == 1) || !big) continue;
                     if (slot_drop_save) slot_drop_save(j, "it gives its memory to another slot");
                     for (size_t k = 0; k < bslot_ss.size(); ++k) {
                         strata::core::SessionState& u = *bslot_ss[k][(size_t) j];
-                        if (u.slot_cells < 0) continue;
+                        if (u.slot_cells < 0 && !strata::core::session_host_elastic(u)) continue;
                         const strata::core::OnDevice on_k(eslot_dev(k));
                         (void) strata::core::session_slot_fit(u, 1, true);
                         strata::core::session_zero(u, g, nullptr, nullptr);   // its K/V map named the slots given back
@@ -14373,16 +14760,21 @@ vs.d_skip_usage = gs.d_skip_usage;
             // after this, or a pad row when the admission fails)
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 strata::core::SessionState& u = *bslot_ss[k][(size_t) b];
-                if (u.slot_cells < 0) continue;
+                if (u.slot_cells < 0 && !strata::core::session_host_elastic(u)) continue;
                 const strata::core::OnDevice on_k(eslot_dev(k));
                 strata::core::session_zero(u, g, nullptr, nullptr);
                 if (strata::core::device_sync() != cudaSuccess) { e = "elastic slots: device sync failed"; return false; }
             }
             if (!ok) {
+                // P124e (round 6, manager card): the grow is both halves - a device-state (VRAM) refusal is not
+                // "no RAM", and not the --batch budget's message either on a follow rig without one.
                 e = strata::core::qsa_host_pin_failed()
                         ? "no RAM is left to pin " + std::to_string(upto) + " cells of context in slot " + std::to_string(b)
-                        : "elastic slots: the slot budget (SAGUARO_ELASTIC_SLOTS_MIB) has no room for " + std::to_string(upto) +
-                              " cells in slot " + std::to_string(b);
+                        : strata::core::qsa_dev_pin_failed()
+                                ? "no VRAM is left for " + std::to_string(upto) + " cells of context in slot " +
+                                      std::to_string(b) + " (the card's expert cache gave all it can)"
+                                : "elastic slots: the slot budget (SAGUARO_ELASTIC_SLOTS_MIB) has no room for " +
+                                      std::to_string(upto) + " cells in slot " + std::to_string(b);
                 return false;
             }
             // the slots decoding beside it are backed a step ahead now, while everything is quiet; then idle slots and
@@ -14403,7 +14795,12 @@ vs.d_skip_usage = gs.d_skip_usage;
         auto slot_grow_or_end = [&](int b, int64_t need, const std::function<bool(size_t)>& quiet) -> int {
             BSlot& sl = bs[(size_t) b];
             bool backed = true;
-            for (const auto& v : bslot_ss) backed = backed && (v[(size_t) b]->slot_cells < 0 || need <= v[(size_t) b]->slot_cells);
+            for (const auto& v : bslot_ss) {   // P124e: behind in EITHER half (ring or host copy) and the window would
+                                               // touch memory the slot does not hold yet
+                const strata::core::SessionState& u = *v[(size_t) b];
+                const int64_t hc = strata::core::session_host_backed_cells(u);   // -1: host copy pinned whole
+                backed = backed && (u.slot_cells < 0 || need <= u.slot_cells) && (hc < 0 || need <= hc);
+            }
             if (backed) return 0;
             int r = slot_fit(b, need, false, quiet);
             while (r == 1 && strata::core::qsa_host_pin_failed() && ram_reclaim) {   // RAM: idle conversations give theirs
@@ -14419,12 +14816,15 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (r == 2) return 2;
             const bool ram = strata::core::qsa_host_pin_failed();
+            // P124e (round 6, manager card): a device-state (VRAM) refusal ends the slot as `vram`, not as RAM or length
+            const bool vram = !ram && strata::core::qsa_dev_pin_failed();
             std::fprintf(stderr, "saguaro batch: elastic slot %d ends at %lld tokens: %s\n", b, (long long) sl.p,
                          ram ? "no RAM is left to pin its context, and no idle conversation is left to give it (SAGUARO_KV_HOST_ELASTIC)"
-                             : "the slot budget has no room to grow (SAGUARO_ELASTIC_SLOTS_MIB)");
+                             : vram ? "no VRAM is left for its context, and the card's expert cache has given all it can (SAGUARO_KV_VRAM_ELASTIC)"
+                                    : "the slot budget has no room to grow (SAGUARO_ELASTIC_SLOTS_MIB)");
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
-            std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, ram ? "ram" : "length", ms,
-                        bdone_stats(b).c_str());
+            std::printf("BDONE %d %lld %s %.1f%s\n", b, (long long) sl.produced, ram ? "ram" : vram ? "vram" : "length",
+                        ms, bdone_stats(b).c_str());
             std::fflush(stdout);
             sl.active = false;
             sl.cached = o.prompt_cache > 0 && !sl.img && !sl.tainted;
@@ -14651,7 +15051,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             for (int b = 0; b < (int) bs.size(); ++b)
                 if (bs[(size_t) b].active)
                     e_hold[(size_t) b] = slot_yarn(b, bs[(size_t) b].p + (batch_mtp ? 3 : 2), in_prompt_read ? none : all_quiet) == 2;
-            if (eslots_on) {
+            if (efit_on) {
                 for (int b = 0; b < (int) bs.size(); ++b)
                     if (bs[(size_t) b].active && !e_hold[(size_t) b])
                         e_hold[(size_t) b] = slot_grow_or_end(b, bs[(size_t) b].p + (batch_mtp ? 3 : 2),
@@ -15693,7 +16093,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                             if (bs[(size_t) gm(pick, t)].active) wait = slot_yarn(gm(pick, t), g_need(t), stage_quiet) == 2 || wait;
                         if (wait || !group_active(pick)) continue;
                     }
-                    if (eslots_on) {
+                    if (efit_on) {
                         bool wait = false;
                         for (int t = 0; t < GS; ++t)
                             if (bs[(size_t) gm(pick, t)].active) wait = slot_grow_or_end(gm(pick, t), g_need(t), stage_quiet) == 2 || wait;
@@ -16142,7 +16542,10 @@ vs.d_skip_usage = gs.d_skip_usage;
         auto stage_covers = [&](const PfPart& p, int64_t reach) {
             const int64_t have = p.sp->stage_cells();
             if (have <= 0) return true;
-            const int64_t need = strata::prefill::Prefill::stage_cells_for(*p.ses, reach);
+            // P124e (round 8, manager card): an elastic conversation's loan is sized from what it is BACKED for
+            // (a loan whose staging reaches cells that are only addressed, not mapped, is a fault waiting).
+            const int64_t need = strata::prefill::Prefill::stage_cells_elastic(*p.ses, reach,
+                                                                               strata::core::session_backed_cells(*p.ses));
             return have >= (need > 0 ? need : p.ses->qsa_states[p.ses->qsa_primary()].max_cells);
         };
         // `reach`: the furthest cell the reads on this loan go to (0: any - the K/V staging covers the whole context)
@@ -16173,7 +16576,13 @@ vs.d_skip_usage = gs.d_skip_usage;
             bool any = false;
             for (PfPart& p : pf_parts) {
                 if (p.first < 0) continue;
-                const int64_t cells = o.prefill_head_alias ? 0 : strata::prefill::Prefill::stage_cells_for(*p.ses, reach);
+                // P124e (round 8, manager card): the staging is sized from the ELASTIC STATE (backed cells + the
+                // one step the read's grow runs ahead), not from a whole-context reach: what cannot be backed
+                // must not be staged, and a smaller region is a smaller loan (the cache keeps the slots).
+                const int64_t cells = o.prefill_head_alias
+                                          ? 0
+                                          : strata::prefill::Prefill::stage_cells_elastic(
+                                                *p.ses, reach, strata::core::session_backed_cells(*p.ses));
                 if (!p.lent.empty()) {
                     if (want <= p.lent_chunk && stage_covers(p, reach)) continue;   // its current loan already covers this
                     // ONLY this participant's loan goes back: `refill` would return the other participants'
@@ -16222,6 +16631,27 @@ vs.d_skip_usage = gs.d_skip_usage;
                     first = (int32_t) (p.cache->slots() - need_p);
                 }
                 if (want_p != p.sp->chunk() || first != p.first_now || (!o.prefill_head_alias && !stage_covers(p, reach))) {
+                    // SAGUARO_DEBUG_SLOT_GUARD: the relaid loan must not reach a slot another part loans on this
+                    // cache or a chunk either give-way handed out - the loan's region is the one the round-10
+                    // card suspects the give-ways of crossing with (round 10 update 2's lead, from one line).
+                    if (strata::core::slot_give_guard_on()) {
+                        std::vector<strata::core::GiveLoan> ls;
+                        for (const PfPart& q : pf_parts)
+                            if (&q != &p && q.cache == p.cache && q.first_now >= 0)
+                                ls.push_back({q.cache, q.gname.c_str(), q.first_now, q.cache->slots()});
+                        const std::string what = "CUDA" + std::to_string(p.dev < 0 ? 0 : p.dev) +
+                                                 " lays the prompt buffers down again";
+                        int64_t cl = -1, ch = -1;
+                        if (p.cache->vmm_range() != nullptr && p.cache->vmm_range()->granularity() != 0) {
+                            const uint64_t gG = p.cache->vmm_range()->granularity();
+                            cl = (int64_t) (p.cache->slot_offset(first) / gG);
+                            ch = (int64_t) ((p.cache->slot_offset(p.cache->slots()) + gG - 1) / gG);
+                        }
+                        strata::core::slot_give_guard(p.cache, {"loan relayout", what.c_str(), first,
+                                                                p.cache->slots(), cl, ch}, ls,
+                                                      guard_regions ? guard_regions(p.cache)
+                                                                    : std::vector<strata::core::GiveRegion>{});
+                    }
                     const int64_t had = p.sp->stage_cells();
                     if (!p.sp->relayout(want_p, p.cache->device_slot(first), part_bytes(p, first), e, cells,
                                         keep_p)) return false;
@@ -16802,7 +17232,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             {   // (the note covers this block only)
             const auto t_fit = Clock::now();
             struct FitNote { std::function<void()> f; ~FitNote() { f(); } } fit_note{[&] { note("room made for the slot (queued reads waited for, groups drained)", t_fit); }};
-            if (eslots_on) {
+            if (efit_on) {
                 const std::function<bool(size_t)> busy = [](size_t) { return false; };
                 if (slot_fit(b, n + 1, false, busy) != 0) {
                     std::string fe;
@@ -17370,7 +17800,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                                  fl_lane_row_ms, fl_fixed, (long long) (n >> 16), fl_extend ? "the lane" : "the queued way");
                 if (!fl_extend) return false;
             }
-            if (eslots_on) {   // backed for the whole read now, or the queued way (which may make room)
+            if (efit_on) {   // backed for the whole read now, or the queued way (which may make room)
                 const std::function<bool(size_t)> busy = [](size_t) { return false; };
                 if (slot_fit(b, n + 1 + strata::kernels::kVerifyMaxT, false, busy) != 0) return false;
             }
@@ -18737,8 +19167,10 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (b == keep || b == admit_slot || sl.active || sl.reading || sl.partial || adm_queued[(size_t) b] ||
                     adm_paused[(size_t) b] || adm_reading == b || adm_stop_of[(size_t) b] != nullptr)
                     continue;
-                bool big = false;
-                for (const auto& v : bslot_ss) big = big || v[(size_t) b]->slot_cells > 1;
+                bool big = false;   // (P124e: VRAM-ring cells or host-copy cells past the start step - parking gives both back)
+                for (const auto& v : bslot_ss)
+                    big = big || v[(size_t) b]->slot_cells > 1 ||
+                          strata::core::session_host_backed_cells(*v[(size_t) b]) > ehost_step;
                 if (big && (j < 0 || sl.t0 < bs[(size_t) j].t0)) j = b;
             }
             const double pinned0 = (double) strata::core::qsa_kv_host_bytes() / 1073741824.0;
@@ -18748,7 +19180,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (sj.cached) (void) persist_slot(j, false, {}, false, "it gives its pinned RAM to another conversation", true);
                 for (size_t k = 0; k < bslot_ss.size(); ++k) {
                     strata::core::SessionState& u = *bslot_ss[k][(size_t) j];
-                    if (u.slot_cells < 0) continue;
+                    if (u.slot_cells < 0 && !strata::core::session_host_elastic(u)) continue;   // P124e: host copies count too
                     const strata::core::OnDevice on_k(eslot_dev(k));
                     (void) strata::core::session_slot_fit(u, 1, true);
                     strata::core::session_zero(u, g, nullptr, nullptr);   // its K/V map named the page slots given back
@@ -18789,12 +19221,14 @@ vs.d_skip_usage = gs.d_skip_usage;
         // the server's orderly QUIT.  SIGKILL still ends it.
         std::signal(SIGTERM, SIG_IGN);
         std::signal(SIGINT, SIG_IGN);
-        // an allocation that fails for lack of VRAM (a window graph, the drafter's records) asks for it here: the card's
-        // budget spare, and its expert cache when this thread asks and the card is quiet (any other thread: the spare)
+        // an allocation that fails for lack of VRAM (a window graph, the drafter's records, and - P124e round 4 - a
+        // follow grow) asks for it here: the card's budget spare, and its expert cache when this thread asks and the
+        // card is quiet (any other thread: the spare).  With the follow rule there is no --batch budget at all: the
+        // give runs from the cache to the budget and straight back to the driver again (free_to_driver's release).
         const std::thread::id serve_thread = std::this_thread::get_id();
-        if (eslots_on)
+        if (eslots_on || efollow_on)
             strata::core::set_vram_relief([&](int dev, uint64_t bytes) -> uint64_t {
-                for (size_t k = 0; k < bslot_ss.size(); ++k) {
+                for (size_t k = 0; k < gv.size(); ++k) {   // (one Give per card: CUDA0 and each stage)
                     if (eslot_dev(k) != dev) continue;
                     const uint64_t G = strata::core::vmm_granularity(dev);
                     if (G == 0) return 0;
@@ -19318,7 +19752,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                     if (stage_invalid) { refuse(err); continue; }
                     if (!solo_host_fit_r((int64_t) image.live.ids.size() + 256) ||   // SAGUARO_KV_HOST_ELASTIC: its cells pinned
-                        (solo_vram_fit && !solo_vram_fit((int64_t) image.live.ids.size() + 256))) {
+                        (solo_vram_fit && !solo_vram_fit((int64_t) image.live.ids.size() + 256, -1))) {
                         refuse("no memory (RAM or VRAM) is left for the saved conversation's context", strata::core::SessionError::memory);
                         continue;
                     }
@@ -19599,10 +20033,21 @@ vs.d_skip_usage = gs.d_skip_usage;
             // goes: a reply that may run to the end of a long context does not hold it all from the start)
             int64_t solo_pin = std::min<int64_t>(o.max_context, n + (pipe ? max_new : std::min<int64_t>(max_new, kSoloPinAhead)) + 64);
             if (!solo_host_fit_r(solo_pin)) {
-                std::printf("ERR no RAM is left to pin this request's context (%lld tokens)\n", (long long) solo_pin);
+                // P124e (round 6, manager card): session_host_fit grows BOTH halves - a device-state (VRAM) refusal
+                // must not answer with the RAM message (the card read "no RAM is left" with GiBs of RAM free).
+                if (strata::core::qsa_dev_pin_failed())
+                    std::printf("ERR no VRAM is left for this request's context (%lld tokens): the card's expert cache "
+                                "gave all it can\n",
+                                (long long) solo_pin);
+                else
+                    std::printf("ERR no RAM is left to pin this request's context (%lld tokens)\n", (long long) solo_pin);
                 continue;
             }
-            if (solo_vram_fit && !solo_vram_fit(std::min<int64_t>(o.max_context, n + max_new + 64))) {
+            // P124e (round 7, manager card): the K/V state is backed for the whole request (the plan: grow ahead of
+            // need, once, at the start of the read); the RoPE rows are NOT - they are backed for the positions in
+            // use plus the reply's ahead-step (the same rule and the same kSoloPinAhead the host copies use,
+            // `solo_pin`), so a max_new that runs to the end of a 1M context does not pin the whole RoPE table.
+            if (solo_vram_fit && !solo_vram_fit(std::min<int64_t>(o.max_context, n + max_new + 64), solo_pin)) {
                 std::printf("ERR no VRAM is left for this request's context (%lld tokens)\n", (long long) (n + max_new));
                 continue;
             }
@@ -20117,7 +20562,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 }
             }
             if (incoming && (!solo_host_fit_r((int64_t) incoming->live.ids.size() + 256) ||   // SAGUARO_KV_HOST_ELASTIC
-                             (solo_vram_fit && !solo_vram_fit((int64_t) incoming->live.ids.size() + 256)))) {
+                             (solo_vram_fit && !solo_vram_fit((int64_t) incoming->live.ids.size() + 256, -1)))) {
                 std::printf("ERR no memory (RAM or VRAM) is left for the parked conversation's context\n");
                 return 1;
             }
@@ -20693,14 +21138,76 @@ vs.d_skip_usage = gs.d_skip_usage;
                     ConvCheckpoint::PromptPlan& p;
                     ~SegPlanScope() { p = {}; }
                 } seg_plan_scope{seg_plan};
-                auto run = [&](int64_t q, int64_t r) -> bool {
-                    if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
-                    const ShareScope share_scope(read_share_set, read_share_now());
-                    pp_run_begin();   // (this request's own read clock: the pieces between two runs - the slots'
-                    const bool ok = sp.run(ids.data() + q, r - q, q, e);
-                    pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
-                    return ok;
+                auto run = [&](int64_t q0r, int64_t r, std::string& e, int64_t* stop_at = nullptr) -> bool {
+                    if (stop_at != nullptr) *stop_at = -1;
+                    int64_t q = q0r;
+                    // P124e (round 8, manager card): on an elastic conversation a run never reaches a cell the
+                    // conversation has not BACKED (host copy, device state, RoPE rows - the arrays hold
+                    // addresses for the context and memory only for their backed prefix): back ahead of every
+                    // piece through the request-start fits (the give-way included) and cut the piece at the
+                    // backed / staged end.  Normally this is one piece: the fits at the request's start backed
+                    // the whole prompt (the plan's grow-ahead-need-once), and nothing here changes.
+                    // P124e (round 9, manager card): the error is a parameter, because the PIPED-CONCURRENT reader
+                    // (below) runs this SAME loop with its own - a read thread that bypassed it grew past the
+                    // backed cells with only prefill's refusal gate between it and an unmapped page.  And a run
+                    // that its stop_at_chunk ended early (the concurrent reader's BYIELD / VLEND) returns with
+                    // the cells past the stop NOT read: q must never advance past them.
+                    while (q < r) {
+                        const int64_t staged = sp.stage_cells() > 0 ? sp.stage_cells() : o.max_context;
+                        int64_t qe = strata::core::read_piece_end(r, solo_backed_cells(), staged);
+                        if (qe <= q) {
+                            if (staged <= q && staged < r) {   // the loan's staging ends before the piece does
+                                e = "the K/V staging ends at cell " + std::to_string(staged) + ", the read reaches " +
+                                    std::to_string(r) + " (out of memory: the slots it can lend stay shorter than " +
+                                    "the read)";
+                                return false;
+                            }
+                            const int64_t req_end = std::min<int64_t>(o.max_context, n + max_new + 64);
+                            const int64_t want = std::min(staged, std::max(strata::core::read_back_cells(q, kSoloPinAhead,
+                                                                                                         req_end),
+                                                                           q + 1));
+                            if (want <= q) {
+                                e = "the read reaches past the cells this conversation can back (out of memory)";
+                                return false;
+                            }
+                            if (!solo_host_fit_r(want)) {
+                                e = std::string(strata::core::qsa_dev_pin_failed()
+                                                    ? "no VRAM is left to back the read's context"
+                                                    : "no RAM is left to back the read's context") +
+                                    " (out of memory: cell " + std::to_string(want) + ")";
+                                return false;
+                            }
+                            if (solo_vram_fit && !solo_vram_fit(req_end, want)) {
+                                e = "no VRAM is left to back the read's context (out of memory)";
+                                return false;
+                            }
+                            qe = strata::core::read_piece_end(r, solo_backed_cells(), staged);
+                            if (qe <= q) {
+                                e = "the read reaches past the cells this conversation can back (out of memory)";
+                                return false;
+                            }
+                        }
+                        if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
+                        const ShareScope share_scope(read_share_set, read_share_now());
+                        pp_run_begin();   // (this request's own read clock: the pieces between two runs - the slots'
+                        const bool ok = sp.run(ids.data() + q, qe - q, q, e);
+                        pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
+                        if (!ok) return false;
+                        // P124e (round 9, manager card): Prefill::stop_at_chunk (live only for the concurrent reader:
+                        // a BYIELD or a pending lend) ended this run at its next chunk - the piece did NOT finish and
+                        // the cells past the stop were never read.  Hand the run back as "stopped, not failed" with
+                        // the stop cell reported ABSOLUTE (this piece started at q: the stopped_at() a caller adds
+                        // to the segment's start would point inside an earlier piece once the loop has moved on);
+                        // advancing q to qe here would skip the rest of the prompt silently.
+                        if (const int64_t s = sp.stopped_at(); s >= 0) {
+                            if (stop_at != nullptr) *stop_at = q + s;
+                            return true;
+                        }
+                        q = qe;
+                    }
+                    return true;
                 };
+                auto run1 = [&](int64_t q, int64_t r) -> bool { return run(q, r, e); };
                 // (a layer split reads its stages as a pipeline over one run's chunks: beside slots a chunk at a time, with
                 // none decoding in pieces of SAGUARO_BATCH_YIELD_CHUNKS chunks (default 8; 0 = one run) so a BYIELD is taken)
                 static const int64_t yield_chunks = [] {
@@ -20931,6 +21438,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         std::atomic<bool> lend_yield{false};   // review 4b: a pending lend asks this read to stop at its next chunk
                         bool read_ok = true;
                         std::string read_err;
+                        int64_t read_stop = -1;   // (round 9: the piece loop's stop cell, absolute; -1: the run finished)
                         in_prompt_read = true;
                         sp.stop_at_chunk = [&] {
                             return want_yield.load(std::memory_order_acquire) >= 0 ||
@@ -20939,10 +21447,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                         const ShareScope share_scope(read_share_set, read_share_now());   // (after the reader's join)
                         std::thread reader([&] {
                             conc_thread_cpus();
-                            try {   // (an exception leaving a std::thread ends the process: a failed read instead)
-                                if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
-                                pp_run_begin();   // (the read's own thread runs it: its time is this request's
-                                read_ok = sp.run(ids.data() + q0, b0 - q0, q0, read_err);
+                             try {   // (an exception leaving a std::thread ends the process: a failed read instead)
+                                // P124e (round 9, manager card): the CONCURRENT read runs the same elastic piece
+                                // loop as every other read (its backed cut, its back-ahead fits and its stop
+                                // handling - here the stop is reported through read_stop, absolute; the plain
+                                // sp.run below bypassed all of it, leaving only prefill's refusal gate between a
+                                // long read and an unmapped cell).  The loop keeps the read's own clock (the
+                                // pp_run pair is inside it).
+                                read_ok = run(q0, b0, read_err, &read_stop);
                             } catch (const std::exception& x) {
                                 read_ok = false;
                                 read_err = std::string("the prompt read failed: ") + x.what();
@@ -20950,7 +21462,6 @@ vs.d_skip_usage = gs.d_skip_usage;
                                 read_ok = false;
                                 read_err = "the prompt read failed";
                             }
-                            pp_run_end();   //  read time; pumping the slots between the rounds is not)
                             done.store(true, std::memory_order_release);
                             { std::lock_guard<std::mutex> lk(in_mu); }   // (the loop below may be waiting on in_cv)
                             in_cv.notify_all();
@@ -21017,7 +21528,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                             e = "a pipelined batch window failed";
                             return false;
                         }
-                        const int64_t q = read_ok && sp.stopped_at() >= 0 ? q0 + sp.stopped_at() : b0;
+                        // round 9: the stop cell comes from the piece loop (absolute) - the bare stopped_at() is
+                        // relative to the LAST sp.run, which once the loop has backed ahead is no longer q0's run
+                        const int64_t q = read_ok && read_stop >= 0 ? read_stop : b0;
                         const double read_ms = std::chrono::duration<double, std::milli>(Clock::now() - tc).count();
                         std::string per;
                         for (int k = 0; k < n_pipe; ++k) {
@@ -21127,11 +21640,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                 }
                 int64_t piece = piece_now();
-                if (piece <= 0) return run(a0, b0);
+                if (piece <= 0) return run1(a0, b0);
                 for (int64_t q = a0; q < b0;) {
                     const int64_t r = std::min(b0, q + piece);
                     const auto tq = Clock::now();
-                    if (!run(q, r)) return false;
+                    if (!run1(q, r)) return false;
                     const double piece_ms = std::chrono::duration<double, std::milli>(Clock::now() - tq).count();
                     if (pr_on && r < b0) pr_prev_piece_ms = piece_ms;
                     const int64_t piece_tokens = r - q;
@@ -21305,10 +21818,15 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::fprintf(stderr, "saguaro serve: pin=%lld: the cache has no checkpoint there to pin (it resumed from "
                                  "%lld)\n", (long long) req_pin, (long long) read_from);
             }
-            // SAGUARO_YARN_ELASTIC: the YaRN rows for every cell this request can reach (as the plain ones were backed)
-            auto solo_yarn_rows = [&]() -> bool {
-                const int64_t cells = std::min<int64_t>(o.max_context, n + max_new + 64);
-                if (solo_vram_fit) return solo_vram_fit(cells);
+            // SAGUARO_YARN_ELASTIC: the YaRN rows for the positions this conversation has REACHED (`at`), plus the
+            // reply's ahead-step - P124e (round 7, manager card): NOT every cell the request can reach.  Backing
+            // 0 + max_new rows at the switch pinned the whole table (n + max_new + 64 is --max-context itself when
+            // max_new runs to the end of the context); the rows past `at` arrive chunk by chunk from the fits that
+            // track the conversation (the decode's 32K-ahead step, slot_fit's grow target) exactly as the host
+            // copies' do, and they take their room from the expert cache before they map (round 7 fix 1).
+            auto solo_yarn_rows = [&](int64_t at) -> bool {
+                const int64_t cells = std::min<int64_t>(o.max_context, std::min<int64_t>(n + max_new, at + kSoloPinAhead) + 64);
+                if (solo_vram_fit) return solo_vram_fit(cells, cells);
                 bool ok = true;
                 for (size_t k = 0; k <= stages.size(); ++k) {
                     const strata::core::SessionState& u = k == 0 ? ss : stages[k - 1]->ss;
@@ -21326,7 +21844,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     return false;
                 conversations.limit_reuse(0);
                 turn_main.reset();
-                if (!solo_yarn_rows()) { e = "no VRAM for the YaRN RoPE rows"; return false; }
+                if (!solo_yarn_rows(p)) { e = "no VRAM for the YaRN RoPE rows"; return false; }   // (p: the cells it has; the window lands inside the ahead-step)
                 return true;
             };
             if (yarn_rows) {   // SAGUARO_YARN_ELASTIC: the level this request reads on at
@@ -21351,10 +21869,18 @@ vs.d_skip_usage = gs.d_skip_usage;
                     for (auto* u : sx) u->rope_level = want ? 1 : 0;
                 }
                 if (ss.rope_level == 0) yarn_trim();
-                if (ss.rope_level == 1 && !solo_yarn_rows()) {
+                if (ss.rope_level == 1 && !solo_yarn_rows(n)) {   // (n: the prompt this read reaches)
                     std::printf("ERR no VRAM for the YaRN RoPE rows\n");
                     return 1;
                 }
+            }
+            // P124e (round 8, manager card): the elastic conversation's reads are checked against what it is
+            // BACKED for (host copy, device follow state, RoPE rows) as well as against the staging - a chunk
+            // reaching past the backed end is refused with an error, never read through unmapped memory.
+            // Pinned-whole rigs (nothing elastic) keep today's exact path.
+            if (strata::core::session_host_elastic(ss)) {
+                sp.set_backed_limit(true);
+                for (auto& st : stages) st->sp.set_backed_limit(true);
             }
             std::vector<int64_t> cuts = {reread_to, root_at, message_at, turn_at, n - 1};
             if (pin_at >= 0) {
@@ -21402,7 +21928,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         return true;
                     }
                 // SAGUARO_ELASTIC_SLOTS: each slot backed for the prompt first (their conversations are dropped anyway)
-                for (int b = 0; b < N && eslots_on; ++b)
+                for (int b = 0; b < N && efit_on; ++b)
                     if (!slot_admit_fit(b, len, err)) return false;
                 // the first stage's PLE for the slots' sessions: the main one's table, weights and consts, each slot's own
                 // history and predecessors, and a scratch of the reads' own (as SAGUARO_SLOT_ADMIT wires it)
@@ -22584,9 +23110,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 if (p + T + 64 > solo_pin) {   // SAGUARO_KV_HOST_ELASTIC: the next stretch of the reply pinned
                     const int64_t want = std::min<int64_t>(o.max_context, std::min<int64_t>(n + max_new, p + T + kSoloPinAhead) + 64);
                     if (!solo_host_fit_r(want)) {
-                        std::fprintf(stderr, "saguaro serve: no RAM is left to pin the reply past %lld tokens: it ends here\n",
-                                     (long long) p);
-                        finish = "ram";
+                        // P124e (round 6, manager card): the grow is both halves - when the card's device state is what
+                        // refused, the reply ends as `vram` (the server's no-VRAM end), not as a RAM shortage.
+                        const bool vram = strata::core::qsa_dev_pin_failed();
+                        std::fprintf(stderr, "saguaro serve: no %s is left to pin the reply past %lld tokens: it ends here\n",
+                                     vram ? "VRAM" : "RAM", (long long) p);
+                        finish = vram ? "vram" : "ram";
                         break;
                     }
                     solo_pin = want;
@@ -23121,6 +23650,18 @@ vs.d_skip_usage = gs.d_skip_usage;
             if (o.lookup_chain > 0)
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
+            // P124e (round 9, manager card): the card's run 1 was "[saguaro] done: 0 tokens ... (length, cancel=
+            // False)" three and a half seconds after the staging line - a 546K read cannot end in that time, and
+            // the engine said nothing.  An answer with no tokens and no reason is the one end that must not be
+            // silent: say where the read got, how far decode reached and what the card backed.  (The DONE line
+            // carries the same numbers to the server, but nothing on it says WHY a zero is a clean end.)
+            if (produced_n == 0 && !cancelled && yielded_at < 0 && std::strcmp(finish, "length") == 0)
+                std::fprintf(stderr, "saguaro serve: the request ends with no tokens and no reason: the read reached "
+                                     "%lld of %lld cells, the decode %lld, max_new %lld, the staging holds %lld "
+                                     "cells, the conversation is backed to %lld%s\n",
+                             (long long) pp_reached, (long long) n, (long long) p, (long long) max_new,
+                             (long long) (sp.stage_cells() > 0 ? sp.stage_cells() : o.max_context),
+                             (long long) solo_backed_cells(), pl_ran ? ", the pipelined decode ran" : "");
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s chunk=%lld "
                         "experts_streamed=%lld\n",

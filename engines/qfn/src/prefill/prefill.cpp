@@ -7,6 +7,7 @@
 #endif
 #include "strata/prefill/warm_policy.hpp"
 #include "strata/prefill/kv_prefix_keep.hpp"
+#include "strata/core/read_backing.hpp"
 #include <atomic>
 #if defined(__cpp_lib_atomic_wait)
 #define STRATA_ATOMIC_WAIT 1   // #1488: std::atomic::wait / notify_all are a GCC 11 library feature; GCC 10 spins instead
@@ -1045,6 +1046,7 @@ struct Prefill::Impl {
     int32_t* keep_ok = nullptr;        ///< pinned: the host-copy fingerprint check's verdict (kernel-written)
     int32_t* keep_ok_dev = nullptr;
     int64_t stage_want = 0, stage_cells = 0;   // the staging's cells to lay out (0: every page) and laid out
+    bool check_backed = false;   // P124e round 8: refuse segments reaching past the session's BACKED cells too
     int32_t* ident_table = nullptr;
     cudaStream_t kv_copy = nullptr;
     cudaEvent_t kv_released = nullptr, kv_ready = nullptr;
@@ -1941,6 +1943,7 @@ bool Prefill::relayout(int64_t chunk, void* borrow, uint64_t borrow_bytes, std::
 
 int64_t Prefill::chunk() const { return impl_->T; }
 int64_t Prefill::stage_cells() const { return impl_->stage_cells; }
+void Prefill::set_backed_limit(bool on) { if (impl_ != nullptr) impl_->check_backed = on; }
 bool Prefill::kv_keep_wanted() { return kv_keep_env(); }
 void Prefill::kv_keep_invalidate() {
     for (auto& r : impl_->keep_recs) strata::prefill::kv_keep_invalidate(r);
@@ -1956,10 +1959,21 @@ int64_t Prefill::stage_cells_for(const core::SessionState& ss, int64_t reach) {
         const char* e = std::getenv("SAGUARO_STAGE_HEADROOM");
         return e == nullptr || std::atoi(e) != 0;
     }();
-    const int64_t want = headroom ? std::min(full, reach + std::max<int64_t>(65536, reach / 4)) : reach;
-    const int64_t base = 262144, step = 131072;
-    return want <= base ? std::min(full, base) : std::min(full, (want + step - 1) / step * step);
+    return strata::core::stage_grid_cells(reach, full, headroom);
 }
+int64_t Prefill::stage_cells_elastic(const core::SessionState& ss, int64_t reach, int64_t backed) {
+    // P124e (round 8, manager card): on an elastic conversation the loan is sized from the state: what is
+    // BACKED now plus the one step the read's grow runs ahead of its pieces (core::read_backing.hpp) - the
+    // headroom may never promise cells whose host copy / follow state / RoPE rows are not mapped.
+    const int64_t full = ss.qsa_states[ss.qsa_primary()].max_cells;
+    if (reach <= 0 || stage_reach_off()) return 0;
+    static const bool headroom = [] {
+        const char* e = std::getenv("SAGUARO_STAGE_HEADROOM");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return strata::core::stage_cells_elastic(reach, backed, full, headroom);
+}
+
 
 void Prefill::set_session(core::SessionState& ss) { if (impl_ != nullptr) impl_->ss = &ss; }
 core::SessionState& Prefill::session() const { return *impl_->ss; }
@@ -3280,12 +3294,20 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         for (int64_t t = 0; t < T; ++t) { prev[0] = prev[1]; prev[1] = (int32_t) tokens[c0 + t]; }
         // the chunk's segments: the run itself, or a batch's prompts (each its own positions and sequence state)
         const std::vector<RunSeg> segv = bat ? bsegs : std::vector<RunSeg>{RunSeg{&ss, 0, T, p0, {prev[0], prev[1]}}};
-        // the K/V staging holds the cells its loan was laid out for: a segment reaching past them is refused, never read
+        // the K/V staging holds the cells its loan was laid out for: a segment reaching past them is refused, never read.
+        // P124e (round 8, manager card): on an elastic conversation the same gate now also checks what the session is
+        // BACKED for (host copy, follow state, RoPE rows) - the staging is sized from the grid, and the cells past
+        // the backed end have addresses but no memory: an index into them faults, it does not refuse.
         for (const RunSeg& sg : segv)
-            if (m.stage_cells > 0 && sg.ss->qsa_states[sg.ss->qsa_primary()].kv_mode == 1 && sg.p0 + sg.n > m.stage_cells) {
-                err = "prefill: the K/V staging holds " + std::to_string(m.stage_cells) + " cells, the chunk reaches " +
-                      std::to_string(sg.p0 + sg.n) + " (its loan was laid out for a shorter read)";
-                return false;
+            if (m.stage_cells > 0 && sg.ss->qsa_states[sg.ss->qsa_primary()].kv_mode == 1) {
+                int64_t lim = m.stage_cells;
+                if (m.check_backed) lim = std::min(lim, strata::core::session_backed_cells(*sg.ss));
+                if (sg.p0 + sg.n > lim) {
+                    err = "prefill: the K/V staging and the backed context hold " + std::to_string(lim) +
+                          " cells, the chunk reaches " + std::to_string(sg.p0 + sg.n) +
+                          " (its loan was laid out for a shorter read)";
+                    return false;
+                }
             }
         // ---- the QSA step records of every position in the chunk
         for (const RunSeg& sg : segv)

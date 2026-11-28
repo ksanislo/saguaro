@@ -3465,6 +3465,119 @@ uint64_t FileExpertSource::release(int64_t layer, int64_t expert) {
 #endif
 }
 
+// P124e: a growing conversation's K/V has run out of RAM: the resident complement gives way from its coldest end
+// (the copy is laid out hottest-first, so walking its slots by descending arena offset IS coldest-first, as
+// DS4's take-from-experts does in VRAM).  A trimmed slot goes back to `kNoCacheComplement`, so its later reads fall
+// through to the mapped files; its working-set lock is undone and its pages are madvised away.  The registered
+// prefix (the PCIe-read share) is never trimmed; neither can a cudaHostAlloc arena be.  The relief handler synced
+// every device, so the card reads none of these bytes; the CPU lanes are not stopped, so this gives way in two
+// phases: trim the offsets and unlock first (a reader that latched a blob's address before the offset flip keeps
+// reading whole bytes - unlocking does not drop them), wait out the grace window, and only then discard the pages
+// with MADV_DONTNEED, so no CPU reader can ever see zero-filled expert weights.  The bytes `gave` counts are the
+// bytes discarded.  Relief runs serialized under layer.cpp's g_host_mu (qsa_host_grow) and only when a pin failed,
+// so the one wait per give-way costs nothing on any serving path.  Phase 1 additionally runs under this source's
+// complement_mu_, which excludes it with every complement_offsets_ WRITER (commit_exchanges, commit_flip,
+// install_resident - P124e round 2 finding 3: the grace window only ever covered readers).
+uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
+    if (bytes == 0 || !complement_ready_ || complement_host_ == nullptr || exchange_storage_.active()) return 0;
+    if (complement_pinned_ && !complement_registered_) return 0;   // cudaHostAlloc: the driver holds it whole
+#if defined(_WIN32)
+    return 0;   // (the complement's pages are VirtualLock'ed whole: giving a slice back waits for a Windows rig)
+#else
+    const uint64_t page = 4096;
+    // P124e r2 finding 4: the run/page arithmetic below rounds relative to complement_host_, which is only
+    // page-aligned on the posix_memalign arenas.  The pageable fallback (pin refused by cudaHostAlloc,
+    // std::malloc) hands back an arbitrary address: madvise(MADV_DONTNEED) on a non-page boundary is EINVAL
+    // (swallowed), munlock's rounding stops matching complement_locked_, and the give-way would report GiBs
+    // it never freed - a park bought with a lie and a retry that fails again.  Decline that arena.
+    if (((uintptr_t) complement_host_ & (page - 1)) != 0) return 0;
+    const uint64_t keep_below = complement_registered_ ? complement_pin_limit_ : 0;   // the registered prefix stays
+    struct Slot {
+        size_t index;
+        uint64_t off, len;
+    };
+    // phase 1: trim the offsets (readers from here route to the files) and undo the locks; the page-runs wait
+    std::vector<std::pair<uint64_t, uint64_t>> runs;   // [lo, hi) page-runs to discard after the grace window
+    uint64_t gave = 0;
+    std::vector<Slot> slots;
+    // P124e r2 finding 3: the snapshot and every offset trim run under complement_mu_, held by the writers of
+    // complement_offsets_ (commit_exchanges/commit_flip/install_resident) from reading a slot's place through
+    // naming it for an incoming expert.  Without it a writer that passed its != kNoComplement check before the
+    // flip could adopt a slot relief had just trimmed, and phase 2 would discard the expert bytes copied there -
+    // silent wrong weights.
+    // P124e r3 finding 1: the scope is now literally phase 1, as the comment always promised.  Held across the
+    // grace sleep and the madvise it stalled every offset writer - the decode path's commit_exchanges/commit_flip/
+    // install_resident - for the whole relief window (default 250 ms) exactly when RAM is short, and the give-way
+    // happens on the grow that is already holding layer.cpp's g_host_mu.  That is still SAFE (a trimmed range's
+    // offset reads kNoComplement to every writer forever: exchange_cache_complement and the copy checks take their
+    // `at` from a LIVE slot, so bytes are never written into a range phase 1 flipped away), but a quarter-second
+    // pause of the expert tier's own commits per relief is not.  `runs` and `gave` are locals; phase 2 needs no lock.
+    {
+        std::lock_guard<std::mutex> cmu_lk(complement_mu_);
+        for (size_t i = 0; i < complement_offsets_.size(); ++i) {
+            if (complement_offsets_[i] == kNoComplement) continue;
+            const uint64_t len = layer_blob_bytes_[(size_t) (i / (size_t) n_expert_)];
+            slots.push_back({i, complement_offsets_[i], len});
+        }
+        std::sort(slots.begin(), slots.end(), [](const Slot& a, const Slot& b) { return a.off > b.off; });
+        for (const Slot& s : slots) {
+            if (gave >= bytes) break;
+            if (s.off < keep_below) continue;   // (straddling or inside the registered prefix: stays)
+            // page-run [lo, hi) of this slot's bytes (a shared boundary page stays for the neighbour)
+            const uint64_t lo = (s.off + page - 1) / page * page;
+            const uint64_t hi = (s.off + s.len) / page * page;
+            // the offset flip is a release store the lock-free readers race with: each sees the old offset (and the
+            // grace window below covers its read) or kNoComplement (and reads the files) - never a torn middle
+            std::atomic_ref<uint64_t>(complement_offsets_[s.index]).store(kNoComplement, std::memory_order_release);
+            if (hi > lo) {
+                // its working-set lock first, in EVERY backing mode: the lock covers [lock_off, lock_off + locked)
+                // whatever the registration state, and the paced/CS-T complement is BOTH a registered prefix AND an
+                // mlock'ed tail above it (lock_off = the registered share) - exactly the bytes the trims sit on
+                // (keep_below = the pin limit).  Registered pages the kernels must not lose are the prefix, and slots
+                // inside it are skipped above; a locked page survives MADV_DONTNEED (the kernel's zap skips it, the
+                // call still answers 0), so without this unlock the runs below are claimed but never given back.
+                const uint64_t a = (uint64_t) (uintptr_t) (complement_host_ + lo);
+                const uint64_t lock_lo = (uint64_t) (uintptr_t) complement_host_ + complement_lock_off_;
+                const uint64_t lock_hi = lock_lo + complement_locked_;
+                const uint64_t u0 = std::max(a, lock_lo), u1 = std::min(a + (hi - lo), lock_hi);
+                if (complement_locked_ > 0 && u1 > u0) {
+                    strata::platform::unlock_resident((void*) u0, u1 - u0);
+                    // the only writer of the counter once serving runs (pin sets it, close() frees the arena): the
+                    // atomic_ref only makes the load-time/teardown reads of locked_bytes() race-free
+                    std::atomic_ref<uint64_t>(complement_locked_).store(complement_locked_ - (u1 - u0),
+                                                                        std::memory_order_relaxed);
+                }
+                runs.push_back({lo, hi});
+                // P124e r2 finding 9: `gave` counts the bytes this call DISCARDS (the header's promise, and what the
+                // grow retry needs freed) - a slot whose bytes sit on shared boundary pages leaves no interior run to
+                // discard, and counting its whole blob reported relief that freed nothing while the grow retried.
+                gave += hi - lo;
+            }
+        }
+    }   // complement_mu_ goes here: the grace wait and the madvise run WITHOUT it (P124e r3 finding 1)
+    if (gave == 0) return 0;
+    if (!runs.empty()) {
+        // phase 2, after the grace window: what remains are CPU-lane readers that latched a blob pointer before
+        // phase 1 flipped its offset - a blob copy into staging or the expert compute of the tokens routed through
+        // it, milliseconds each (the card is synced by the relief handler).  Past the window none can still touch
+        // these bytes, so discarding them gives the RAM back without ever zeroing a live read.
+        static const long grace_ms = [] {
+            const char* v = std::getenv("SAGUARO_KV_RELIEF_GRACE_MS");
+            const long long n = v != nullptr ? std::atoll(v) : 250;
+            return n > 0 ? (long) n : 0L;   // =0: discard without waiting (test rigs; not for serving)
+        }();
+        if (grace_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(grace_ms));
+        for (const std::pair<uint64_t, uint64_t>& r : runs)
+            (void) madvise((void*) ((uintptr_t) complement_host_ + r.first), (size_t) (r.second - r.first),
+                           MADV_DONTNEED);
+    }
+    std::fprintf(stderr, "FileExpertSource: the resident expert tier gave way to a growing conversation's K/V: "
+                         "%.2f GiB of its coldest experts handed back (%.2f GiB were resident); their reads go "
+                         "back to the files\n", (double) gave / 1073741824.0, (double) complement_bytes_ / 1073741824.0);
+    return gave;
+#endif
+}
+
 bool FileExpertSource::pin_cache_complement(
     const ExpertCache& cache, std::string& err, bool pin,
     const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs, int64_t lend_from_slot,
@@ -3894,12 +4007,15 @@ bool FileExpertSource::pin_cache_complement(
                         got += step;
                     }
                     // cut at an expert boundary: a blob that runs past the registered range would be refused by a
-                    // cudaMemcpyAsync as not page-locked
-                    uint64_t w = got;
+                    // cudaMemcpyAsync as not page-locked.  P124e: SAGUARO_PARTIAL_PIN caps the registration here too
+                    // (the hottest SAGUARO_PARTIAL_PIN_GIB); the tail above it is only locked, so relieve_ram can give
+                    // it back when a conversation's host K/V grows - a registered page cannot be.
+                    const uint64_t reg = partial_on ? std::min(got, pin_cap) : got;
+                    uint64_t w = reg;
                     for (size_t i = 0; i < offsets.size() && w < bytes; ++i) {
                         if (offsets[i] == kNoComplement) continue;
                         const uint64_t b = layer_blob_bytes_[i / (size_t) n_expert_];
-                        if (offsets[i] < got && offsets[i] + b > got) { w = offsets[i]; break; }
+                        if (offsets[i] < reg && offsets[i] + b > reg) { w = offsets[i]; break; }
                     }
                     if (w > 0) {
                         if (cudaHostRegister(arena, (size_t) w, cudaHostRegisterMapped | cudaHostRegisterPortable) ==
@@ -4316,6 +4432,10 @@ int64_t FileExpertSource::commit_exchanges() {
             override_[x.out] = nullptr;
             continue;
         }
+        // P124e r2 finding 3: read the place, copy, flip under complement_mu_, excluded with relieve_ram's
+        // phase-1 trims - a slot relief trimmed answers kNoComplement here and the exchange is simply not
+        // adopted (its next read re-adapts); it must never name a place whose pages phase 2 discards.
+        std::lock_guard<std::mutex> cmu_lk(complement_mu_);
         const uint64_t at = complement_offsets_[x.in];
         if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
             complement_host_ != nullptr) {
@@ -4362,6 +4482,11 @@ bool FileExpertSource::install_resident(int64_t layer, int64_t in, int64_t out, 
     const size_t i_out = (size_t) layer * (size_t) n_expert_ + (size_t) out;
     if (i_in >= complement_offsets_.size() || i_out >= complement_offsets_.size()) return false;
     if (!override_.empty() && (override_[i_in] != nullptr || override_[i_out] != nullptr)) return false;
+    // P124e r2 finding 3: the check, the copy and the flip run under complement_mu_, excluded with relieve_ram's
+    // phase-1 trims - the ram_install caller read `out`'s place tens of ms ago in its prefetch, and a slot relief
+    // trimmed since must not be adopted from that stale look (it answers kNoComplement here, so the install is
+    // skipped and the expert just stays file-backed).
+    std::lock_guard<std::mutex> cmu_lk(complement_mu_);
     const uint64_t at = complement_offsets_[i_out], bytes = layer_blob_bytes_[(size_t) layer];
     if (at == kNoComplement || complement_offsets_[i_in] != kNoComplement || at > complement_bytes_ ||
         bytes > complement_bytes_ - at) return false;
@@ -4516,6 +4641,7 @@ int64_t FileExpertSource::commit_flip() {
             override_[x.out] = nullptr;
             continue;
         }
+        std::lock_guard<std::mutex> cmu_lk(complement_mu_);   // (P124e r2 finding 3, as in commit_exchanges)
         const uint64_t at = complement_offsets_[x.in];
         // the same test as commit_copies: an exchange whose bytes were copied is the one that flips
         if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&

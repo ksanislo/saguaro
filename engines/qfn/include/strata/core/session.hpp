@@ -69,6 +69,9 @@ struct SessionState {
     int turbo_skip = 0;   // PLAN-turbo-live: and its skip tier (0 off, 1 = leave out what is not in VRAM, 2 = ...nor in RAM)
     /// SAGUARO_KV_HOST_ELASTIC: a state outside the session whose host copy grows and shrinks with it (the slot's drafter)
     const QsaState* host_follow = nullptr;
+    /// P124e (round 4, VRAM follows use): the session's block-score scratch in a follow range (qsa_scores_make) -
+    /// index into layer.cpp's registry, -1: carved in the buffers arena whole, as always.
+    int32_t scores_elastic = -1;
     /// The doorbell the host loop polls.  Null until a caller provides one - the engine runs without it, and
     /// neither `session_token` nor `session_replay` looks at it.
     const Doorbell* db = nullptr;
@@ -115,7 +118,8 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
                       int64_t layer_lo = 0, int64_t layer_hi = -1, int slot = 0, const QsaState* share_rope = nullptr);
 /// An elastic slot session: backs `cells` cells in all its states, all or nothing (false: its device's slot budget is
 /// short).  `trim` first gives back what `cells` does not need - only with no window touching the session in flight.
-/// Does nothing for any other session.
+/// Not an elastic-VRAM slot (`slot_cells` < 0) but with SAGUARO_KV_HOST_ELASTIC host copies (qsa_set_host_elastic_slots):
+/// the same for the host copies only (false: no RAM to pin).  Does nothing for any other session.
 bool session_slot_fit(SessionState& s, int64_t cells, bool trim);
 /// Chunks an elastic slot session still lacks to hold `cells` cells (0 for any other session).
 int64_t session_slot_need(const SessionState& s, int64_t cells);
@@ -124,6 +128,16 @@ uint64_t session_slot_backed(const SessionState& s);
 uint64_t session_slot_reserved(const SessionState& s);
 /// SAGUARO_KV_HOST_ELASTIC: the RAM pinned for the session's host copies (0 for a host copy pinned whole).
 uint64_t session_host_backed(const SessionState& s);
+/// ... whether ANY of them grows with the session at all (its own states or its `host_follow`), and the fewest
+/// cells they are all pinned for now (-1: none is elastic - pinned whole, always "backed").  This is what lets a
+/// slot whose VRAM ring is carved whole still follow its conversation's memory (session_slot_fit's host half).
+bool session_host_elastic(const SessionState& s);
+int64_t session_host_backed_cells(const SessionState& s);
+/// P124e (round 8, manager card): the cells EVERYTHING a prompt read indexes by cell is backed for at once -
+/// the host copies and device follow state (above) AND the RoPE rows it rotates positions through (the tables
+/// are registered for the whole context, only their backed prefix is mapped).  Capped by the context; the
+/// whole context for a session nothing of is elastic.
+int64_t session_backed_cells(const SessionState& s);
 /// ... grown (never trimmed) for `cells` cells: the solo session's, before anything writes them (a request's prompt and
 /// its max_new, a restored conversation).  False: no RAM to pin.
 bool session_host_fit(SessionState& s, int64_t cells);
@@ -133,8 +147,12 @@ uint64_t session_host_trim(SessionState& s, int64_t cells);
 /// The solo session's VRAM pools and pooled keys (qsa_set_vram_elastic_main) backed for `cells` from its device's
 /// slot budget (false: the budget is short - the expert cache gives, then again), and the chunks that needs.  Never
 /// trimmed: the VRAM ring's residency map may name any of its slots.
-bool session_vram_fit(SessionState& s, int64_t cells);
-int64_t session_vram_need(const SessionState& s, int64_t cells);
+/// P124e (round 7, manager card): the conversation's RoPE rows (plain and YaRN) are backed for `rope_cells`
+/// instead - the positions its conversation has REACHED (worst-case fits must not pin the whole table at a
+/// YaRN switch; the rows past the positions in use arrive chunk by chunk from the fits as it grows).
+/// `rope_cells` <= 0: the same as `cells`.
+bool session_vram_fit(SessionState& s, int64_t cells, int64_t rope_cells = -1);
+int64_t session_vram_need(const SessionState& s, int64_t cells, int64_t rope_cells = -1);
 /// Before the memory `session_init` carved is freed: forgets what points into it from outside the session (the
 /// rope kernels' registered angle table, #280), so a later session never rotates by freed memory.
 void session_release(SessionState& s);

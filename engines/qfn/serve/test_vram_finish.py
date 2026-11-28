@@ -31,6 +31,15 @@ class BadFinish(unittest.TestCase):
         self.assertIn("300000 cells", str(e))
         self.assertNotIsInstance(engine_refusal("a token id is outside the vocabulary"), EngineNonFinite)
 
+    def test_vram_refusal_says_vram(self):
+        # P124e round 6: the grow's VRAM refusal never reaches the user as a RAM shortage
+        e = engine_refusal("no VRAM is left for this request's context (546145 tokens): the card's expert cache "
+                           "gave all it can")
+        self.assertIsInstance(e, EngineOutOfVram)
+        self.assertNotIsInstance(e, EngineOutOfRam)
+        self.assertIn("no VRAM is left", str(e))
+        self.assertNotIn("no RAM is left", str(e))
+
     def test_ordinary_finishes_pass(self):
         for f in ("stop", "length", "cancel", None):
             raise_bad_finish(f)

@@ -156,6 +156,14 @@ public:
     /// The staging cells a loan for reads reaching `reach` cells lays out: 262144 (or the whole context, if less) up
     /// to there, past it the reach rounded up to 131072; 0 (the whole context) for reach <= 0 or SAGUARO_KV_STAGE_REACH=0.
     static int64_t stage_cells_for(const core::SessionState& ss, int64_t reach);
+    /// P124e (round 8, manager card): the same on an ELASTIC conversation - a loan never lays staging out past the
+    /// cells the session is BACKED for (host copy, device state, RoPE rows) plus the one step the read backs ahead
+    /// with (core::stage_cells_elastic).  `backed` < 0: nothing elastic - the plain sizing.
+    static int64_t stage_cells_elastic(const core::SessionState& ss, int64_t reach, int64_t backed);
+    /// P124e (round 8): on, a segment of a run reaching past the cells the segment's own session is backed for is
+    /// REFUSED like one reaching past the staging (a read must never index an unmapped page of the host copy, the
+    /// follow state or the RoPE table - that is not a refusal, it is a fault).  Off by default.
+    void set_backed_limit(bool on);
 
     /// The share of the streamed experts' bytes DMA-able straight from pinned RAM (1 = all).  Sizes the streamed
     /// ring (a big one only pays when the copy engine, not the host copies, is the limit); set before bytes_needed.

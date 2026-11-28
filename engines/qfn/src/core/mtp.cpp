@@ -1,5 +1,6 @@
 // src/core/mtp.cpp - see include/strata/core/mtp.hpp.
 #include "strata/core/capture_lock.hpp"
+#include "strata/core/devnotes.hpp"
 #include "strata/core/mtp.hpp"
 #include "strata/core/pin_budget.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
@@ -315,7 +316,12 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         }
         std::vector<uint8_t> blob;
         if (!read_file(rt_dir + "/dense.bin", blob)) { err = "mtp: cannot read dense.bin"; return false; }
-        const cudaError_t alloc = cudaMalloc((void**) &dense_, blob.size());
+        // P124e (round 5, manager card): the drafter's VRAM is accounted by name too (the load's table).
+        cudaError_t alloc;
+        {
+            const strata::core::DeviceNote dense_note("the MTP drafter's dense weights (dense.bin)", (uint64_t) blob.size());
+            alloc = cudaMalloc((void**) &dense_, blob.size());
+        }
         if (alloc != cudaSuccess) {
             size_t free_bytes = 0, total_bytes = 0;
             const cudaError_t info = cudaMemGetInfo(&free_bytes, &total_bytes);
@@ -339,7 +345,12 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
             FILE* f;
             ~Closer() { if (f != nullptr) std::fclose(f); }
         } closer{f};
-        if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
+        cudaError_t experts_alloc;
+        {   // P124e (round 5, manager card): accounted by name
+            const strata::core::DeviceNote experts_note("the MTP drafter's 512 expert blobs (experts.bin)", bytes);
+            experts_alloc = cudaMalloc((void**) &experts_, bytes);
+        }
+        if (experts_alloc != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
 #if !defined(_WIN32)
         strata::platform::advise_willneed(fileno(f), 0, bytes);
 #endif
@@ -390,11 +401,19 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     const bool kv_int8_was = qsa_kv_int8();
     qsa_set_kv_hybrid(false);
     if (kv_hybrid_was) qsa_set_kv_int8(true);   // the drafter under --kv k8v4: plain INT8
-    uint64_t sb = qsa_state_bytes(g, max_cells, false, ring);
-    if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
+    // P124e (round 4): the drafter's own context-scaled array (its ring's page table, 1 B per cell) follows its
+    // slot the same way - it gets a follow pool when its session's primary state did.
+    const bool dfollow = qsa_state_follow(ss.qsa_states[ss.qsa_primary()]);
+    uint64_t sb = qsa_state_bytes(g, max_cells, false, ring, false, dfollow);
+    cudaError_t dstate_alloc;
+    {   // P124e (round 5, manager card): accounted by name (its follow pool, if any, notes itself in qsa_state_init)
+        const strata::core::DeviceNote dstate_note("the MTP drafter's K/V state (one carve)", sb);
+        dstate_alloc = cudaMalloc(&state_arena_, sb);
+    }
+    if (dstate_alloc != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
     // (its session's host copy grows: so does its own, through the session's host_follow)
     if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring, false,
-                       ss.qsa_states[ss.qsa_primary()].host_elastic >= 0) == 0) {
+                       ss.qsa_states[ss.qsa_primary()].host_elastic >= 0, dfollow) == 0) {
         if (st_.kv_mode == 0) { err = "mtp: state init failed"; return false; }
         std::fprintf(stderr, "saguaro mtp: no pinned RAM left for the draft layer's K/V copy; keeping it in VRAM\n");
         cudaGetLastError();
@@ -402,7 +421,12 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         st_ = QsaState{};
         ring = -1;   // fully resident
         sb = qsa_state_bytes(g, max_cells, false, ring);
-        if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
+        cudaError_t dstate_alloc2;
+        {
+            const strata::core::DeviceNote dstate_note2("the MTP drafter's K/V state (one carve)", sb);
+            dstate_alloc2 = cudaMalloc(&state_arena_, sb);
+        }
+        if (dstate_alloc2 != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
         if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring) == 0) { err = "mtp: state init failed"; return false; }
     }
     qsa_set_kv_int8(kv_int8_was);
