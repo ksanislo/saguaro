@@ -182,6 +182,11 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(read_backing_test src/core/read_backing_test.cpp)
   target_include_directories(read_backing_test PRIVATE include)
   add_test(NAME read_backing_test COMMAND read_backing_test)
+  # P124y: the VMM grow paths' chunk handover - take() must remove a mapped chunk from `got` so the
+  # "release what the map did not take" loops cannot double-release a handle the range still holds
+  add_executable(vmm_grow_ownership_test src/core/vmm_grow_ownership_test.cpp)
+  target_include_directories(vmm_grow_ownership_test PRIVATE include)
+  add_test(NAME vmm_grow_ownership_test COMMAND vmm_grow_ownership_test)
   # P124e (round 10): the give-way crossing guard SAGUARO_DEBUG_SLOT_GUARD (header-only, CPU)
   add_executable(slot_give_guard_test src/core/slot_give_guard_test.cpp)
   target_include_directories(slot_give_guard_test PRIVATE include)

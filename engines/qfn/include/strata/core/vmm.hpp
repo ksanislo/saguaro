@@ -6,7 +6,9 @@
 // same range runs on hipMemAddressReserve / hipMemCreate where the card reports it; vmm_reason() says which cards
 // do and which do not (P124e round 5: the load's one line says ENGAGED or fell back with this).
 
+#include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "strata/core/va_debug.hpp"   // SAGUARO_DEBUG_VA (manager card 12b/B1): the op lines
@@ -15,6 +17,18 @@ namespace strata::core {
 
 /// A physical chunk: the driver's allocation handle (CUmemGenericAllocationHandle); 0 = none.
 using VmmChunk = unsigned long long;
+
+/// P124y: the take() of a grow path that maps chunks it gathered into a `got` vector. Hands out
+/// `got[i]` AND removes it from the vector: from the handover on, the chunk's own handle reference
+/// belongs to the VmmRange (qsa_slot_trim / VmmRange::release give it back when the range reclaims
+/// the chunk - the contract qsa_slot_grow has always kept). The grow calls then run "release what the
+/// map did not take" cleanup loops over `got`; if a taken chunk stayed visible there, those loops
+/// would release a handle the range still holds - a double cuMemRelease of a physical allocation whose
+/// handle value the driver may already have recycled for another owner's live chunk. vmm_chunk_free()
+/// ignores 0, so the removed entries cost nothing to leave in place.
+inline VmmChunk take_grown_chunk(std::vector<VmmChunk>& got, size_t& i) {
+    return i < got.size() ? std::exchange(got[i++], VmmChunk(0)) : VmmChunk(0);
+}
 
 /// Device `dev` (-1: the current one) supports it and the entry points resolved.
 bool vmm_available(int dev = -1);
