@@ -702,6 +702,11 @@ std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& i
             } else if (transient) {   // kept for a later turn: the RAM was short, not the file
                 entries_[i].state = State::idle;
                 say("read deferred: " + err + " (the file is kept)");
+                cv_.notify_all();
+                // the request must NOT loop back up: the kept entry would re-match unchanged, be taken again,
+                // and be refused again forever.  nullopt (tokens left at 0) sends this request down the plain
+                // prompt path; a later turn with more RAM re-reads the kept file.
+                return std::nullopt;
             } else {
                 say("read failed: " + err);
                 drop_entry_locked(i, "unreadable");
