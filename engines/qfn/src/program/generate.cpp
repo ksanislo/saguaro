@@ -2765,6 +2765,8 @@ static bool vram_short(const std::string& e) {
     return cudaPeekAtLastError() == cudaSuccess;
 }
 
+// 1.2.4-pre: each batch slot's backed K/V bytes, written by the serve thread, read by VramLive's beat thread.
+static std::array<std::atomic<uint64_t>, 64> g_vl_slot_backed{};
 #if defined(__linux__)
 #include <execinfo.h>
 // 1.2.4-pre: a fatal signal prints the stack to stderr (the engine log) before the default action - a QFN engine
@@ -13477,10 +13479,13 @@ vs.d_skip_usage = gs.d_skip_usage;
             const bool vl_kv_host = g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1;
             const bool vl_kv_grow = strata::core::qsa_kv_elastic();
             const int64_t vl_ctx = o.max_context;
+            // 1.2.4-pre crash (mangonel, the fatal-signal stack): vl_split runs on VramLive's BEAT THREAD, and walking
+            // bslot_ss's SessionStates there raced the serve thread that parks / restores / frees them (SIGSEGV in
+            // session_slot_backed, heap corruption beside it).  The serve thread publishes each slot's backed bytes
+            // (vl_publish_slots, once a second from batch_stat_line); the beat reads only these atomics.
             auto vl_split = [&](const VLCard& c, uint64_t& kv, uint64_t& pool, uint64_t& kvram) {
                 kv = c.eslot ? c.solo : c.solo + c.slotf;
-                if (c.eslot && c.slot < bslot_ss.size())
-                    for (const auto& u : bslot_ss[c.slot]) kv += strata::core::session_slot_backed(*u);
+                if (c.eslot && c.slot < g_vl_slot_backed.size()) kv += g_vl_slot_backed[c.slot].load(std::memory_order_relaxed);
                 if (c.slot == 0 && vl_kv_grow)   // (--kv-grow: the solo K/V keeps what the cache gave up for it)
                     kv = kv - strata::core::qsa_kv_elastic_full_bytes() + strata::core::qsa_kv_elastic_mapped_bytes();
                 pool = c.xc != nullptr ? vl_mapped(*c.xc) : c.pool0;
@@ -13839,6 +13844,11 @@ vs.d_skip_usage = gs.d_skip_usage;
             bstat_toks0 = bstat_toks; bstat_off0 = bstat_off; bstat_acc0 = bstat_acc;
         };
         const auto batch_stat_line = [&](int active_slots) {
+            for (size_t k = 0; k < bslot_ss.size() && k < g_vl_slot_backed.size(); ++k) {   // (serve thread: VramLive reads these)
+                uint64_t b = 0;
+                for (const auto& u : bslot_ss[k]) b += strata::core::session_slot_backed(*u);
+                g_vl_slot_backed[k].store(b, std::memory_order_relaxed);
+            }
             const Clock::time_point now = Clock::now();
             const double el = std::chrono::duration<double>(now - bstat_t1).count();
             if (el < 1.0) return;
