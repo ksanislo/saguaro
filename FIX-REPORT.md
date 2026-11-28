@@ -1,165 +1,107 @@
-# FIX-REPORT - P124v2 reviews (REVIEW-RESULT.md): every finding -> what changed, or why it did not
+# P124v2 FIX-REPORT - manager review round 4 (FIX-FIRST: the card, rc124-cand2, 2026-11-27)
 
-Round 2 (review of b7ed679..b750d48e6, the review file committed as 7d59a4533) is at the top; round 1
-(review of b18e7002e) is kept below as it was committed at b750d48e6. One commit per numbered finding;
-all work in this worktree; scratch probes under ./scratch/, never committed. The three plan-named
-modules run one at a time (/opt/llm/saguaro/.venv/bin/python -m unittest) after every change:
-serve.test_read_rate_true 10 OK, serve.test_read_rate 34 OK, serve.test_read_heartbeat 17 OK.
-Reports are force-added past the checkout's REVIEW-RESULT.md / FIX-REPORT.md exclude, as the sibling
-branches' reports.
+Review: REVIEW-RESULT.md (round 4) - a fresh 27,299-token read on the live card Q4 config, /metrics
+polled 4x/s (scratch/card-rc2-timeline.txt): the client's answer in 17.8 s (7 tokens) says the TRUE
+read is ~1,580 tok/s, while the Monitor showed mean ~2,393 (+51 %), max 9,881 (6x), first non-zero
+at 0.78 s and two zero samples during the read. Two FIX-FIRST items; both fixed. Modules run only
+the read-rate ones, one at a time: serve.test_read_rate_true 11 + serve.test_read_rate 34 +
+serve.test_read_heartbeat 17, green at every commit; tools/saguaro/extract_qfn_engine.py still
+reproduces serve/qfn_engine.py byte-identically (no engines/ or C++ edit this round).
 
-# Round 2 (REVIEW-RESULT.md of b7ed679..b750d48e6)
+## Finding 1 (FIX-FIRST): replay the timeline's own fields and show where the shown value departs from (tokens finished) / (now - the read's start)
 
-## R2.1 MUST-FIX: the share booking was not belted - FIXED (87fd5eb77)
+Replayed through the committed computation (scratch/card_replay.py, same fields the committed
+CardTrueReadout now uses): the file's OWN fields - the time column, the prompt_read jumps
+(4,608-token cuts first seen at 6.86 / 8.89 / 10.66 / 12.68 / 14.71 / 16.48 s) and prompt_total -
+plus the prefill_tok_s_mean column, which turns every jump into the engine's own cumulative read ms
+(value / mean x 1000 = 6,480 / 8,387 / 10,317 / 12,257 / 14,199 / 16,070 ms; the last mean 1,582.9
+closes the read at 27,292 / 17,241 ms). Between the jumps the engine beats at its recorded ~4/s
+cadence: done = whole cuts done, pos0/chunk = the cut in flight, pass = its fraction by the engine's
+own run clock - the P124v2 line shape the replay synthesized for mangonel, with the one card
+difference: the beats run the cut's share all the way to its END while the cut-end progress line
+carries only the WHOLE cuts done.
 
-serve/server.py `_note_hb` booked the absolute `n = int(done + min(chunk, new - done) x pass_i/pass_n)`
-straight into `_note_read`, and on a layer split the next beat could book BELOW it - the unit-start guard
-(`pos0 - reused == done`) holds for every card beating the in-flight unit while their `pass=` fractions
-differ, and fails once `done` moves off the boundary - so the lagging card re-booked a lower figure: the
-booked decrease is `_note_read`'s engine-counter-went-backwards signal, its restart branch closed the
-interval, `_read_counted` doubled the closed leg, `engine_t0` re-baselined mid-read - the span collapse
-this plan set out to kill.
+Where the shown value departs: at each cut boundary a progress step books the whole-cut count
+(13,824) BELOW the share the beats had already booked (13,900: done + chunk x pass_i/pass_n, and
+the beats before the boundary reach the unit's full pass). serve/server.py's _note_read takes any
+n_read < read_pos as "the engine's counter went backwards - a NEW read" (the retry/slice signal
+round 2 deliberately left unbelted) and fires its restart branch mid-read: the interval closes,
+read_pos resets, read_eng_ms zeroes and re-takes only the step's own pair, read_leg_ms zeroes and
+engine_t0 RE-BASELINES to now. The readout from there is exactly what the review guessed:
 
-Fixed exactly as the review prescribed: book the beat belted like the engine belts `done=` -
-`n = max(n, stat.read_pos)` before the `_note_read` call (the belt never wraps `_note_read` itself).
+- 9,881 at 10.66 = "prompt_read jumping a whole chunk at once divided by a short interval": the
+  restart fires at the cut boundary ~10.5 s and the next poll reads (tokens since the restart) /
+  (the 0.466 s since it) - 4,608 / 0.466 = 9,881 to the sample's digit.
+- "the start time taken at the first progress line, not the request's start": engine_t0 was the
+  read's arrival until that step re-baselined it to the LAST cut boundary - every boundary does,
+  so the read's own start is never in the denominator for most of the read.
+- "a per-interval rate instead of a cumulative one": after each re-baseline _own_read_rate falls
+  to n_own / (now - engine_t0) - tokens since restart over time since restart. The plateau
+  samples (3,107.6 x3, 1,873.4 x3 in the timeline) are those interval values standing between
+  re-bookings; the ~2,393 mean is their average across the read.
+The same replay through the pre-fix code spikes 4,088 / 8,243 / 13,270 at exactly those boundaries.
 
-- The review's probe, same shape through the real `_rhb` + `_note_hb` + `_note_read` pipeline
-  (scratch/probe_split_share.py, two cards on one in-flight unit, pass 40/78 then 10/78): before -
-  read_pos 6971 -> 5198, reads 1 -> 2, counted 6971 -> 12169, engine_t0 re-baselined, row 1921 tok/s;
-  after - read_pos 6971 / 6971 / 7089 (the lagging beat's share clipped to the belt), reads stays 1,
-  counted 7089 monotonically, engine_t0 unmoved.
-- Real restarts keep working (scratch/probe_belt_release.py): the driver's `_rhb` belts `done` per
-  new/rid and starts that belt over on a new read; a retry's / slice's first low PP / BRP step books
-  through the unbelted `_note_read` path, fires the restart branch (read_pos -> 100, reads 2) and the
-  monitor belt releases with read_pos - the following new-read beats book from nothing; BRA's exact
-  figures still top the count or correct it down. The counter-decrease path stays for PP / BRP / slice
-  lines, which are not belted, exactly as the review required.
-- Single-card reads cannot regress (why the recorded mangonel replay is untouched): there the guard
-  holds only while the engine's own part-credit is zero and `pass=` rises monotonically within the
-  unit, so the belt is a no-op on every monotone booking.
-- Manager gate: the committed replay `MangonelTrueReadout` re-run at the fix - 10 OK (never 0 after the
-  read's first RHB, time-average -0.5 % of 1,567.8, peak <= 1.25x, closes at exactly 27,254).
-- Note on 7d59a4533: that commit added the review file only (its message describes the finding); the
-  code fix is this commit. serve/server.py (the Monitor) is not an input to the extractor -
-  tools/saguaro/extract_qfn_engine.py still reproduces serve/qfn_engine.py byte-identically; the
-  engine-side driver and qfn_engine.py needed no change.
+## Finding 2 (FIX-FIRST): readout = cumulative tokens / time since THIS read started, peak = its max over windows >= 5 s, the timeline as a test fixture - commit c10ddb6a3 + bc00ae2e5
 
-## R2.2 NIT: the protocol note called pos0=/chunk= optional - FIXED (ef9efa226)
+Changed in serve/server.py (c10ddb6a3, no engine/extractor edit):
 
-generate.cpp:8395-8396 listed `[pos0=<unit's first token> chunk=<unit's tokens>]` in brackets while
-rhb_print, rhb_slot and the piece line print them on EVERY line - doc drift only (readers tolerate
-absence: the driver parses both fields with absent = no share). The note now states the protocol as
-printed: the fields are on every line, the piece-boundary line's defined pos0=-1 chunk=0 means no unit
-is in flight, and a reader before P124v2 ignores them and books no share. Comment text only - the
-printf literals pinned by test_read_heartbeat's EngineSideContract are untouched (17 green), and the
-two host-point comments (11302, 16630) already read unconditional.
+1. _note_read (an OPEN read only): a step below read_pos is no longer automatically a new read.
+   When a live RHB beat agrees with it (n_read >= the beat's own belted done=) and the fall is at
+   most that unit's size (read_pos - n_read <= the beat's chunk=), the step is the whole-cut count
+   lagging the in-flight share the beats booked - the booking is belted to read_pos (monotone, the
+   same way _note_hb belts its beats) and the interval, counter, engine_t0 and pair stand. A REAL
+   restart - below the beat's own done=, or by more than one unit, or with no live beat (a retry,
+   a resume, a slice's leg with the beats stopped) - still takes the restart branch, exactly as
+   round 2 required.
+2. _own_read_rate: both the open-read branch and the ended-but-not-yet-answering branch now return
+   n_own - the CUMULATIVE tokens this read has counted - over the read's own elapsed span (the
+   engine's read_ms pair kept as the floor, so the readout can still only read below the engine's
+   figure, never above). Never an interval rate, never measured from a re-baselined start.
+   Peak_prefill is the max of that same readout, already gated on windows >= PEAK_MIN_SPAN_S = 5 s.
+3. (the round 3 nit, cheap and adjacent) stat.read_hb is cleared at _read_start and in the restart
+   branch: _read_span_s subtracts read_hb's stage_ms and the new belt keys on its done/chunk - a
+   PREVIOUS read's stale beat belonged to neither (the stale stage_ms would shrink the new read's
+   span and inflate its rate).
 
-## R2.3 OBSERVATION: the denominator rewrite is not field-gated - UNCHANGED, deliberately
+Fixture (bc00ae2e5): serve/testdata/card-rc2-read-rate-timeline.txt (the manager's scratch file,
+copied verbatim - scratch/ is gitignored, so the fixture is committed under serve/testdata/) +
+serve/test_read_rate_true.CardTrueReadout: replays the file's own fields (above) through the real
+Service at the timeline's own 0.25 s polls. Gates, measured on the committed replay:
 
-The review itself records this as the plan's intended fix: the old denominator (the beat's ms= alone)
-WAS the bug, and gating the wall-span denominator on pos0=/chunk= would leave pair-only engines (a
-P124v engine carries new/read_ms but prints no pos0/chunk) on the broken clock the plan exists to
-remove. The untouched P124v suite pins the pair-only shape (34 green). Feature-OFF also holds as the
-observation details: with no heartbeat line at all the pair is never set, `_note_hb` never runs and the
-fallback branch is byte-identical - the only shared surface is the no-op `int()` on `_read_counted` and
-the new (unused until a read books) `RequestStat.read_leg_ms` field. Nothing to change.
+- first non-zero readout at 0.53 s (the card: 0.0 at 0.28/0.53, first non-zero 0.78) and never
+  blank or 0 afterwards while the read runs - the share books from the read's first beat;
+- max of the readout 1,679.5 <= 1.25 x 1,580 = 1,975 (the card: 9,881 = 6.3x);
+- peak_prefill 1,698.4 <= 1,975, tokens 27,292 <= the prompt (the Monitor's kept peak was the same
+  9,881-class figure);
+- the readout CLOSES at 1,581.2 - within 10 % of the client's 1,580 (+0.1 %; the card's running
+  value ~2,393 read +51 %). Note on the review's "mean within 10 %": with the prescribed
+  cumulative readout the readout IS the running mean, and its value at the read's end is THE
+  read's mean - that is what the gate asserts. A time-mean of the readout over the whole read
+  cannot reach 1,580 while respecting max <= 1,250 x 1,580: this read is 6.5 s of ~711 tok/s
+  warm-up (its first 4,608-token cut) followed by ~2,400 tok/s cuts, so any readout that averaged
+  1,580 would have to show ~2,400 during the steady cuts, which the 1,975 max forbids. The
+  replay's last-5-s window mean is 1,600 (within 1.3 % of 1,580) - the steady mean the review's
+  window language points at;
+- read_pos never steps back and the open read interval is never re-opened across the whole replay
+  (no mid-read re-baseline, i.e. no interval-rate mechanism), and the read closes at 27,299 counted.
 
-## Round-2 runs at this tip (one module at a time, at 87fd5eb77 and ef9efa226)
+MangonelTrueReadout and the P124v/P124v2 gates stand untouched and green on the new computation
+(its steady read's cumulative readout is flat at the true 1,568; its peak gate and never-0 gate
+pass as before).
 
-- serve.test_read_rate_true: 10 OK (the MangonelTrueReadout manager gate included)
-- serve.test_read_rate: 34 OK
-- serve.test_read_heartbeat: 17 OK
-- py_compile clean on serve/server.py; tools/saguaro/extract_qfn_engine.py regenerates
-  serve/qfn_engine.py byte-identically (serve/server.py and generate.cpp are not its inputs); the C++
-  change is comment text, no rebuild here (no nvcc - the card build stays owed, as in the REPORT).
+## Cheap nits taken / left
 
-# Round 1 (REVIEW-RESULT.md of b18e7002e, as committed at b750d48e6)
+- Taken: the round 3 stale-stage_ms nit (read_hb cleared at _read_start / restart) - three lines,
+  same functions the fix already touched.
+- Left as recorded by round 3: the belt's "OFF unchanged" wording in REPORT-p124v2 is about the
+  share split, already noted there; the unbelted-PP restart proof probes stay gitignored
+  (scratch/); the C++ build stays open (no nvcc in this checkout) - nothing this round touched
+  src/ or engines/, so the shape checks from round 3 (6-arg on_layer_pass everywhere, single
+  printf under rhb_mu, pos0=-1 piece line) are untouched by definition.
 
-Fixed against REVIEW-RESULT.md (review of b18e7002e). One commit per numbered finding, then this report
-(force-added past the checkout's FIX-REPORT.md exclude, as the sibling branches' reports). All work in
-this worktree; scratch probes under ./scratch/, never committed. The three plan-named modules ran one
-at a time (/opt/llm/saguaro/.venv/bin/python -m unittest) after every Python-side fix:
-serve.test_read_rate_true 10 OK, serve.test_read_rate 34 OK, serve.test_read_heartbeat 17 OK - green at
-every commit, and green at this tip.
+## Modules (one at a time, this checkout, every commit)
 
-## 1. Blocker: the swap-aside vector kept the OLD 5-argument on_layer_pass type - FIXED (f9377b2a2)
-
-engines/qfn/src/program/generate.cpp:16942: added the sixth `int64_t`, matching
-`Prefill::on_layer_pass` (engines/qfn/include/strata/prefill/prefill.hpp:341), so the stash
-(16989) and put-back (16968) both compile again. Verified exactly as the review did, on the two move
-sites with the header's own types (g++ -std=c++17): the old shape reproduces both
-"no match for operator=" errors (scratch/rhb_funcrepro_old.cpp), the fixed shape compiles clean
-(scratch/rhb_funcrepro_fixed.cpp). No full C++ build here (no nvcc on this box, as the REPORT said) -
-the card build stays owed either way, but the type error the review proved is gone. A grep for the
-5-argument pattern across engines/qfn, include/ and src/ finds no other site. serve/qfn_engine.py
-needed no re-extraction (these fixes touch no line of engines/qfn/serve/server.py; re-running
-tools/saguaro/extract_qfn_engine.py regenerates serve/qfn_engine.py byte-identically - working tree
-clean).
-
-## 2. Should-fix: `_own_read_rate` could compute `gap = now - None` - FIXED (3b8803563)
-
-serve/server.py, the ended-branch fallback now reads exactly as the review prescribed:
-`ended = r[2] if r is not None and r[2] is not None else st.read_t1 or now`. The case it guards is the
-one the entry condition at 4522 routes here anyway - an OPEN leg whose first_token landed before
-_prefill_tok_s's closer ran (that closer is skipped while not busy, and a token can land from the
-engine thread between its row-builder calls): the readout now ages from the last read step instead of
-raising TypeError inside metrics(). The dropped `elif r is None or r[2] is not None:` guard's behaviour
-is restored; test_read_rate's retry test never enters this branch (its engine_t0 is None), and the
-three modules stay green.
-
-## 3. Nit: read-restart left `engine_t0` stale, double-counting the span - FIXED (750b626c6)
-
-serve/server.py, the restart branch in _note_read (the engine's counter goes backwards mid-admission):
-the `read_leg_ms = 0.0` line is followed by re-baselining `engine_t0` to now (when one exists - the
-None case keeps the documented no-start-hook shape, where the engine's own pair is the figure). Probe
-(scratch/nit3_check.py, the review's worked example: admission hook, 10 s of beats, then the counter
-restarts without a new hook): span 11.0 s with the old code (the previous read's whole time inside the
-open leg), 0.0 with the fix, the new read's span starting at its restart. Why unconditional (rather
-than only when no hook re-baselined this leg): at the restart branch both shapes look identical - a
-fresh admission's leg and a mid-admission restart both stand at r[1] == engine_t0 - so the
-stale-previous-read case (the 11 s / mangonel-17 s error) and the fresh-hook case cannot be told apart.
-The cost on the fresh side is bounded at the admission-to-first-beat delay (one beat, ~0.25 s, and the
-pair's max() floors the span anyway); the bug fixed was whole previous reads.
-
-## 4. Nit: `pos0=` mislabeled on the piece-boundary line - FIXED (b206488e6)
-
-engines/qfn/src/program/generate.cpp, rhb_solo_piece: the rhb_print argument changed from the piece's
-END `pos` to `-1` (with the comment saying so): chunk=0 on that line means no unit is in flight, so no
-unit's first token exists to print - the protocol comments (8395-8396, 11302-11308, 16630-16640) now
-hold for every printed line. Safe for every reader: the driver's _rhb parses pos0 as an int with no
-range assumption (engines/qfn/serve/server.py:1777, mirrored byte-identically into serve/qfn_engine.py,
-which needed no re-extraction - only generate.cpp changed), and serve/server.py:4606 requires chunk > 0
-before pos0 is used at all, so no figure moves. test_read_heartbeat's EngineSideContract pins the
-printf FORMAT (the same literal), not this value - untouched, 17 green.
-
-## 5. Nit: the "recorded lines" replay is a synthesized shape - NOT CHANGED, deliberately
-
-There is nothing to change: ref/mangonel-engine-after-p124v.txt holds ONLY the summary line (its line
-1), no RHB beats, so "replay the recorded file through the computation" cannot literally be done - the
-committed MangonelTrueReadout builds the uniform 4,608 x 6 / 230 ms shape from that summary's own
-numbers and the REPORT discloses exactly this (REPORT 7, 86-91, 107-109). Hand-writing a per-chunk-cold
-beat sequence instead would invent "recorded" lines the box never printed - a fake record is worse than
-a disclosed synthetic one - and the manager's acceptance gates are all asserted on the committed test
-and pass: never 0 after the read's first RHB (test_read_rate_true:334-337), time-average within 5% of
-1,567.8 (342-346), peak <= 1.25x (347-352), closing at exactly 27,254 (355). If real per-chunk-cold RHB
-lines are ever recorded on a card run, replaying them is the follow-up that would close this.
-
-## 6. Nit: fractional counts where the annotation promises ints - PARTLY PRESENT, FIXED the rest (004f75697)
-
-At the reviewed tip the booking ALREADY rounds: the line the finding cites (b18e7002e:4608, the `n = int(n
-+ min(chunk, new - n) * pass_i/pass_n)` at the head of _note_hb's share) wraps the product, and a
-mangonel-shape probe showed stat.read_pos, the r[4] window steps and _read_counted all carrying int
-values - so the finding's premise did not hold at this tip (it holds for any future booking that skips
-the rounding, which is the useful part of the observation). Took the review's other half: _read_counted's
-return is now wrapped in int(), so the `-> int` annotation stands whatever a booking books (probe: a
-deliberately fractional step leaves read_pos 233.5 while _read_counted returns 233). No committed figure
-moved: the exact BRA close already restored integers and the test's 27,254 stands.
-
-## Runs at this tip (one module at a time)
-
-- serve.test_read_rate_true: 10 OK
-- serve.test_read_rate: 34 OK
-- serve.test_read_heartbeat: 17 OK
-- py_compile clean on every touched file; tools/saguaro/extract_qfn_engine.py regenerates
-  serve/qfn_engine.py byte-identically (no hand edits, none needed); C++ verified only by the two
-  compile probes named under finding 1 (no nvcc here - the card build remains owed, as in the REPORT).
+- serve.test_read_rate_true - 11 green (the 10 P124v/P124v2 tests + the new CardTrueReadout)
+- serve.test_read_rate - 34 green
+- serve.test_read_heartbeat - 17 green
+- extractor: serve/qfn_engine.py byte-identical after re-run.
