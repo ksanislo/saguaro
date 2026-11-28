@@ -4518,12 +4518,14 @@ class Service:
         over the time since THIS read started - the read's OWN elapsed span: now minus its own
         start, legs summed, staging left out, the engine's own read_ms pair as the floor.  Never an
         interval rate and never a figure measured from a re-baselined start: the card rc2 read
-        (scratch/card-rc2-timeline.txt: the client's 17.8 s / 27,299 tokens, the true ~1,580)
-        showed ~2,393 mean and 9,881 max because a whole-cut progress step landing below the
-        share-credited counter fired the restart branch mid-read - read_pos, the interval,
-        engine_t0 and the pair all reset - and the readout became (tokens since that false
-        restart) / (the ~0.5 s since it).  Not the beat's ms= alone either: that is the read's RUN
-        clock over its settled legs, and a read held between pieces pairs whole-chunk tokens with
+        (serve/testdata/card-rc2-read-rate-timeline.txt: the client's 17.8 s / 27,299 tokens, the true
+        ~1,580) showed ~2,393 mean and a 9,881 max - the shape an interval readout after a false
+        mid-read restart would give ((tokens since the restart) / (the ~0.5 s since it)); the capture
+        held no RHB lines and the replay that first blamed a whole-cut step falling below the booked
+        share never actually produced that fall (review round 5, P1 - the cause stays unproven), so
+        what this readout commits to is the cumulative figure, whatever the progress steps do.  Not
+        the beat's ms= alone either: that is the read's RUN clock over its settled legs, and a read
+        held between pieces pairs whole-chunk tokens with
         a clock that stopped (the recorded mangonel: at 7.11 s the engine's own new/read_ms said
         704.2 tok/s while the Monitor showed 2,099.4).  A read the engine beats for that stops
         beating (a stall, a wedge): the readout FALLS with the silence instead of freezing at the
@@ -4541,9 +4543,12 @@ class Service:
                     if now - (st.read_t1 or now) > RATE_WINDOW_S + READ_BEAT_STALE_S:
                         return 0.0
                 return n_own / max(st.read_eng_ms / 1000.0, self._read_span_s(st, now))
-            # the read is over (BRA / a leg's close) but its answer has not started: its true rate ages
-            # with the wall time since it ended, and drops out once it is only history.  A leg still open
-            # with first_token set (one landed before _prefill_tok_s closed it): age from the last step.
+            # Two shapes land here once the open-read branch above cannot hold: the read is OVER (BRA /
+            # a leg's closed and no fresh step re-opened it) but its answer has not started - its true
+            # rate ages with the wall time since it ended, and drops out once it is only history; or
+            # (round 1's should-fix 2) the leg is still OPEN but first_token is set already (a token
+            # landed before _prefill_tok_s's closer ran) - r[2] is None there, so it ages from the last
+            # read step instead.  Both drain the same way below.
             ended = r[2] if r is not None and r[2] is not None else st.read_t1 or now
             gap = now - ended
             if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
@@ -4619,8 +4624,10 @@ class Service:
         # done + chunk x pass_i/pass_n - so the read's first chunk shows its true rate, never 0.0
         # (the recorded mangonel sat at 0.0 for the first 1.8 s, and saw-toothed 1,178 -> 801 -> 1,214
         # around a true 1,568 with whole chunks landing only at their ends).  When done stands further
-        # along than the reporting card's unit start - a split read's cross-card figure already holds the
-        # share - nothing is added.  A beat whose tokens are only the share counts too.
+        # along than the reporting card's unit start - once some boundary above it has been revealed,
+        # a split read's cross-card figure already holds the share - nothing is added; between revealed
+        # boundaries done == the unit start for EVERY card (round 5, P2 - the flag below).  A beat
+        # whose tokens are only the share counts too.
         chunk, pr, pos0 = hb.get("chunk") or 0, hb.get("pass"), hb.get("pos0")
         new = hb.get("new") or 0
         if chunk > 0 and pr and pr[1] > 0 and hb.get("stage") != "stage" and new > n and pos0 is not None \
