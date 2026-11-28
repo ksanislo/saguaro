@@ -576,13 +576,16 @@ bool Window::init(const strata::core::ModelGeometry& g, strata::core::SessionSta
             ghist_[0].push_back(A(4 * 10240 * 3));
             ghist_[1].push_back(A(4 * 10240 * 3));
         } else {
-            kq_.push_back(A((size_t) MAXC * 2 * 256));
-            vq_.push_back(A((size_t) MAXC * 2 * 256));
-            ksc_.push_back(A(2 * (size_t) MAXC * 2 * 4));
-            vsc_.push_back(A(2 * (size_t) MAXC * 2 * 4));
+            // the context-sized K/V, scales and pooled index rows: lazily backed (alloc_lazy), so a conversation's
+            // memory follows its length rather than --max-context - every cell is written (qsa_prep) before the
+            // attention or the indexer reads it, and a restore writes the cells it brings back
+            kq_.push_back(cx_->alloc_lazy((size_t) MAXC * 2 * 256));
+            vq_.push_back(cx_->alloc_lazy((size_t) MAXC * 2 * 256));
+            ksc_.push_back(cx_->alloc_lazy(2 * (size_t) MAXC * 2 * 4));
+            vsc_.push_back(cx_->alloc_lazy(2 * (size_t) MAXC * 2 * 4));
             tail_.push_back(A(4 * 4 * 128));
             dead_.push_back(A(4 * 128));
-            pooled_.push_back(A(4 * (size_t) MB * 128));
+            pooled_.push_back(cx_->alloc_lazy(4 * (size_t) MB * 128));
         }
     }
     // ---- the HC read in Q8_0 (the owner's default on Metal, as SAGUARO_HC_Q8 on gfx12): the BF16 down / up / inject
@@ -1704,8 +1707,8 @@ bool Window::mtp_load(const std::string& gguf_path, int max_t, std::string& err)
     minj_[0] = A(4 * MAXT * HC); minj_[1] = A(4 * MAXT * HC); mqids_ = A(4 * MAXT * 2051); mlm_ = A(4 * (size_t) n_vocab_);
     auto act = [&](int n) { Act x; x.n = n; x.b = A(4 * ((size_t) 4 * MAXT * n + (size_t) MAXT * n / 16)); return x; };
     XEn_ = act(N); XHn_ = act(N);
-    mkq_.push_back(A((size_t) MAXC * 2 * 256)); mvq_.push_back(A((size_t) MAXC * 2 * 256));
-    mksc_.push_back(A(2 * (size_t) MAXC * 2 * 4)); mvsc_.push_back(A(2 * (size_t) MAXC * 2 * 4));
+    mkq_.push_back(cx_->alloc_lazy((size_t) MAXC * 2 * 256)); mvq_.push_back(cx_->alloc_lazy((size_t) MAXC * 2 * 256));
+    mksc_.push_back(cx_->alloc_lazy(2 * (size_t) MAXC * 2 * 4)); mvsc_.push_back(cx_->alloc_lazy(2 * (size_t) MAXC * 2 * 4));
     mtail_.push_back(A(4 * 4 * 128)); mdead_.push_back(A(4 * 128)); mpooled_.push_back(A(4 * (size_t) MB * 128));
     {
         std::string vp;
