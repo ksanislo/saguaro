@@ -575,6 +575,44 @@ class CounterFallsRestartOrCorrectDown(Base):
         self.assertTrue(eng.step(it)["start"])
         self.assertEqual(self.svc._read_counted(stat), 9216)              # BRA's exact tops it up, right
 
+    def test_a_restart_rebaselines_the_rate_numerator_with_the_span(self):
+        """P124v2 review round 6 (P1, the blocker): the restart branch zeroed the SPAN (read_leg_ms,
+        engine_t0) while _read_counted kept the CLOSED intervals - so after a mid-read restart the
+        readout divided the abandoned attempt's tokens by the NEW read's span: a 24 s / 400 tok/s read
+        (9,600 tokens, its beats' own ms said 400 the whole way) retried at 300 tok/s showed 6,800
+        tok/s 1.5 s after the restart (the no-pair path) and 3,500..1,500 on the retry's own steps -
+        the engine's own figure all along: 300.  The numerator now re-baselines with the span
+        (stat.read_count_reset): the retry's readout is the retry's tokens over the retry's span;
+        _read_counted keeps the history figure the tests read back."""
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        for k in range(1, 25):                           # 24 s of RHB beats at 400 tok/s: 9,600 tokens
+            eng.feed(7, f"RHB rid=0 stage=read done={400 * k} new=40000 reused=0 pass=1/40 "
+                        f"ms={k * 1000} stage_ms=0 slot=7")
+            self.assertIsNone(eng.step(it))
+            self.tick()
+        eng.feed(7, "BRP 7 600 40000 25200 300.0 new_read=600 read_ms=2000.0 stage_ms=0")   # the retry:
+        self.assertIsNone(eng.step(it))                  #  600 under the live beat's done=9,600: restart
+        self.assertEqual(self.svc._read_counted(stat), 10200)      # (history keeps both attempts: 9,600 + 600)
+        self.tick(1.5)                                   # the poll between the restart and the retry's next
+        rate = self.svc._own_read_rate(stat, self.t[0], self.svc._read_counted(stat))   #  step (the no-pair
+        self.assertLess(rate, 1000.0, f"1.5 s after the restart: readout {rate} - the old attempt's tokens "
+                                      "still divide the new read's span")   #  path: pre-fix 10,200 / 1.5 s)
+        self.assertGreater(rate, 100.0, f"1.5 s after the restart: the readout went blank ({rate})")
+        for k in range(1, 7):                            # the retry runs on at 300 tok/s (BRP steps)
+            eng.feed(7, f"BRP 7 {600 + 300 * k} 40000 {25200 + k * 1000} 300.0 "
+                        f"new_read={600 + 300 * k} read_ms={2000 + k * 1000}.0 stage_ms=0")
+            self.assertIsNone(eng.step(it))
+            self.tick()
+            r = self.svc._own_read_rate(stat, self.t[0], self.svc._read_counted(stat))
+            self.assertLess(r, 1000.0, f"retry second {k}: readout {r} - old tokens still in the numerator")
+        self.assertAlmostEqual(r, 300.0, delta=50.0)     # (the engine's own: 2,400 tokens / 8.0 s = 300)
+        self.assertLess(self.row()["prefill_tok_s"], 1000)        # the chat row shows the fixed readout
+        pk = self.svc.totals.get("peak_prefill")                   # (row()'s metrics ran the live readout:
+        self.assertTrue(pk is None or pk["tok_s"] < 1000, f"peak_prefill {pk}")   #  a peak from it too)
+
 
 class SplitReadFollowsEngineFigure(Base):
     """P124v2 review round 5 (P2): a two-card layer split (each card half the layers, 78 passes each), one

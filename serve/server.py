@@ -3157,6 +3157,9 @@ class RequestStat:
         self.read_eng_n, self.read_eng_ms = 0, None     # live pair (the last progress step's)
         self.read_engine = None                         # the finished read's exact (new tokens, read_ms)
         self.read_leg_ms = 0.0                          # P124v2: the read's closed legs' wall time (ms) so far
+        self.read_count_reset = 0                       # P124v2 round 6 (review P1): the tokens a mid-read
+        #  restart dropped from the readout's NUMERATOR - the span restarted with the attempt (read_leg_ms
+        #  zeroed, engine_t0 moved), so its counted tokens restart with it; _read_counted keeps them as history
         # U5 read heartbeat (PLAN-u5-read-heartbeat): the engine's last RHB report of the read in flight - stage
         # (staging the reused prefix from RAM, or reading new tokens), done/new (new tokens done of total),
         # reused, the rate over the last heartbeat interval and when it arrived (consumers ignore a stale one)
@@ -4529,9 +4532,17 @@ class Service:
         a clock that stopped (the recorded mangonel: at 7.11 s the engine's own new/read_ms said
         704.2 tok/s while the Monitor showed 2,099.4).  A read the engine beats for that stops
         beating (a stall, a wedge): the readout FALLS with the silence instead of freezing at the
-        last beat, and drains to nothing past the window.  Without the engine's fields (an older
+        last beat, and drains to nothing past the window.  Without the         engine's fields (an older
         engine): its counted tokens over the time since the engine took it, as before - drained to
-        0 once nothing has landed for a full window."""
+        0 once nothing has landed for a full window.  After a mid-read restart the NUMERATOR
+        re-baselines with the span (round 6, P1): the abandoned attempt's counted tokens stay in
+        _read_counted as history and never divide the new read's span."""
+        excl = getattr(st, "read_count_reset", 0) or 0   # (P124v2 review round 6, P1: the restart branch
+        if excl:                                         #  zeroed read_leg_ms and moved engine_t0 - the
+            closed = sum(r[3] or 0 for r in self.reads   #  span restarted with the attempt; its counted
+                         if r[0] is st and r[2] is not None)   #  tokens must restart with it.  min(): a
+            n_own = max(0, n_own - min(excl, closed))    #  closed leg pruned out of the history total
+                                                         #  after the reset was counted in it, not out of here)
         if st.read_eng_ms and st.read_eng_ms > 0 and st.read_eng_n:
             r = getattr(st, "read_cur", None)
             if r is not None and r[2] is None and st.first_token is None:
@@ -4583,6 +4594,9 @@ class Service:
             #  _note_read belt keys on its done/chunk; both belong to the interval that just closed)
             stat.read_share_unit, stat.read_split_share = None, False   # (round 5: a fresh read shares its units
             #  again until a split's two cards show themselves on it)
+            stat.read_count_reset = 0                   # (round 6, P1: this hook does NOT zero read_leg_ms -
+            #  the closed legs' wall time stands in the span - so their counted tokens stand in the numerator
+            #  too; the exclusion belongs to the restart that zeroed the span, and it dies with that signal)
             self._read_open(stat, now)
 
     def _note_read_safe(self, *a):
@@ -4751,6 +4765,11 @@ class Service:
                     stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
                     stat.read_eng_n, stat.read_eng_ms = 0, None   # (the engine's live pair restarts with the read)
                     stat.read_leg_ms = 0.0              # (P124v2: and so does its own elapsed span)
+                    stat.read_count_reset = self._read_counted(stat)   # (P124v2 review round 6, P1: the
+                    #  span re-baselines with this line and the engine_t0 move, so the rate's NUMERATOR does
+                    #  too - the readout divides the RETRY's tokens by the RETRY's span; the abandoned
+                    #  attempt's closed intervals stay in _read_counted as the history figure, and
+                    #  _own_read_rate subtracts them back out again)
                     stat.read_hb = None                 # (round 3 nit: and its last beat goes too - _read_span_s
                     #  subtracts read_hb's stage_ms, and the PREVIOUS read's stale staging figure would shrink the
                     #  new read's span; the gate above keys on the beat's done/chunk alike)
