@@ -1,87 +1,101 @@
-# Code review (local agent) - P124v2 read-rate-true - reviewed 2026-11-28 at c75f80547
+# Code review (local agent) - P124v2 read-rate-true - reviewed 2026-11-28 at 854866cd8
 
 FIX-FIRST
 
-Scope: `git diff b7ed679cbc75cf1959bb1d793e8442534ac4a5f3..HEAD` (12 files, 28 commits) against
+Scope: `git diff b7ed679cbc75cf1959bb1d793e8442534ac4a5f3..HEAD` (12 files, 32 commits) against
 `PLAN-p124v2-read-rate-true.md` / `REPORT-p124v2-read-rate-true.md` / `FIX-REPORT.md`. Repro probes in
-`scratch/` (gitignored): `r6_restart_spike.py`, `r6b.py`, `qfn_engine.pre-extract`. Nothing else edited.
+`scratch/` (gitignored): `review_r7_restart_hook_probe.py`, `review_r7_qfn_engine.committed`. Nothing else edited.
 
 ## Findings by severity
 
-1. FIX (blocker) - after a mid-read restart the cumulative readout divides the OLD attempt's tokens by the
-   NEW read's span, reading grossly high - exactly the failure class this plan exists to kill.
-   `serve/server.py:4750-4764` (the restart branch) zeroes `read_leg_ms`, clears `read_hb` and re-baselines
-   `engine_t0`, but `_read_counted` (`serve/server.py:4566-4572`) still sums the CLOSED intervals - the failed
-   attempt's tokens stay in the numerator `n_own`, while `_own_read_rate`'s denominators (`:4545`, `:4556`,
-   `:4559-4563`) restart with the new read. The docstring's floor promise - "the engine's own read_ms pair as
-   the floor ... never raise the rate above the engine's own figure" (`serve/server.py:4519`, report step 2) -
-   fails because the numerator holds tokens the pair (`read_eng_n`) never had. Measured on the committed code
-   through the real Service + driver hooks (scratch/r6_restart_spike.py, scratch/r6b.py): a 15 s / 400 tok/s
-   read (24,000 tokens, readout a true 1,600) then the retry's step `new_read=500` - the live readout shows
-   **49,000 tok/s** on the step (the engine's own figure: 333), and **3,363 tok/s six seconds later** (the
-   engine's own: 300.0); it converges only once the closed interval prunes (~10-15 s). All realistic retry
-   shapes land in the branch: fresh beats fail its "one whole unit closed" gate (`:4741-4744`, the very shape
-   of P1's committed test), and the hook-first retry clears `read_hb` at `_read_start` (`:4581`).
-   `peak_prefill` survives only by accident - `_note_peak_read`'s internal `span = tokens/tok_s` check
-   (`serve/server.py:4799-4804`) rejects the inflated rate - but the chat row and `live.prefill_tok_s` show it.
-   No committed test gates the readout's VALUE after a restart: `CounterFallsRestartOrCorrectDown`
-   (`serve/test_read_rate_true.py:517-576`) asserts re-open/re-baseline only, and the replay/split gates never
-   restart. Fix direction: on restart also baseline the rate's numerator (subtract the closed intervals'
-   tokens from `n_own`, e.g. a counter set with the reset, keeping `_read_counted`'s history figure), or keep
-   the span consistent with the counted - the latter collides with the two committed assertions (`:532`
-   engine_t0 re-baseline, `LateStepAfterClose`), so the baseline is likely the way; add a post-restart
-   readout gate to the restart test.
+1. FIX - the round-6 numerator fix (`stat.read_count_reset`) is released by the next admission hook, and its
+   release reason does not hold after a restart: the same spike class returns on the restart -> `_read_start`
+   path. `serve/server.py:4597` (`_read_start`) zeroes `read_count_reset` on the stated reasoning "this hook
+   does NOT zero read_leg_ms - the closed legs' wall time stands in the span - so their counted tokens stand
+   in the numerator too". That premise fails when the restart branch (`serve/server.py:4767`) has JUST zeroed
+   `read_leg_ms`: the pre-restart legs' TIME is gone from the span (`_read_span_s`, `serve/server.py:4512`)
+   while the hook hands their TOKENS back to the numerator (`_read_counted`, `serve/server.py:4577-4583`),
+   breaking the docstring's own promise that the abandoned attempt's tokens "never divide the new read's
+   span" (`serve/server.py:4537-4539`). Verified on the committed code through the real Service and the
+   committed harness (scratch/review_r7_restart_hook_probe.py): a 9,600-token / 24 s read at 400 tok/s
+   restarts and retries at 300 - the committed round-6 gate path reads a correct 300.0 - then ONE fresh
+   admission hook (`_read_start` fires on every admission: `serve/server.py:6326`, `:9907-9909`, e.g. a slice
+   re-admit or a requeue after the retried failure) puts the live readout at **1,500 tok/s where the engine
+   says 300** (12,000 history tokens over the retry's 8 s pair floor), until the pre-restart interval prunes
+   (~10 s, `_read_prune` `serve/server.py:4496-4499`). The pair floor cannot hold it - the round-6 commit
+   message itself notes the floor fails with `n_own` above the pair's own `n`. `peak_prefill` dodges the big
+   spike only by the same accident as round 6 (`_note_peak_read`'s internal `tokens/tok_s` < PEAK_MIN_SPAN_S
+   check, `serve/server.py:4821-4823`; the open-read peak feed at `:4420-4421` gates on the PAIR's span) - a
+   MILD inflation (rate <= pair tokens / 5 s) passes that check and records an inflated peak; the chat row and
+   `live.prefill_tok_s` show the value either way. No committed test gates restart -> `_read_start`: the
+   round-6 gate (`serve/test_read_rate_true.py:578-614`) stops at the retry's own steps, and no
+   `serve/test_read_rate.py` `_read_start` call follows a restart. Fix direction: do NOT clear
+   `read_count_reset` in `_read_start` - the `min(excl, closed)` at `serve/server.py:4540-4545` already tracks
+   pruning correctly, the exclusion is about the SPAN that only the restart branch zeroes, a later restart
+   recomputes it, and with no restart it is 0 so the clear is a no-op anyway; the comment's pairing argument
+   is true only for the no-restart case it does not discriminate. Gate the post-hook readout in the restart
+   test.
 
-2. Carried, documented (no action beyond the report's open question 1): the four unconditional changes - the
-   `_note_hb` belt, the cumulative readout, the `engine_t0` re-baseline, the `read_hb` clear - are not behind
-   the missing fields, so a P124v engine (RHB without `pos0=`/`chunk=`) does not get byte-identical OFF
-   behaviour. The in-flight SHARE is properly field-gated (`serve/server.py:4633-4634`; parse at
-   `engines/qfn/serve/server.py:1777-1784`: absent or malformed -> `chunk=0`/`pos0=None`), and the
-   old-engine restart path still fires (the fall gate at `:4741-4744` needs `chunk>0` to suppress), but the
-   readout's denominator/clock semantics change for the old engine regardless. The report states this plainly
-   (REPORT...md:147-159); the brief's byte-identical check formally fails on these paths.
+2. Carried, documented (no action per round 6): the four unconditional changes - the `_note_hb` belt
+   (`serve/server.py:4671-4683`), the cumulative readout (`:4517+`), the `engine_t0` re-baseline
+   (`:4778-4782`), the `read_hb` clear (`:4592`, `:4773`) - are not behind the `pos0=`/`chunk=` fields, so the
+   strict byte-identical-OFF check formally fails; the in-flight SHARE itself is properly field-gated
+   (`serve/server.py:4645-4648`; parse `engines/qfn/serve/server.py:1777-1784`, absent/malformed ->
+   `chunk=0`/`pos0=None`), the old-engine restart path still fires (the fall gate at `:4750-4758`), and the
+   report states all of this plainly (REPORT...md:147-159). Accepted as recorded.
 
-3. Documented deviation: the CUMULATIVE readout time-averages ~31% under the client's figure on the card's
-   warm-up read (~1,097 vs 1,580; report round-5 addendum, lines 130-136). The plan's 5% clause binds the
-   steady mangonel replay, where it holds (below); the card's gates are end-value, cap and last-5-s window.
+3. Documented deviation (accepted design, carried): the cumulative readout's sample average lags a warm-up
+   read (~1,097 vs 1,580 on the card replay; report lines 130-136) - the plan's 5% clause binds the steady
+   mangonel replay, where it holds (below); the card's gates are end-value, cap and last-5-s window.
 
-4. Nit: report line references drifted - `_note_hb` is serve/server.py:4607 (not 4582), `_own_read_rate`
-   :4514 (not 4508), `_read_span_s` :4498 (not 4495), `EngineSideContract` serve/test_read_heartbeat.py:421
-   (not :382).
+4. Nit: `_note_hb` reads `stat.read_pos` for its belt (`serve/server.py:4672`) without holding `status_lock`
+   (it is mutated under the lock in `_note_read`). Benign under the GIL (atomic int read; worst case a
+   one-beat-stale belt bound, and the beat and step paths already share this pattern for `read_hb`) - noting
+   for the lock review, not a defect.
 
-5. Observation (accepted design): until a lagging card's lower fraction lands, the split read's counter runs
-   on the leading card's share - up to a unit ahead - and is corrected DOWN by the next engine step
-   (`serve/server.py:4644-4656`); the gate is the fraction-falling-back flag, sound for a single card (whose
-   passes never go down on one unit; piece lines print `pos0=-1 chunk=0` and take no share).
+5. Environment note (affects the report's claim, not the code): the round-5 "both changed C++ files pass
+   `g++ -std=c++20 -fsyntax-only -Wall -Wextra` on the host path" is NOT reproducible in this environment -
+   neither CUDA nor ROCm headers exist (`cuda_runtime.h`, `hip/hip_runtime.h` both absent; tried with and
+   without the `hip_compat` shim). The C++ changes were instead verified statically here (below); the
+   device/nvcc build and card run stay owed exactly as open question 1 records.
 
 ## Manager gate - satisfied (with the recorded-file caveat)
 
-`serve.test_read_rate_true` 16 green (211.7 s, run alone): `MangonelTrueReadout`
+`serve.test_read_rate_true` 17 green (281.8 s, run alone): `MangonelTrueReadout`
 (`serve/test_read_rate_true.py:277-357`) asserts the readout non-blank and > 0 after EVERY RHB of the read
-(:336-339), the sample average within 5% of the engine's own 1,567.8 (:348; the run is green), the max and
-`peak_prefill` <= 1.25x (:351-354) and the close at exactly 27,254 counted (:357). Caveat the report states
-(open question 2): `ref/mangonel-engine-after-p124v.txt` holds only the summary line, so the replay is a
-reconstruction of that read's shape, not its recorded beats.
+(:336-339), the sample average within 5% of the engine's own 1,567.8 (:348 - green), the max and
+`peak_prefill` <= 1.25x (:351-354) and the close at exactly 27,254 counted (:357). Caveat as recorded (open
+question 2): `ref/mangonel-engine-after-p124v.txt` holds only the summary line, so the replay reconstructs
+that read's uniform shape rather than replaying recorded beats.
 
 ## What checks out (verified here)
 
-- Plan modules, one at a time: `serve.test_read_rate_true` 16 green; `serve.test_read_rate` 34 green (module
-  unchanged from b7ed679 - the P124v pins still true). `serve.test_read_heartbeat` was NOT run (the plan names
-  the read-rate modules only); its new contract was verified statically instead - the pinned two-part printf
-  literals are in `engines/qfn/src/program/generate.cpp:11332-11333` and `:16673-16674` exactly as asserted.
-- Generated file: `tools/saguaro/extract_qfn_engine.py` re-run twice reproduces `serve/qfn_engine.py`
-  byte-identically (cmp clean, `git status` clean); its diff mirrors `engines/qfn/serve/server.py`'s exactly.
-- C++ host path (re-run here): `g++ -std=c++20 -fsyntax-only -Wall -Wextra -DSTRATA_VERSION=...` exits 0 on
-  both changed files (pre-existing warnings only). No 5-arg `on_layer_pass` site left; the swap-aside vector
-  (generate.cpp:16947) and both put-back sites match the 6-arg type (prefill.hpp:70/:341,
-  prefill.cpp:5439-5440; callbacks :11708, :16995-16997, :17766-17768); piece line prints `pos0=-1 chunk=0`
-  (:11352-11355), never read by the share guard.
-- Locks/threads/stdout: each RHB line is ONE printf (11 specifiers / 11 args at both sites) under `rhb_mu`
-  (generate.cpp:11315) - no line can interleave; `ReadProgress::mu_` and `rhb_mu` are taken sequentially,
-  never nested (report, then print); server-side `status_lock` is never re-entered (the fall branch runs
-  inside the single `with` in `_note_read`; `_read_close`/`_read_open`/`_read_span_s`/`_own_read_rate` take
-  no lock themselves; `_note_hb` books through `_note_read` without holding it).
-- Commits: 28 in range, step 1/2/3 each committed (2b5e1daaa, 63c028574, 59d618841); no Co-Authored-By,
+- Plan modules, one at a time: `serve.test_read_rate_true` 17 green, `serve.test_read_rate` 34 green (module
+  byte-identical to b7ed679 - the P124v pins still hold), `serve.test_read_heartbeat` 19 green.
+- Generated file: `tools/saguaro/extract_qfn_engine.py` re-run reproduces `serve/qfn_engine.py`
+  byte-identically (diff clean against a saved copy, `git status` clean after); its diff mirrors
+  `engines/qfn/serve/server.py`'s `_rhb` parse exactly; no hand edit.
+- Engine side, statically: both RHB printfs are 11 specifiers / 11 args (`generate.cpp:11332-11334`,
+  `:16673-16676`), each line ONE printf + fflush under `rhb_mu` (`:11315`) - no stdout line can interleave;
+  `ReadProgress::mu_` (`read_progress.hpp:42/:55/:64`) is taken and released BEFORE `rhb_mu` at both sites -
+  sequential, never nested; no 5-arg `on_layer_pass` site left (`prefill.hpp:70`/`:341`,
+  `prefill.cpp:5439-5440`, `generate.cpp:11708`, the swap-aside vector `:16947` and its move sites
+  `:16973`/`:16994`, callbacks `:16995-16997`/`:17766-17768`); the piece-boundary line prints `pos0=-1
+  chunk=0` (`:11352-11355`) and the share guard needs `chunk > 0`, so it books `done=` only (pinned by
+  `test_read_heartbeat.py:383-400`).
+- The server's guard assumptions match `read_progress.hpp:89-101`: with no boundary above the reporting
+  unit revealed, `b == c.p0` gives every card of a split no part credit and `done == pos0 - reused` holds
+  for all of them (the flag's domain); once a card crosses a boundary the cross-card figure carries its
+  share and the guard fails for it - no double-count; the fraction-falling-back flag (`serve/server.py:4661-
+  4668`) cannot fire for a single card (its passes only rise on one unit) and the piece line never touches
+  the tracker.
+- `status_lock` is never nested: `_note_read` holds it once (`serve/server.py:4712`) and the whole fall/restart
+  branch runs inside that `with`; `_read_close`/`_read_open`/`_read_counted`/`_read_span_s`/`_own_read_rate`
+  take no lock themselves; `_note_hb` books through `_note_read` without holding it; `_read_start` takes it
+  once (`:4589`).
+- py_compile clean on every touched Python file.
+- Commits: 32 in range, plan steps each committed (2b5e1daaa, 63c028574, 59d618841); no Co-Authored-By,
   Claude-Session or Assisted-by lines anywhere in the range.
-- No secrets, no paths outside the repo: the only absolute path added is the documented
-  `/opt/llm/saguaro/.venv/bin/python` in the report; the timeline fixture holds only /metrics fields.
+- No secrets, no paths outside the repo: the only absolute path added in the diff is the documented
+  `/opt/llm/saguaro/.venv/bin/python` in the report; the timeline fixture holds only /metrics fields; probes
+  live in gitignored `scratch/`.
