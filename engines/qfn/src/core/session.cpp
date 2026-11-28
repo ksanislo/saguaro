@@ -235,7 +235,13 @@ bool session_slot_fit(SessionState& s, int64_t cells, bool trim) {
         return session_host_fit(s, cells);
     }
     cells = std::min<int64_t>(std::max<int64_t>(cells, 1), s.max_cells);
-    if (!trim && cells <= s.slot_cells) return true;
+    // 1.2.4-pre (mangonel: "the K/V staging and the backed context hold 196608 cells, the chunk reaches 197079"): the
+    // VRAM ring covering `cells` is not enough - the host copy grows in its own steps and can trail it; returning here
+    // left it unbacked and the next read was refused (then the engine exited or hung).  Done only when both halves cover.
+    if (!trim && cells <= s.slot_cells) {
+        const int64_t hc = session_host_backed_cells(s);   // (-1: the host copy is pinned whole)
+        if (hc < 0 || hc >= cells) return true;
+    }
     std::vector<const QsaState*> sts;
     for (int64_t j = 0; j < s.qsa_alloc; ++j) sts.push_back(&s.qsa_states[s.qsa_ord0 + j]);
     if (trim) {
