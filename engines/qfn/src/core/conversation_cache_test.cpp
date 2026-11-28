@@ -727,6 +727,11 @@ int main() {
         // capture) must never enter the reuse pool that a later park continues into. The restore-site whole-image
         // guard (900c6fd17) already refuses it, but the cache must not trust its caller: retain() refuses it locally,
         // and a park then simply captures fresh - which is exactly the refused-adopt fallback this branch hunts.
+        // (review MEDIUM-4: this module COMPILES against the pre-fix cache - the retain/retained_bytes/take_reuse
+        //  checks name only the long-standing API, and the direct external_kv probes ride a dependent name through
+        //  has_external_kv/enable_if, which resolves to a no-op without the new static - so the block's pre-fix red
+        //  is a RUNTIME failure (pre-fix retain() kept an 8580-byte alias as the next park's reuse prefix), not a
+        //  compile error: revert-tested with the old header on scratch/p124y2/conv_cache_prefix.)
         auto owned_layer = [](size_t n) {
             std::vector<ConversationKv> v(1);
             v[0].k.resize(n, 1);
