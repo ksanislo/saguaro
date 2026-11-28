@@ -109,8 +109,21 @@ struct Ref {
     const uint8_t* flat = nullptr;
     const ConversationBuffer* buf = nullptr;
     uint64_t from = 0, claim = 0;   // a captured turn: `buf` holds [from, size); see SessionLogKvTail
+    const SessionLogSpool* spool = nullptr;   // (P125r) or `spool_at` holds [from, size) on disk
+    uint64_t spool_at = 0;
     template<class Fn> bool visit(uint64_t at, uint64_t n, Fn fn) const {
         if (n == 0) return true;
+        if (spool != nullptr) {   // streamed at capture: read back in pieces of at most 4 MiB, never whole
+            if (at < from || at + n > size) return false;
+            uint8_t piece[4u << 20];
+            while (n) {
+                const size_t c = (size_t) std::min<uint64_t>(n, sizeof piece);
+                if (!spool->pread(piece, c, spool_at + (at - from))) return false;
+                if (!fn(piece, c)) return false;
+                at += c; n -= c;
+            }
+            return true;
+        }
         if (buf == nullptr) return fn(flat + at, (size_t) n);
         if (at < from) return false;
         return buf->visit((size_t) (at - from), (size_t) n, [&](const uint8_t* q, size_t c, size_t) { return fn(q, c); });
@@ -193,7 +206,8 @@ std::vector<Ref> refs_of(const std::vector<ImagePlan>& plan) {
         for (uint64_t l = 0; p.tails != nullptr && l < p.tails->size(); ++l) {
             const SessionLogKvTail& k = (*p.tails)[l];
             for (uint64_t part = 0; part < 5; ++part)
-                out.push_back({key_of(i, kKv, l, part), k.size[part], nullptr, &k.bytes[part], k.from[part], k.claim[part]});
+                out.push_back({key_of(i, kKv, l, part), k.size[part], nullptr, &k.bytes[part], k.from[part],
+                               k.claim[part], k.spool[part].get(), k.spool_at[part]});
         }
         for (uint64_t l = 0; p.tails == nullptr && l < s.kv.size(); ++l) {
             const ConversationKv& k = s.kv[l];
@@ -484,6 +498,49 @@ bool free_bytes(const std::string& path, uint64_t& out) {
 }
 } // namespace
 
+SessionLogSpool::~SessionLogSpool() {
+    if (fd >= 0) ::close(fd);
+}
+
+// The name exists only until the open returns: unlinked at once, the fd is the only way in (a crash leaves nothing
+// behind, not even a name).
+bool SessionLogSpool::open(const std::string& dir, size_t cap, std::string& error) {
+    for (int attempt = 0; attempt < 8 && fd < 0; ++attempt) {
+        const std::string path = dir + "/.session-spool-" + random_hex() + ".tmp";
+        const int f = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (f < 0) {
+            if (errno == EEXIST) continue;
+            error = "session log: cannot create the capture's spool: " + std::string(std::strerror(errno));
+            return false;
+        }
+        ::unlink(path.c_str());
+        fd = f;
+        cap_bytes = cap;
+    }
+    if (fd < 0 && error.empty()) error = "session log: cannot name the capture's spool";
+    return fd >= 0;
+}
+
+bool SessionLogSpool::write_at(uint64_t at, const uint8_t* p, size_t n) const {
+    while (n) {
+        const ssize_t w = ::pwrite(fd, p, n, (off_t) at);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) { if (w == 0) errno = EIO; return false; }
+        p += w; n -= (size_t) w; at += (uint64_t) w;
+    }
+    return true;
+}
+
+bool SessionLogSpool::pread(uint8_t* p, size_t n, uint64_t at) const {
+    while (n) {
+        const ssize_t r = ::pread(fd, p, n, (off_t) at);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) { if (r == 0) errno = EIO; return false; }
+        p += r; n -= (size_t) r; at += (uint64_t) r;
+    }
+    return true;
+}
+
 bool session_log_supported() { return true; }
 
 namespace {
@@ -512,9 +569,20 @@ bool session_log_save_turn(const std::string& path, const SessionLogTurn& turn, 
 bool session_log_capture(SessionLogTurn& out, SavedConversation&& meta, const std::vector<SessionKvSource>& kv,
                          const std::vector<std::vector<SessionKvSource>>& stage_kv,
                          const std::vector<std::vector<std::array<uint64_t, 5>>>* unchanged, bool verify,
-                         std::string& error) {
+                         std::string& error, const std::string& spool_dir, size_t spool_cap_bytes) {
     out.meta = std::move(meta);
     out.kv.assign(1 + stage_kv.size(), {});
+    // P125r: the capture holds at most spool_cap_bytes of the K/V in RAM - the source is already a host copy for a
+    // streamed session, so keeping the second copy too is what pushed the box into swap. Parts past that budget
+    // stream through a buffer no bigger than the budget into the turn's spool file, and the save reads them back in
+    // bounded pieces. 0 / no dir: the whole capture lands in RAM, as before P125r.
+    auto read_fail = [&](const SessionKvSource& s) {
+        error = "session log: reading the K/V failed" + (s.error ? ": " + s.error() : std::string());
+        return false;
+    };
+    const bool may_spool = spool_cap_bytes > 0 && !spool_dir.empty();
+    size_t held = 0;
+    std::vector<uint8_t> piece;
     for (size_t i = 0; i < out.kv.size(); ++i) {
         const std::vector<SessionKvSource>& src = i == 0 ? kv : stage_kv[i - 1];
         for (size_t l = 0; l < src.size(); ++l) {
@@ -528,12 +596,40 @@ bool session_log_capture(SessionLogTurn& out, SavedConversation&& meta, const st
                 keep = std::min<uint64_t>(keep, t.size[p]) / out.chunk_bytes * out.chunk_bytes;
                 if (verify) t.claim[p] = keep; else t.from[p] = keep;
                 const uint64_t from = t.from[p], n = t.size[p] - from;
-                t.bytes[p].resize_for_overwrite((size_t) n);
-                if (n && (!s.read || !t.bytes[p].visit(0, (size_t) n, [&](uint8_t* q, size_t c, size_t at) {
-                        return s.read(p, (size_t) from + at, q, c);
-                    }))) {
-                    error = "session log: reading the K/V failed" + (s.error ? ": " + s.error() : std::string());
-                    return false;
+                if (n == 0) continue;
+                if (!s.read) return read_fail(s);
+                if (may_spool && held + n > spool_cap_bytes) {
+                    if (!out.spool) {
+                        out.spool = std::make_shared<SessionLogSpool>();
+                        std::string se;
+                        if (!out.spool->open(spool_dir, spool_cap_bytes, se)) {
+                            out.spool.reset();
+                            error = se;
+                            return false;
+                        }
+                    }
+                    const size_t room = spool_cap_bytes > held ? spool_cap_bytes - held : 0;
+                    const size_t want = std::max<size_t>(std::min<size_t>((size_t) n, room), 1u << 20);
+                    if (piece.size() < want) piece.resize(want);   // reused across parts: never over the budget (+1 MiB floor)
+                    const uint64_t off = out.spool_bytes;
+                    for (uint64_t at = 0; at < n;) {
+                        const size_t c = (size_t) std::min<uint64_t>(n - at, piece.size());
+                        if (!s.read(p, (size_t) (from + at), piece.data(), c)) return read_fail(s);
+                        if (!out.spool->write_at(off + at, piece.data(), c)) {
+                            error = std::string("session log: the capture's spool write failed: ") + std::strerror(errno);
+                            return false;
+                        }
+                        at += c;
+                    }
+                    t.spool[p] = out.spool; t.spool_at[p] = off;
+                    out.spool_bytes += (size_t) n;
+                } else {
+                    held += (size_t) n;
+                    t.bytes[p].resize_for_overwrite((size_t) n);
+                    if (!t.bytes[p].visit(0, (size_t) n, [&](uint8_t* q, size_t c, size_t at) {
+                            return s.read(p, (size_t) from + at, q, c);
+                        }))
+                        return read_fail(s);
                 }
             }
             out.kv[i].push_back(std::move(t));
