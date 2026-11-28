@@ -12835,7 +12835,11 @@ vs.d_skip_usage = gs.d_skip_usage;
         // P125j: the same STOP, taken at the chunk's NEXT LAYER BOUNDARY too instead of only before a
         // chunk: a read a priority cut catches mid-chunk ends within one layer pass, keeping its chunk's
         // rows with the conversation (Prefill::run_impl; SAGUARO_LAYER_PAUSE=0 restores the old wait).
-        sp.stop_between_layers = [&] { return stop_req.load(); };
+        // Round-4 FIX-FIRST: the pause is armed ONLY at the one reader that captures it - read_part's run
+        // lambda arms it around its own sp.run and reads paused_chunk() right after. An arm here, live for
+        // every reader of this Prefill, armed the readers with no capture: a batch slot's read thread and
+        // the piped read's own thread would end mid-chunk on err "layer paused" and drop the chunk's rows
+        // instead of keeping them. Their STOP stays the plain between-chunk stop (should_stop above).
         // 149-prefetch SAGUARO_RAM_ADAPT2: the prompt's routing seeds the RAM policy with a limited weight
         // (SAGUARO_RAM_ADAPT_PROMPT_W, default 0.25: an expert every prompt token routes to counts like ~5 decode routings),
         // fading by 5% a decode window; the decode's own counts and the GPU tier are untouched
@@ -20910,6 +20914,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                     if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
                     const ShareScope share_scope(read_share_set, read_share_now());
                     pp_run_begin();   // (this request's own read clock: the pieces between two runs - the slots'
+                    // P125j round 4: arm the layer-boundary STOP for THIS run only - this reader is the one
+                    // that captures it below (paused_chunk/take_pause_rows); the guard disarms on every way
+                    // out, an exception included. The other sp.run readers keep the between-chunk stop.
+                    struct PauseArm {
+                        std::function<bool()>& hook;
+                        ~PauseArm() { hook = nullptr; }
+                    } pause_arm{sp.stop_between_layers};
+                    sp.stop_between_layers = [&] { return stop_req.load(); };
                     const bool ok = sp.run(ids.data() + q, r - q, q, e);
                     pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
                     if (!ok && sp.paused_chunk() >= 0) {   // P125j: the read stopped between two layers

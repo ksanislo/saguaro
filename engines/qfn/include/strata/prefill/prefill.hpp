@@ -345,7 +345,9 @@ public:
     /// (tokens x hc*n_embd FP32) on the host and ends the run with err "layer paused" - the conversation
     /// keeps the read (generate.cpp's pause keep) and the next run of the same tokens goes on at the saved
     /// layer (the K/V of the layers below it for this chunk is already written). Unset, or the variable
-    /// 0: the plain between-chunk stop, byte-identical to before.
+    /// 0: the plain between-chunk stop, byte-identical to before. Arm it only for a run whose caller reads
+    /// `paused_chunk()` / `take_pause_rows()` right after (generate.cpp's read_part does): armed anywhere
+    /// else the pause ends the run on err "layer paused" with nobody to keep its rows.
     std::function<bool()> stop_between_layers;
     /// SAGUARO_LAYER_PAUSE (default on): whether `run` honours a layer pause at all - OFF, the check, the
     /// row copies and the resume all stay untouched and the read behaves exactly as before P125j.
