@@ -1,107 +1,147 @@
-# REVIEW-RESULT - P125e (PLAN-p125e-ik2-elastic-1 / REPORT-p125e-ik2-elastic-1)
+# REVIEW-RESULT - P125o (Inkling 2 elastic VRAM, step 2: the K / V grows on demand)
 
-MERGE-WITH-NITS
+Verdict: **FIX-FIRST**
 
-Reviewed `git diff d210adc76e47b9883484a6b20b32372ff98a0ce1..HEAD` (6 commits, 9 files). Re-ran the plan's tests
-in this worktree, one at a time: `scratch/build-ik2-elastic/ik2_plan_test` ok (ninja: no work to do - binary
-current with HEAD); `tools.test_ik2_kv_start` 11 OK; `tools.test_setup_ik2` 58 OK; `tools.test_docs_new_engines`
-7 OK; `serve.test_models` 64 OK; `serve.test_new_engines_ui` 38 OK; `serve.test_model_api` 28 OK;
-`bash -n tools/card_tests/ik2_kv_start.sh` clean; no GPU run. The build dir is configured
-`CMAKE_CUDA_ARCHITECTURES=75`, `MAYA_ENABLE_CUDA=ON`, and `ninja saguaro-ik2` is up to date with the committed
-source; `scratch/build-ik2-elastic.log` shows only the three pre-existing nvcc warnings
-(Shards::num, g_apu, kFaRawQ4), so the report's "clean" claim holds at HEAD.
+Range `git diff d210adc76e47b9883484a6b20b32372ff98a0ce1..HEAD` against PLAN-p125o-ik2-elastic-2.md and
+REPORT-p125o-ik2-elastic-2.md. The P125e commits through 37c7523ca carry their earlier review (MERGE-WITH-NITS);
+this review is of 37c7523ca..HEAD (the a2 / a3 step) and re-checks the OFF-path over the whole range. One CRITICAL
+and one HIGH must be fixed before merge; both are of the "silently wrong / engine-killing" kind the plan itself
+warns about.
 
 ## Findings, by severity
 
-1. MEDIUM - elastic start: three hooks still bound positions by the ceiling `ctx` instead of `g_kv_run`, so they can
-   touch global-layer K/V above the committed layout.
-   - src/ik2/ik2_main.cu:10139 - the SAGUARO_IK2_DRAFT_IDS filter is `v.size() + 256 < ctx`; with elastic (g_kv_run
-     = 32768, ctx = 262144) a line of, say, 40 000 ids passes, and the measurement then writes K/V at positions
-     above the rows allocated at src/ik2/ik2_main.cu:8465/:8501 and decodes from `P = ids.size()`.
-   - src/ik2/ik2_main.cu:10180 - `decode_greedy(..., ctx, ...)` bounds `P < ctx` and `room = ctx - P`
-     (src/ik2/ik2_main.cu:7116/:7119): generation runs to the ceiling, not the commit.
-   - src/ik2/ik2_main.cu:11308 - SAGUARO_IK2_BLOCK_WARM's gate is `prompt.size() + kBlockMax <= ctx`.
-   What the over-commit writes do: the K/V-write epilog is called with `Ly.kv_cap` for the full layers
-   (src/ik2/ik2_main.cu:3404/:3414/:3435; the wrap rule is src/ik2/ik2_kernels.cuh:289/:292), so writes past the
-   commit wrap `% kv_cap` and silently overwrite the cache's first rows; the decode attention for full layers is
-   called with ring 0 (src/ik2/ik2_main.cu:3410/:3430/:3449) and reads `[0, P)` linearly - past the allocated
-   rows (an out-of-bounds read). The drafter's context rows are commit-sized too
-   (src/ik2/ik2_main.cu:5462/:9174/:9179).
-   Reachability: guarded request paths are safe - the GEN guard uses g_kv_run (src/ik2/ik2_main.cu:10732/:10736)
-   and the CLI die uses g_kv_run (src/ik2/ik2_main.cu:11205), and serve's own generated SAGUARO_IK2_DRAFT_IDS file
-   is short doc questions (serve/server.py:2906-2935, :2992-2995). But the hooks are operator-settable, and a
-   small SAGUARO_IK2_KV_START makes even the auto-measure reachable. Fix: use `g_kv_run` at :10139, :10180 and
-   :11308 (the elastic design - "never writes past what it laid out", src/ik2/ik2_plan.hpp:34-35 - should hold
-   for these paths too).
+1. **CRITICAL - the K/V-write epilogue still wraps past the committed start step; every conversation past the
+   commit is silently wrong.** `Vi.kv_cap` is the commit on a VMM-backed start (src/ik2/ik2_main.cu:8536), and the
+   write epilogue passes it to kernels that index modulo it: `slot = kv_cap > 0 ? (pos0 + t) % kv_cap : (pos0 + t)`
+   (src/ik2/ik2_kernels.cu:465 and :471). All full-visit epilogue call sites pass `Ly.kv_cap`: the prompt path
+   (ik2_main.cu:2108-2119), the decode paths (ik2_main.cu:3443-3477), the block / graph windows
+   (ik2_main.cu:4555-4632). Attention instead reads by absolute position (`attn_kv_cap = Ly.sliding ? Ly.kv_cap :
+   0`, ik2_main.cu:2129, :3423). So from position 32768 (default SAGUARO_IK2_KV_START) on, every written row lands
+   at `pos % 32768` - trampling the conversation's own early rows - while attention reads the never-written
+   absolute rows as zeros. No fault, no NOTE, wrong answers, exactly for the past-the-start-step reads this step
+   exists to enable. The report's claim "The kernels needed nothing ... no wrap to rebase"
+   (REPORT-p125o-ik2-elastic-2.md:27-31) and the comment at ik2_main.cu:8600-8605 are true only of the reads; the
+   P125e review had already named this very wrap ("the K/V-write epilog wraps % kv_cap over the first rows").
+   Committing pages (a3) makes them writable, but the row index stays modulo the commit, so the a3 hooks cannot
+   paper over it. Fix direction (not applied here): pass `kv_cap = 0` for non-sliding visits in the `prep_qkv_r_*`
+   calls where `g_kv_vmm`, as the reads already do; the DEPTH memset (ik2_main.cu:8635-8652, sized `kv_cap` =
+   commit) is the only consumer that needs the capped value and it keeps it.
+   The extended card test cannot catch this: its 60 K verdict checks HTTP 200 and `completion_tokens > 0`
+   (tools/card_tests/ik2_kv_start.sh:211-220), never that the answer is the first word it asked for - and finding
+   1 corrupts precisely those rows while still emitting tokens. The growth read should check the returned text
+   equals "alpha".
 
-2. LOW - the CLI die message changed for every start, not just elastic ones: "prompt + gen past --ctx" became
-   "prompt + gen past the context" (src/ik2/ik2_main.cu:11205). With SAGUARO_IK2_KV_START=0 the path is otherwise
-   byte-identical, so this is a visible string change with the feature OFF. Harmless; keep it or restore the old
-   wording when not elastic.
+2. **HIGH - the `--drafting auto` trial writes its prompt rows before committing any of them; the hook in
+   `decode_greedy` runs after.** Trial requests are admitted up to the *ceiling* (`v.size() + 256 < ctx`,
+   ik2_main.cu:10250), and `trial()` runs the prompt through `forward()` (ik2_main.cu:10269-10281) - writing rows
+   [0, ids.size()) - before `decode_greedy` reaches its `kv_grow(P + gen, ...)` (ik2_main.cu:7161, called at
+   :10291). On an elastic VMM card a DRAFT_IDS prompt longer than the commit therefore writes past the committed
+   prefix with nothing committed: today that lands in wrapped rows (finding 1 - garbage measurement, corrupted
+   first rows), and the moment finding 1 is fixed to absolute writes the same prompt pass writes reserved-but-
+   unmapped pages - an illegal-address fault that kills the engine before READY, violating "a grow failure fails
+   the request, never the engine". The report's "the `--drafting auto` trials (`decode_greedy`, before READY)
+   commit their positions too" (REPORT:55-56) covers only the generation, not the trial's prompt pass that
+   precedes it. Commit in `trial()` before the forward loop (or bound the :10250 filter by `g_kv_commit`).
+   Two side-effects in the same hook: `if (!kv_grow(P + gen, gerr)) return;` leaves `out` empty and the trial then
+   counts `made += (int) out.size() - 1` (ik2_main.cu:10294) - a negative token count feeds the tok/s table; and
+   `P + gen` is not clamped by `ctx` (SAGUARO_IK2_DRAFT_TOKENS is unbounded, :10256), so an oversized trial sets
+   `g_kv_chunks` past `g_kv_n_chunks` (the commit call clamps to the reservation, so nothing faults, but the
+   counter overstates).
 
-3. LOW - dead variable in the b1 fill: `const double tw = now();` at src/ik2/ik2_main.cu:9259 is never read (the
-   warm loop prints its elapsed time, src/ik2/ik2_main.cu:9330; the preload's "tier:" line at :9276 does not).
-   nvcc does not flag it, but it is a copy-paste leftover - print the seconds like warm does, or drop it.
+3. **MEDIUM - `unpark` failures now fail every request with a false OOM on all cards, changing the OFF path.**
+   `unpark` already returned false on two pre-existing, non-VMM conditions - the folder read failing
+   (ik2_main.cu:10175-10181) and no snapshot at `n` (:10188-10191) - and the caller ignored the result, degrading
+   to reading the prompt from scratch (`git show 37c7523ca:src/ik2/ik2_main.cu:10802`: `if (j >= 0) unpark(...)`).
+   The new handling turns *every* false into `ERR the GPU ran out of memory taking back the kept conversation's
+   context` and drops the request (ik2_main.cu:10937-10950) - including on cards where `g_kv_vmm` is false and VRAM
+   cannot be the cause. So the feature-OFF behavior is not byte-identical: a corrupt folder file or a missing
+   snapshot used to cost a re-read, now costs the turn, under a misleading message. Distinguish the a3 grow
+   failure (the new `full_rows` false from `kv_grow`, :10070-10079) from the old ones, or keep the from-scratch
+   fallback for the old ones.
 
-4. LOW - PC-side mirror: tools/ik2_fit.py:154-156 - plan_two() now returns the elastic answer ("resident",
-   "kv_committed") for two-card calls, but the engine never takes elastic with two GPUs
-   (src/ik2/ik2_plan.hpp:40-41; the gate src/ik2/ik2_main.cu:8048 passes g_two.want). No wrong setup ships:
-   layout() falls through to the one-card "--gpus 1" branch in that case (tools/ik2_fit.py:415-434) and there the
-   engine does take elastic - but plan_two's own contract now disagrees with the engine for direct callers; drop
-   the key in plan_two (or say it in the docstring).
+4. **LOW - the growable cache depends on freshly mapped pages reading as zero, which the VMM API does not
+   document.** ik2_vmm.hpp:7 and :142 state "fresh physical pages map zeroed - the DEPTH test's semantics", and
+   the DEPTH memset only covers the committed rows (`Vi.kv_cap`, ik2_main.cu:8635-8652): `SAGUARO_IK2_DEPTH=N`
+   with N past the start step reads positions [32768, N) as zeros only because the commit hook mapped fresh
+   pages that were *not* explicitly zeroed. `cuMemCreate` / `hipMemCreate` carry no documented zeroing guarantee
+   (`cudaMalloc` explicitly does not initialize). In practice NVIDIA/AMD drivers hand out zeroed pages, but this
+   is a correctness dependency on undocumented behavior; a targeted memset at commit time (or a note where the
+   claim lives) would make it safe.
 
-5. INFO - an elastic start still sizes two ctx-based buffers by the ceiling: the attention logits/probabilities
-   scratch `W.lg_cap = 8 * c.H * ctx + ...` (src/ik2/ik2_main.cu:8924-8926) and the pinned host staging
-   `W.T_host` (:8984). Safe (the scratch is more than the commit needs, never overflowed), but ~200+ MiB more
-   VRAM than a true 32K config at a 262144 ceiling; a candidate for step 2 along with the growth machinery.
+5. **NIT - the drafter-drop comparisons can change non-elastic behavior under rare env knobs.**
+   `if (drafter && P + gen > ik2::draft::context_rows(g_kv_commit)) drafter = nullptr` (ik2_main.cu:7162) and the
+   CLI's twin (:11365-11368) compare the *requested* run length against `context_rows(g_kv_commit)`; with
+   SAGUARO_IK2_DRAFT_CTX below the context (ik2_draft.cu:698-702) or a SAGUARO_IK2_DRAFT_TOKENS beyond the trial
+   filter's 256 headroom (:10250, :10256), step-1 ran drafted where this step runs undrafted. Served tokens stay
+   identical (drafting verifies; `spec_rows` at :10971 is guarded by the request guard at :10843 so it cannot fire
+   without DRAFT_CTX), but the `--drafting auto` measurement and the CLI's drafting can move on cards with this
+   step OFF.
 
-6. INFO - b1 is on for every plain offload start, not gated by SAGUARO_IK2_KV_START: that is the plan
-   ("never 0"), and the report says so (:72-76 of the report) - recorded here so "feature OFF byte-identical" is
-   read as "a1 OFF byte-identical, plus b1's full tier and its new `tier:` line" (src/ik2/ik2_main.cu:9334-9335).
-   GPU 1 of a two-card split gets no preload (the `d == 0` gate, :9334) - matches report open Q 7; no kill-switch
-   yet - open Q 6.
+6. **NIT - the `kv cache:` line counts the layout, not the mapped bytes** (ik2_main.cu:8682-8696): it prints
+   `Vi.kv_cap` (the commit) while the VMM commits `chunks_for(commit) * chunk_b`, which rounds above the commit
+   when SAGUARO_IK2_KV_START is not a multiple of a chunk (e.g. 10000 -> 12288 rows). Exact at the default 32768
+   (8 whole chunks), harmless under the card test's 2 % rule; a one-word comment would save a future reader.
 
-## What was checked and is sound
+7. **INFO** - the grow-failure `@END error out_of_memory %zu 0 0 0` (ik2_main.cu:10873) has the field order of the
+   context_length line (:10850), as commit 7b46f80c2 says; no @END reader exists inside this repo to verify the
+   legacy parser against (it lives in the consumer outside), so that ordering rests on the sibling line alone.
 
-- Feature OFF (SAGUARO_IK2_KV_START=0 or >= --max-context): `kv_committed` returns the ceiling
-  (src/ik2/ik2_plan.hpp:21-23), the `kv_b_start` loop is a byte-for-byte mirror of the `kv_b` loop
-  (src/ik2/ik2_main.cu:7878-7888 vs :7893-7904, q4 branches included), the elastic gate cannot fire
-  (src/ik2/ik2_plan.hpp:40), and `g_kv_run = ctx` at :7479 makes every ctx -> g_kv_run substitution evaluate
-  identically (:8190/:8195, :8465, :9174/:9179, :10228, :10253, :10255, :10321, :10732/:10736, :11205).
-  `experts_fit` reproduces the old inline expression exactly (src/ik2/ik2_plan.hpp:27-29). Only finding 2 is an
-  OFF-visible change.
-- Elastic gate ordering: `g_par` (:7468), `g_two.want` (:7561), `g_ep` (:7722) and `g_kv_streaming` (:8031) are
-  all set before the gate at :8048-8050; the block sits inside the one-GPU plan section (:7870). The KV-streaming
-  rewrite of `kv_b` (:8010) can only happen when g_kv_streaming is set, which the gate excludes - no interaction.
-- b1 fill matches the warm fill's rules: same `EC.get(..., EC.tick, g_cs, nullptr, true, true)` call
-  (:9270 vs :9312), the same `++EC.tick` rule (:9275 vs :9317), the same save/restore of the request counters
-  (:9260/:9280 vs :9298/:9332); the dynamic device cache copies `EC.loc` after the fill
-  (src/ik2/ik2_main.cu:9480-9483, after :9336) and `pin_later` skips the tier-held experts (:9341) - the report's
-  claims check out. Round-robin: the inner loop is over the pool's layers (:9267-9272), so each layer gets its
-  share; unreadable profile preloads too (:9295), warm picks still win.
-- Locks/threads/stdout: all new prints and the preload lambda run single-threaded at the load, before the stdin
-  thread starts (:10259+); each new line is one printf + fflush; EC has no concurrent access during the load;
-  cudaStreamSynchronize before the "tier:" line. No lock is taken anywhere in the new code.
-- Generated file: the diff touches no generated file - serve/qfn_engine.py is not in the diff at all (9 files:
-  CMakeLists.txt, ik2_main.cu, ik2_plan.hpp, ik2_plan_test.cpp, ik2_fit.py, test_ik2_kv_start.py,
-  test_setup_ik2.py, card script, report); nothing to regenerate.
-- Tests exercise the change: ik2_plan_test holds all three helpers to arithmetic (21 expects, incl. the mortar
-  figures and every gate); tools/test_ik2_kv_start.py covers the ik2_fit mirror (the 262144 mortar row, tight and
-  streaming cards unchanged, 1M-fp8 flip); the two flipped assertions in tools/test_setup_ik2.py are the intended
-  recommendation flips, said in the step-4 message. The engine's elastic wiring is not host-testable; the card
-  script (grep patterns match the real lines: src/ik2/ik2_main.cu:9570/:9632 vs tools/card_tests/ik2_kv_start.sh:100,
-  the NOTE regex :157 matches :8056-8060) is the plan's answer and was left unrun here, as the plan requires.
-- Paths/secrets: the card script works only under ROOT-relative paths and its own `scratch/ik2-kv-start-card`
-  folder (tools/card_tests/ik2_kv_start.sh:31-40), copies the config with `api_key` dropped (:123), and keeps the
-  install's own config/log/sessions untouched; no absolute paths outside the repo and no secrets in any diff.
-- Announce-everywhere claim: INFO ctx (:10228), READY (:10253/:10255), STAT kv_cap (:10321) with kv_total summed
-  from kv_cap (:10220-10221), the GEN guard (:10732-10736), serve/server.py takes max_context from READY
-  (serve/server.py:1515-1517, /api/context at :3792, ik2_log_facts at :1004-1030) - a past-the-commit ask meets
-  the clean ContextOverflow refusal (serve/server.py:851), as the report says.
+## Manager checks
 
-## MANAGER
+- **Commit / grow never on the per-token path**: `kv_grow` (ik2_main.cu:566-582) is called at request start
+  (:10861, before the guard-set `busy = true` at :10889 and before any kernel), at kept-conversation restore
+  (:10075), at the CLI start (:11362, load-time), at the window warm-up (:11477) and at the `decode_greedy`
+  entry (:7161) - none inside the token loops (:7164-7198, :11205-11290) and none in a kernel. Decode drafts are
+  budget-clamped (`room = min({max_new - i - 1, ctx - hist.size(), req_wmax})`, :11230-11231), so a request never
+  writes past what its start commit covered. Finding 2's hook ordering does not put a commit in a loop, but does
+  put writes ahead of commits - fix it by committing earlier, never per token.
+- **HIP equivalents for every VMM call**: cuDeviceGet/cuDeviceGetAttribute/cuMemGetAllocationGranularity/
+  cuMemAddressReserve/cuMemAddressFree/cuMemCreate/cuMemRelease/cuMemMap/cuMemUnmap/cuMemSetAccess
+  (ik2_vmm.hpp:28-101) have counterparts in the HIP branch (:216-307); `hipDeviceGet` is legitimately unused
+  (HIP's `location.id` is the ordinal, :212). The one behavioral difference - CUDA grants access to peer devices
+  (:97-115) where HIP grants only its own (:259-262) - is documented (:252-253) and safe: the elastic gate
+  excludes two GPUs, --tp, --parallel and EP (src/ik2/ik2_plan.hpp:38-42, ik2_main.cu:8097-8099), and the
+  configure probe (CMakeLists.txt:1015-1050) falls back to the a1 start with one stderr line where a piece is
+  missing (ik2_main.cu:8110-8132). Reserve-call shape matches the proven src/mm3/mm3_vmm.hpp pattern
+  (mm3_vmm.hpp:53,:123 vs ik2_vmm.hpp:62,:134).
+- **A grow failure fails the request, never the engine**: on shortage `kv_grow` rolls back exactly what the
+  failed call mapped (ik2_vmm.hpp:175-182, :281-288), `shrink`s the buffers that did commit back to the old
+  commit (ik2_main.cu:576-578), leaves `g_kv_chunks` and the graphs (base pointer stable) untouched, and the
+  serve handler answers NOTE + ERR + DONE and continues with no kernel run (:10859-10877); the unpark path
+  (:10937-10950) resets `busy` / `g_wd_busy` before `continue` (busy was set at :10889-10890). The only engine
+  exits on VMM failure are at load (:8618-8623) - before service - which matches the rule. (Finding 2 is the
+  violation: an unfixed finding 1 lets the *trial* fault the engine before READY.)
 
-Plan's "small commits, one per step": 6 commits match the plan's list exactly, each touching only its step's
-files (helpers+test / engine a1 / engine b1 / PC mirror+tests / card script / report); no Co-Authored-By,
-Claude-Session or Assisted-by trailers; the report commit states its force-add (REVIEW-RESULT.md is likewise in
-the main checkout's info/exclude). No GPU was run by the coder or by this review.
+## What checked out (brief items)
+
+- **Feature OFF byte-identical**: `g_kv_commit` defaults to `ctx` (:7527-7528); `kv_grow` is a no-op without
+  `g_kv_vmm`; the VMM branch is `else if`-guarded off the elastic start; `draft_room`/drafter-load/STAT `kv_cap=`
+  /READY/`INFO ctx=` print the same numbers as before (:8261, :9273, :10432, :10339-10366); the fallback NOTE
+  keeps step 1's line verbatim plus the promised stderr line (:8114-8132); `req_spec`'s new `spec_rows` factor is
+  always true without the feature (guard :10843 vs :10971). Exceptions: findings 3 and 5.
+- **Locks, threads, stdout**: the only other thread is the stdin reader queueing lines (:10371-10398); all
+  `kv_grow` / VMM calls run on the request thread - no lock is taken anywhere near them, so no nesting question
+  arises; `api()`'s static init is a magic static (:58-70). The ERR + DONE pair is one printf (:10867, :10941)
+  like the sibling error paths, and `say()` flushes (:9898-9901), so nothing can interleave a line.
+- **Generated file**: `serve/qfn_engine.py`, `serve/server.py` and `tools/saguaro/extract_qfn_engine.py` do not
+  appear in the range at all - nothing was hand-edited behind the generator's back.
+- **Rollback / clamp arithmetic**: `Range::commit` clamps to the reserved cap (:146, :255), releases each
+  `cuMemCreate` handle right after mapping (:167, :273 - the mapping holds it), and grants access once per
+  committed span; the chunk math in src/ik2/ik2_plan.hpp:51-72 rounds chunk bytes *up* to the granule and the
+  prefix-commit self-heals any non-divisible row size.
+- **No paths outside the repo, no secrets**: the card test works ROOT-relative under `scratch/ik2-kv-start-card`
+  (tools/card_tests/ik2_kv_start.sh:38-47), copies the config with `api_key` dropped (:131), and the diff holds no
+  absolute paths or secrets.
+- **Tests really exercise the change**: tests/ik2_plan_test.cpp genuinely holds the new chunk arithmetic and the
+  ascending commit order to Inkling's rows (45 checks), as the plan asks; the engine integration however is only
+  reachable on a card, and the extended card test judges "answered", not "answered correctly" - see finding 1's
+  note; strengthen the growth read's verdict to the expected word.
+
+## Tests run (plan-named modules only, one at a time)
+
+- `g++ -std=c++17 -Wall -o scratch/ik2_plan_test_review tests/ik2_plan_test.cpp && scratch/ik2_plan_test_review`
+  -> `ik2_plan_test: ok` (45 checks; rebuilt from HEAD, matches the coder's binary in
+  scratch/build-ik2-elastic-2).
+- `bash -n tools/card_tests/ik2_kv_start.sh` -> clean. Not executed end to end (no GPU, no Inkling weights - as
+  the report states). No GPU run anywhere; the build target `saguaro-ik2` was not rebuilt here (the coder's
+  scratch/build-ik2-elastic-2 is present and current per the report).
