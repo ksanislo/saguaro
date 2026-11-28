@@ -782,7 +782,9 @@ NO_ENGINE = {
     "hip": {"hy4": "Hy4-Flash runs on NVIDIA GPUs only for now (its engine has not run on an AMD GPU yet)"},
     # (saguaro-qfn runs on NVIDIA too since T2: one card, or the layers split across up to four - qfn_fit; the
     #  live 4x Tesla T4 server's hand-made configs remain the reference for what the setup writes)
-    "metal": {f: "Saguaro's Mac (Metal) engine runs GLM-5.3-Flash only" for f in FAMILIES if f != "glm"},
+    # (Qwen3.8-Flash-Next: engines/qfn/metal, Strata's Metal engine over QFN's host code - docs/METAL.md)
+    "metal": {f: "Saguaro's Mac (Metal) engines run GLM-5.3-Flash and Qwen3.8-Flash-Next only"
+              for f in FAMILIES if f not in ("glm", "qfn")},
 }
 NOT_HERE = ("Setup stopped: this model is not supported on this PC's GPU yet - nothing was built or downloaded. "
             "Another model can be set up here (the list marks the ones that run).")
@@ -803,7 +805,8 @@ def family_target(family: str) -> str:
 
 
 def qfn_exe() -> Path:
-    """saguaro-qfn in this backend's build folder (the top project builds engines/qfn as <build>/qfn)."""
+    """saguaro-qfn in this backend's build folder (the top project builds engines/qfn as <build>/qfn; on a Mac
+    engines/qfn/metal's own project builds it there under the same name)."""
     return BUILD / "qfn" / ("saguaro-qfn.exe" if WIN else "saguaro-qfn")
 GLM_ARCHS = ("glm5-next", "glm5next")             # llama.cpp's spelling and unsloth's
 # the expert profile setup passes to every GLM config (tools/make_profile.py --glm):
@@ -1557,7 +1560,7 @@ def check_hip_pc(a, installed=False, text_only=True, family: str = "glm", gguf: 
             **({"rocm_bin": str(bindir)} if WIN else {})}
 
 
-def check_metal_pc(a) -> dict:
+def check_metal_pc(a, family: str = "glm") -> dict:
     """The Metal backend's PC check: macOS on Apple Silicon (its GPU always does Metal), the Xcode command line tools'
     C++ compiler, CMake, RAM and free disk.  Nothing asks nvidia-smi."""
     if not apple_silicon():
@@ -1570,7 +1573,7 @@ def check_metal_pc(a) -> dict:
     total, avail = mem_gb()
     ok(f"using {gpu['name']} ({total:.0f} GB unified memory, about {gpu['vram_gb']:.0f} GB of it for the GPU); "
        "Metal: text only, one conversation at a time")
-    if total < 100:
+    if family == "glm" and total < 100:
         warn(f"the model is about 95-100 GB (Maya-S) and this Mac has {total:.0f} GB of unified memory: the routed experts "
              "stream from the SSD while it answers, so decode speed is limited by the SSD (an internal NVMe drive)")
     ok(f"RAM: {total:.0f} GB, {avail:.0f} GB available now")
@@ -1808,10 +1811,11 @@ def check_pc(a, family: str = "glm", gguf: bool = False, ds4_quant: str = "exl3"
                  "deepseek-maya-xs) are the ones measured on AMD")
         return check_hip_pc(a, text_only=False, family=family, gguf=gguf)   # (every model the setup takes on AMD reads pictures there)
     if a.backend == "metal":
-        if family != "glm":
-            fail(f"Saguaro's Metal engine runs GLM-5.3-Flash only (no Metal engine for {ds4 and DS4 or mm3 and MM3 or QFN_SHOWN})",
+        if family not in ("glm", "qfn"):
+            fail(f"Saguaro's Metal engines run GLM-5.3-Flash and {QFN_SHOWN} only (no Metal engine for "
+                 f"{ds4 and DS4 or mm3 and MM3 or family})",
                  "other models: an NVIDIA or AMD GPU (--backend cuda / --backend hip)")
-        return check_metal_pc(a)
+        return check_metal_pc(a, family)
     if ds4 and not gguf and S.ARM:
         # the EXL3 quant's expert kernels are x86 (AVX2/AVX-512): this CPU has neither
         fail(f"{DS4}'s EXL3 quants need the x86 expert kernels (AVX2/AVX-512), which this ARM CPU does not have",
@@ -2756,7 +2760,63 @@ def compile_engine_hip(pc: dict, llama: Path, src: str, soft=False, target: str 
     return meta
 
 
-def compile_engine_metal(llama: Path, src: str, soft=False) -> dict | None:
+METAL_CPP_URL = "https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip"   # (engines/qfn/metal: Apple's headers,
+METAL_CPP_SHA256 = "4df3c078b9aadcb516212e9cb03004cbc5ce9a3e9c068fa3144d021db585a3a4"   #  the pin Strata's setup_mac.py uses)
+
+
+def metal_cpp_step() -> Path:
+    """Apple's metal-cpp headers in third_party/metal-cpp (one zip, pinned by SHA-256) for the QFN Metal engine."""
+    dst = ROOT / "third_party" / "metal-cpp"
+    if (dst / "Metal" / "Metal.hpp").exists():
+        return dst
+    z = ROOT / "third_party" / "metal-cpp_26.zip"
+    S.download(METAL_CPP_URL, z, "metal-cpp (Apple's Metal headers, 1 MB)")
+    if not sha256_checked(z, METAL_CPP_SHA256):
+        z.unlink(missing_ok=True)
+        fail("metal-cpp's download does not match its pinned SHA-256", f"run {ME} --setup again")
+    import zipfile
+    tmp = ROOT / "third_party" / "metal-cpp.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    with zipfile.ZipFile(z) as zf:
+        zf.extractall(tmp)
+    shutil.move(str(tmp / "metal-cpp"), str(dst))
+    shutil.rmtree(tmp, ignore_errors=True)
+    z.unlink(missing_ok=True)
+    return dst
+
+
+def compile_engine_metal_qfn(llama: Path, src: str, soft=False) -> dict | None:
+    """Qwen3.8-Flash-Next's Metal engine: engines/qfn/metal's own CMake project (Strata's Metal kernels over QFN's
+    host code) in build-metal/qfn, the program saguaro-qfn (its CMake target keeps Strata's name, strata)."""
+    cmake = pick_cmake()
+    if cmake is None:
+        fail("CMake 3.24 or newer is needed", f"pip installs one into .venv: run {ME} --setup")
+    ninja = venv_tool("ninja") or shutil.which("ninja")
+    mcpp = metal_cpp_step()
+    out = BUILD / "qfn"
+    conf = [cmake] + (["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}"] if ninja else [])
+    conf += ["-S", str(ROOT / "engines" / "qfn" / "metal"), "-B", str(out), "-DCMAKE_BUILD_TYPE=Release",
+             f"-DMETAL_CPP_DIR={mcpp}", f"-DSTRATA_GGML_DIR={llama}"]
+    say(f"  Compiling {QFN_SHOWN}'s engine for Apple Silicon (Metal) ... (a few minutes first time)")
+    if cmake_steps(conf, [cmake, "--build", str(out), "--target", "strata", "-j", str(os.cpu_count() or 4)],
+                   dict(os.environ), ""):
+        if soft:
+            fail(f"{QFN_SHOWN}'s Metal engine changed with this update, and compiling it failed: the engine from "
+                 "before does not match this version, so it is not started",
+                 "the compiler's reason is above (no compiler: xcode-select --install) - fix it, then start Saguaro "
+                 "again (it compiles again)")
+        fail("the Metal engine build failed", "see the compiler output above (no compiler: xcode-select --install)")
+    old = read_json(STAMP)
+    same = old.get("backend") == "metal" and old.get("src") == src
+    meta = {"backend": "metal", "src": src, "llama": str(llama), "version": maya_version(),
+            "date": time.strftime("%Y-%m-%d %H:%M"),
+            "targets": sorted({QFN_TARGET} | (set(old.get("targets") or []) if same else set()))}
+    STAMP.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+    ok(f"engine compiled: {qfn_exe()}")
+    return meta
+
+
+def compile_engine_metal(llama: Path, src: str, soft=False, target: str = "maya") -> dict | None:
     """`maya-metal` (GLM-5.3-Flash on ggml's Metal backend) in build-metal/; the commands are printed as they run.
     soft: an update's rebuild (refresh_engine) - a failure stops with the reason and says that the engine from before
     is not started (#805)."""
@@ -2770,6 +2830,8 @@ def compile_engine_metal(llama: Path, src: str, soft=False) -> dict | None:
         conf += ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}"]
     conf += ["-S", str(ROOT), "-B", str(BUILD), "-DMAYA_ENABLE_METAL=ON", "-DMAYA_METAL_TESTS=OFF",
              f"-DMAYA_GGML_DIR={llama}", "-DCMAKE_BUILD_TYPE=Release"]
+    if target == QFN_TARGET:
+        return compile_engine_metal_qfn(llama, src, soft)
     say("  Compiling Saguaro for Apple Silicon (Metal) ... (a few minutes first time)")
     if cmake_steps(conf, [cmake, "--build", str(BUILD), "--target", "maya-metal", "-j", str(os.cpu_count() or 4)],
                    dict(os.environ), ""):
@@ -2780,8 +2842,11 @@ def compile_engine_metal(llama: Path, src: str, soft=False) -> dict | None:
                  "the compiler's reason is above (no compiler: xcode-select --install) - fix it, then start Maya "
                  "again (it compiles again)")
         fail("the Metal engine build failed", "see the compiler output above (no compiler: xcode-select --install)")
+    old = read_json(STAMP)
+    same = old.get("backend") == "metal" and old.get("src") == src
     meta = {"backend": "metal", "src": src, "llama": str(llama), "version": maya_version(),
-            "date": time.strftime("%Y-%m-%d %H:%M"), "targets": ["maya-metal"]}
+            "date": time.strftime("%Y-%m-%d %H:%M"),
+            "targets": sorted({"maya-metal"} | (set(old.get("targets") or []) if same else set()))}
     STAMP.write_text(json.dumps(meta, indent=1), encoding="utf-8")
     ok(f"engine compiled: {EXE}")
     return meta
@@ -2793,10 +2858,13 @@ def build_step(a, pc, llama: Path, target: str = "maya") -> dict:
     meta = read_json(STAMP)
     exe = exe_for_target(target)
     if pc.get("backend") == "metal":
-        if exe.exists() and not a.rebuild and meta.get("backend") == "metal" and meta.get("src") == src:
+        mt = "maya-metal" if target == "maya" else target
+        if (exe.exists() and not a.rebuild and meta.get("backend") == "metal" and meta.get("src") == src
+                and mt in (meta.get("targets") or ["maya-metal"])):
             ok(f"Metal engine already compiled: {exe}")
             return meta
-        return compile_engine_metal(llama, src)
+        return (compile_engine_metal(llama, src) if target == "maya"
+                else compile_engine_metal(llama, src, target=target))
     if pc.get("backend") == "hip":
         if (exe.exists() and not a.rebuild and meta.get("backend") == "hip" and meta.get("src") == src
                 and meta.get("archs") == pc["archs"] and meta.get("rocm") == pc["rocm"]
@@ -2827,6 +2895,8 @@ def refresh_engine(cfg: dict) -> None:
     if not meta or exe not in own:
         return
     src = S.source_hash(S.ENGINE_SOURCES)
+    if cfg.get("backend") == "metal" and target == "maya":
+        target = "maya-metal"                          # (the Metal stamp names GLM's target so)
     if meta.get("src") == src and target in (meta.get("targets") or ["maya"]):
         return
     if cfg.get("backend") == "hip":
@@ -2851,7 +2921,10 @@ def refresh_engine(cfg: dict) -> None:
             fail(f"Maya's Metal engine changed with this update, but llama.cpp's source ({llama}) it was compiled "
                  "with is gone: the engine from before does not match this version, so it is not started",
                  f"{ME} --setup --rebuild fetches it and compiles the engine again")
-        compile_engine_metal(llama, src, soft=True)
+        if target == QFN_TARGET:
+            compile_engine_metal(llama, src, soft=True, target=target)
+        else:
+            compile_engine_metal(llama, src, soft=True)
         return
     say("  The engine's source changed since it was compiled (an update): compiling what changed ...")
     nvcc, llama = meta.get("nvcc"), Path(meta.get("llama") or ROOT / "third_party" / "llama.cpp")
@@ -8493,6 +8566,8 @@ def set_up_qfn(a, prev: dict) -> Path | None:
         a.gpus = ",".join(str(i) for i in prev["gpu"])   # (a setup again: the cards the config ran on, unless told)
     a.qfn_prev_files_dir = inst.get("files_dir")      # (qfn_files_step: a setup again finds the files there)
     pc = check_pc(a, "qfn")                            # 1
+    if pc.get("backend") == "metal":
+        return set_up_qfn_metal(a, prev, pc)
     hip = pc.get("backend") == "hip"
     if hip:
         if len(pc["gpus"]) != 1:
@@ -8618,6 +8693,192 @@ def set_up_qfn(a, prev: dict) -> Path | None:
         else:
             keep_drafting(cfg_path, how == "on")
     return cfg_path
+
+
+# ------------------------------------------------------------------------------------------------ Qwen3.8-Flash-Next on a Mac
+# engines/qfn/metal (Strata's Metal engine over QFN's host code).  The rules are Strata's (docs/MAC.md,
+# terminal/strata_control/mac_fit.py), measured on an M5 Max 128 GB and an M4 Mac mini 32 GB: the GPU maps the model's
+# main file; when that file and QFN_METAL_OVERHEAD_GB beside it do not fit Metal's share of the unified memory (3/4),
+# the engine streams the experts from the SSD into an arena.  Streaming below 96 GB: one token per step (no draft
+# layer: its memory does more as expert cache) and the experts' streaming copy (one SSD read per expert).
+QFN_METAL_QUANTS = ("gsq-iq3_s", "ud-q4_k_xl")     # (the two Strata recommends; the Coder and Q8_0 are not set up here)
+QFN_METAL_GPU_FILE_GB = {"gsq-iq3_s": 54.8, "ud-q4_k_xl": 82.6}   # the file the GPU maps (UD-Q4: its repack)
+QFN_METAL_OVERHEAD_GB = 12.0 * 1.073741824         # prompt buffers, K/V, the hyper-connection copies, macOS
+QFN_METAL_SHARE = 0.75                             # Metal's recommendedMaxWorkingSetSize, conservatively
+QFN_METAL_MTP_FROM_GB = 96
+QFN_METAL_CONTEXTS = [16384, 32768, 65536, 131072, 262144]
+# A streaming Mac's expert arena, set by the setup: the engine's own sizing reads macOS's free memory at the start, which
+# on a 32 GB M2 Max with apps closed gave 3.8 GB (IQ3_S: 7.7 tok/s) where 12 GB ran at 15 and 15 GB at 13-19 tok/s with
+# no swapping while it answered.  Metal's share of the memory, less what the process holds beside the arena (measured
+# on that Mac: the dense weights, K/V at 32K, the prompt buffers) and QFN_METAL_ARENA_SPARE_GB for macOS and its apps.
+QFN_METAL_HELD_GB = {"gsq-iq3_s": 7.0, "ud-q4_k_xl": 10.5}
+QFN_METAL_ARENA_SPARE_GB = 6.0
+
+
+def qfn_metal_arena_gb(quant: str, ram_gb: float) -> float | None:
+    """The streamed arena (GB, as SAGUARO_METAL_ARENA_GB reads it) for a Mac of ram_gb GiB; None: under 4 GB, the
+    engine's own sizing."""
+    gb = ram_gb * 1.073741824 * QFN_METAL_SHARE - QFN_METAL_HELD_GB[quant] - QFN_METAL_ARENA_SPARE_GB
+    if ram_gb >= 64:   # (Strata's rule from 64 GB: the whole footprint under 60% of the RAM - a bigger arena compressed
+        gb = min(gb, ram_gb * 1.073741824 * 0.6 - QFN_METAL_HELD_GB[quant])   #  itself and tripped the watchdog)
+    return round(gb, 1) if gb >= 4 else None
+
+
+def qfn_metal_streams(quant: str, ram_gb: float) -> bool:
+    return QFN_METAL_GPU_FILE_GB[quant] + QFN_METAL_OVERHEAD_GB > ram_gb * QFN_METAL_SHARE
+
+
+def qfn_metal_ple_shard(files: list) -> Path:
+    """The shard that holds the n-gram table (per_layer_token_embd)."""
+    sys.path.insert(0, str(ROOT / "engines" / "qfn" / "metal" / "tools"))
+    import metal_repack as R
+    for f in files:
+        rd = R.Reader(f)
+        rd.f.close()
+        if any(t["name"] == R.PLE for t in rd.tensors):
+            return f
+    fail(f"no shard of {files[0].name} holds the n-gram table (per_layer_token_embd)")
+
+
+def set_up_qfn_metal(a, prev: dict, pc: dict) -> Path | None:
+    """Qwen3.8-Flash-Next on a Mac: the quant and the context, the engine (build-metal/qfn/strata), the files (pinned,
+    sha256-checked: qfn_files_step), the GPU's file (a many-shard GGUF repacked into one), the pack, the experts'
+    streaming copy where it pays, the config.  No pictures and no MTP draft layer on the Mac yet."""
+    inst = prev.get("installer") or {}
+    prev_args = prev.get("args") or []
+    prev_ctx = int(prev_args[prev_args.index("--max-context") + 1]) if "--max-context" in prev_args[:-1] else None
+    a.qfn_prev_files_dir = inst.get("files_dir")
+    step(2, "your choices")
+    ram = mem_gb()[0]
+    want = getattr(a, "qfn_quant", None) or (inst.get("qwen_quant") if inst.get("qwen_quant") in QFN_METAL_QUANTS else None)
+    if want and want not in QFN_METAL_QUANTS:
+        fail(f"{Q.QFN_QUANTS.get(want, want)} is not set up on a Mac yet",
+             "--model " + " / ".join(Q.QFN_QUANTS[q] for q in QFN_METAL_QUANTS))
+    if not want:
+        say("  Which quant? (both stream their experts from the SSD where the memory cannot hold them)")
+        for i, q in enumerate(QFN_METAL_QUANTS, 1):
+            m = qfn_entry(q)
+            how = "streams from the SSD" if qfn_metal_streams(q, ram) else "stays in memory"
+            say(f"    {i}. {Q.QFN_QUANTS[q]:<12} {m['download_gb']:.0f} GB download, the GPU maps "
+                f"{QFN_METAL_GPU_FILE_GB[q]:.0f} GB - {how} here" + ("  (recommended)" if i == 1 else ""))
+        want = QFN_METAL_QUANTS[int(ask("Quant (1-2)? ", ["1", "2"], "1", a.yes)) - 1]
+    quant = want
+    m = qfn_entry(quant)
+    stream = qfn_metal_streams(quant, ram)
+    ok(f"model: {Q.shown('qfn', quant, m['download_gb'])} - Qwen's Qwen3.8-Flash-Next (Qwen Community License 1.0: "
+       "LICENSE.qwen-community-1.0) on saguaro-qfn (Metal)")
+    if stream:
+        ok(f"the GPU's file ({QFN_METAL_GPU_FILE_GB[quant]:.0f} GB) and {QFN_METAL_OVERHEAD_GB:.0f} GB beside it do "
+           f"not fit Metal's share of this Mac's {ram:.0f} GB: the experts stream from the SSD (the most-used stay in "
+           "an arena); the model's files must be on the internal SSD")
+    dflt = 65536 if ram >= 96 else 32768
+    ctx = choose_context(a, prev_ctx, QFN_METAL_CONTEXTS, dflt,
+                         intro=["Context length = how much text the model sees at once. Measured on a Mac up to 32K;",
+                                "past that it runs, unmeasured:"])
+    ok(f"context: {ctx} tokens" + (" (recommended)" if ctx == dflt else ""))
+    models = (Path(a.models_dir).expanduser().resolve() if a.models_dir else
+              Path(inst["models_dir"]) if inst.get("models_dir") else default_models_dir())
+    d = models / m["name"]
+    ok(f"model folder: {d}")
+    llama = tools_step(a)                              # 3
+    meta = build_step(a, pc, llama, QFN_TARGET)        # 4
+    if not qfn_exe().exists():
+        fail(f"the engine was not built ({qfn_exe()})", "the reason is in the build's messages above")
+    step(5, f"the model ({Q.shown('qfn', quant)})")   # 5
+    files = qfn_files_step(a, d, quant)
+    if files is None:
+        return None
+    step(6, "preparing the model for the GPU")        # 6
+    tools = ROOT / "engines" / "qfn" / "metal" / "tools"
+    work = d / "metal"
+    work.mkdir(parents=True, exist_ok=True)
+    if len(files) > 2:   # many shards (unsloth): the experts and dense weights in one file the GPU maps
+        native = work / f"{m['name'].lower()}-metal.gguf"
+        if not (native.exists() and S.done(native)):
+            say(f"  Writing the model's experts and weights into one file for the GPU (one time, "
+                f"{QFN_METAL_GPU_FILE_GB[quant]:.0f} GB) ...")
+            S.run([sys.executable, str(tools / "metal_repack.py"), "--shard1", str(files[0]), "--out", str(native),
+                   "--verify"])
+            S.mark(native)
+        shards = [native, qfn_metal_ple_shard(files)]
+    else:
+        shards = list(files)
+    pack = work / "pack"
+    if not ((pack / "native_experts.txt").exists() and (pack / "tokenizer" / "vocab.json").exists()):
+        run([sys.executable, str(ROOT / "engines" / "qfn" / "tools" / "iq_pack.py"), "--gguf", str(shards[0]),
+             "--out", str(pack), "--compat-bf16"],    # (as qfn_pack_step: the host's copies; the GPU reads the file)
+            env=dict(os.environ, SAGUARO_GGUF_PY=str(llama / "gguf-py")))
+    ok(f"model prepared: {pack}")
+    if stream and ram < QFN_METAL_MTP_FROM_GB:
+        out = shards[0].with_name(shards[0].name + ".experts")
+        if out.exists() and S.done(out):
+            ok(f"the experts' streaming copy: {out.name}")
+        else:
+            sys.path.insert(0, str(tools))
+            import stream_experts as X
+            need = X.size_bytes(shards[0]) / 1e9
+            free = shutil.disk_usage(shards[0].parent).free / 1e9
+            if free < need + 10:
+                warn(f"the experts' streaming copy needs {need:.0f} GB and 10 GB to spare ({free:.0f} GB free): not "
+                     "written; the engine streams from the model file (decoding about 15% slower)")
+            else:
+                say(f"  Writing the experts in SSD-read order (one time, {need:.0f} GB; one read per expert) ...")
+                S.run([sys.executable, str(tools / "stream_experts.py"), "--gguf", str(shards[0]), "--verify"])
+                S.mark(out)
+                ok(f"the experts' streaming copy: {out.name}")
+    step(7, "the configuration and the start script")   # 7
+    port = a.port or 8080
+    cfg_path = CN.locate(ROOT, f"{Q.config_stem('qfn', quant)}-metal")
+    old = read_json(cfg_path) or (prev if is_qfn_config(prev or {}) else {})
+    var = d / "var"
+    (var / "sessions").mkdir(parents=True, exist_ok=True)
+    profile = var / "expert-profile.bin"
+    if not profile.exists() and QFN_PROFILE.is_file():
+        shutil.copyfile(QFN_PROFILE, profile)
+    args = ["--pack", str(pack), "--native", str(shards[0]), "--ple-gguf", str(shards[1] if len(shards) > 1 else shards[0])]
+    if shards[0].name.endswith("-metal.gguf"):
+        args += ["--native-dense-gguf", str(shards[0])]
+    if profile.exists():
+        args += ["--expert-profile", str(profile)]
+    args += ["--expert-cache", "64", "--prefill", "auto", "--spec", "2"]
+    if stream:
+        args += ["--suffix-draft", "0"]
+    args += ["--max-context", str(ctx), "--mmap-experts", "--session-dir", str(var / "sessions")]
+    arena = qfn_metal_arena_gb(quant, ram) if stream else None
+    env = {"SAGUARO_METAL_STREAM": "1" if stream else "0",
+           **({"SAGUARO_METAL_ARENA_GB": str(arena)} if arena else {}),
+           **(old.get("env") or {}), **parse_env(a.env)}    # (a setup again keeps the env before - an arena set by hand too)
+    if arena:
+        ok(f"expert arena: {env.get('SAGUARO_METAL_ARENA_GB')} GB of the unified memory for the most-used experts "
+           f"(SAGUARO_METAL_ARENA_GB in the config's env; more is faster while macOS does not swap)")
+    if int(platform_mac_major() or 26) < 26:           # (MetalPerformancePrimitives: macOS 26 - docs/METAL.md)
+        for k, v in (("SAGUARO_METAL_PROMPT", "window"), ("SAGUARO_METAL_PROMPT_GEMM", "0"), ("COOP_K4", "0")):
+            env.setdefault(k, v)
+    inst2 = {"family": "qfn", "qwen_quant": quant, "engine": Q.QFN_ENGINE}
+    sampling, _ = Q.model_defaults({"installer": inst2})
+    cfg = {"exe": str(qfn_exe()), "args": args, "env": env, "cwd": str(ROOT / "engines" / "qfn"),
+           "tokenizer": str(pack / "tokenizer"), "model_name": m["name"], "backend": "metal",
+           "gpu": [0], "sampling": sampling, "port": port}
+    for k in ("host", "api_key", "cors_origins", "mcp_servers"):
+        if old.get(k) is not None:
+            cfg[k] = old[k]
+    if a.host:
+        cfg["host"] = a.host
+    if a.api_key:
+        cfg["api_key"] = a.api_key
+    cfg["log"] = str(cfg_path.with_suffix(".log"))
+    cfg["installer"] = {**inst2, "quant": Q.QFN_QUANTS[quant], "models_dir": str(models), "model_dir": str(d),
+                        "files_dir": str(files[0].parent), "written": time.strftime("%Y-%m-%d %H:%M")}
+    cfg_path.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    ok(f"config: {cfg_path}")
+    ok(f"start script: {write_run_script(cfg_path, port)}")
+    return cfg_path
+
+
+def platform_mac_major() -> int | None:
+    import platform
+    v = platform.mac_ver()[0]
+    return int(v.split(".")[0]) if v else None
 
 
 # ------------------------------------------------------------------------------------------------ Hy4-Flash, Inkling 2 Mini
@@ -9674,8 +9935,9 @@ def migrate_cyber_frost(cfg: dict) -> bool:
             (inst.get("qwen_quant") or "q5_k_m") != "q5_k_m" or \
             Path(str(cfg.get("exe", ""))).name.endswith("saguaro-qfn"):   # (already on the QFN engine: nothing to do)
         return False
-    if family_unavailable("qfn", cfg.get("backend")):   # (no saguaro-qfn here: leave it on the old engine)
-        return False
+    if family_unavailable("qfn", cfg.get("backend")) or cfg.get("backend") == "metal":
+        return False                                   # (no saguaro-qfn here - the Mac's QFN engine does not set up
+                                                       #  CYBER-FROST: leave it on the old engine)
     args = cfg.get("args") or []
 
     def val(flag):

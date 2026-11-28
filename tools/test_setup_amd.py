@@ -102,7 +102,7 @@ class Picker(unittest.TestCase):
             self.assertIn("NVIDIA GPUs only", maya.family_unavailable("hy4", "hip"))
             self.assertIsNone(maya.family_unavailable("ik2", "hip"))
             self.assertIsNone(maya.family_unavailable("hy4", "cuda"))
-            self.assertIn("GLM-5.3-Flash only", maya.family_unavailable("deepseek", "metal"))
+            self.assertIn("GLM-5.3-Flash and Qwen3.8-Flash-Next only", maya.family_unavailable("deepseek", "metal"))
         with patch.object(maya, "WIN", True):
             self.assertIn("Linux only", maya.family_unavailable("hy4", "cuda"))
 

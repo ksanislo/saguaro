@@ -39,6 +39,8 @@ td.log
 /strata-*.log
 /maya-*.json
 /maya-*.json.prev
+/saguaro-*.json
+/saguaro-*.json.prev
 /.maya-switch.json
 /.saguaro-last-good.json
 /token-savings.json*
@@ -88,3 +90,6 @@ build-vision.bat
 /saguaro-nightly-*.log
 /saguaro-nightly-*.tokens.json
 /data/golden/
+/third_party/metal-cpp/
+/third_party/metal-cpp_*.zip
+/.python/
