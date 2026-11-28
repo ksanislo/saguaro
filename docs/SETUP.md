@@ -193,11 +193,17 @@ Restart=on-failure
 RestartSec=30
 TimeoutStartSec=3600
 TimeoutStopSec=600
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target
 ```
 
+- **Memory-lock limit.** The engine page-locks its expert RAM tier (`mlock`), and a plain account may lock far less
+  than that (`ulimit -l`: 64 KiB on older distros, 8 MiB on newer systemd), so without this line the tier's cold tail
+  stays pageable and the kernel may swap cold experts out (the engine says `mlock failed (raise ulimit -l)` at
+  start). `LimitMEMLOCK=infinity` in the unit covers it; a terminal start raises the soft limit to the hard one
+  itself and says once what to do when even the hard limit is too low.
 - **Time to start and stop.** A big model at a long context takes a long time to load (the engine pins its expert tier
   in RAM and warms its caches), and the more context you give it (1M tokens, say), the longer. systemd ends a unit that
   is not up inside `TimeoutStartSec` and starts it again, which then loads again, for ever. Set it well above the
