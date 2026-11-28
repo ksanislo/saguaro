@@ -1132,8 +1132,9 @@ class QuietReadsPreempt(Env):
     """P124z (the card's rc2 failure, mangonel 11-27): a fresh LOW prompt read beside a short NORMAL
     request at a cut, on a line engine whose reader goes QUIET between its chunks - saguaro-ds4 with
     DS4_READER on hands its cards to the running answer and says nothing of the read while it waits.
-    The read's preemption decides on the request loop's ticks (serve/server.py:6021), and the loop
-    slept in the engine-line wait: a 10 s keep-alive poll (serve/server.py:2161 solo, :2392 multi).
+    The read's preemption decides on the request loop's ticks (the gate, serve/server.py:6049-6052),
+    and the loop slept in the engine-line wait: a 10 s keep-alive poll (serve/server.py:2187 solo, :2419
+    multi, before the fix).
     When the normal request fits a free place and is gone inside one silence (rc2: ~2.5 s running,
     the next line 6 s later), the low read NEVER looked at the FIFO while it ran - and the card's DS4
     logged no priority line at all (ref/rc2-ds4-engine.txt).  These tests drive the real pipe driver
@@ -1195,7 +1196,7 @@ class QuietReadsPreempt(Env):
 
     def test_a_quiet_low_read_runs_on_when_a_stopped_read_would_be_lost(self):
         # keep both behaviours: without the keepread word the engine DROPS a stopped read, so the quiet
-        # low read must run to its end beside the normal one (serve/server.py:6021-6024) - never cut
+        # low read must run to its end beside the normal one (serve/server.py:6049-6052) - never cut
         out, log = self.race(0, keep=False)
         self.assertEqual(out[SHORT][0], "ok")
         self.assertEqual(out[LONG][0], "ok")
