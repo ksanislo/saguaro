@@ -1,44 +1,36 @@
-# FIX-REPORT - P125s tiers panel, response to REVIEW-RESULT.md
+# FIX-REPORT - P125s tiers panel, response to REVIEW-RESULT.md (round 2, the review of f2e39c87d..2b5d46b0c)
 
 ## FIX-FIRST
-- HIGH 1 (nothing committed; the review range f2e39c8..HEAD empty): FIXED. The work is committed as the plan
-  orders, one commit per bug: 817ed91c1 (bug 1, the SSD tier) and aac993d9d (bug 2, the pipelined-solo STAT
-  line). generate.cpp held both bugs' hunks; the split used `git apply --cached` of a patch with the four
-  pre-22000-line hunks staged for bug 1, the rest committed as bug 2. The new header
-  engines/qfn/include/strata/program/tier_stats.hpp is `git add`ed in the bug-1 commit (the review's build
-  hazard), and each commit verifies standalone: HEAD is the green `tools/qfn/build.sh` build ("QFN BUILD OK
-  aac993d9d", scratch/p125s-fix-build), and commit 1's only delta from HEAD is aac993d9d's three additive
-  generate.cpp hunks - its generate.cpp and expert_source.cpp compile standalone with the build's own flags
-  (-fsyntax-only over `git show 817ed91c1:` copies): both OK.
-- HIGH 2 (REPORT-p125s-tiers-panel.md missing): FIXED. Written at the repo root with what was actually run in
-  this fix session (the plan's build recipe -> QFN BUILD OK, file_expert_source_test PASS, serve.test_dashboard
-  91 OK, re-runs after the nit, the standalone-commit checks). Not committed by design: `REPORT-*.md` is in
-  .git/info/exclude and commit 81a6d581c drops task reports from the tree - the file exists, which is what the
-  review contract needs.
+- Finding 1, HIGH (the sibling pin of the old STAT format, serve/test_new_engines_ui.py:465-466): FIXED.
+  Commit 147a0bf85. test_monitor_qfn_stats_and_context_facts asserted the pre-P125s literal
+  `"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "` is in generate.cpp -
+  817ed91c1 stopped printing it (disk= is a read field), so the test was deterministically red while
+  serve/test_dashboard.py:566-569 asserted the opposite. The pin now mirrors test_dashboard.py:566-567's two
+  new literals against the same QFN_SRC: the printf's first chunk `"STAT tok_s=%.2f ... disk=%.3f promo=%.3f "`
+  and its second chunk `"vram_used=%lld ... disk_gb=%.1f "` (generate.cpp:13867-13868). The module is not a
+  plan-named one and the instruction runs only the plan's two modules, so it was not run; the asserts are pure
+  substring checks and the same checks were made directly: both new literals present, the old one absent.
+- Finding 2, LOW (the false sentence one section above the fix, generate.cpp:13245-13247): FIXED as the cheap
+  nit. Commit e2f782c93. The comment above the INFO line still said "QFN has no SSD tier: ... the STAT lines
+  report disk=0 / disk_gb=0" - the wording deleted at the batch_stat_line comment in 817ed91c1 but not this
+  copy. It now says what the STAT lines do: the resident complement's (or --mmap-experts' page cache's) experts
+  as the RAM tier and the rest of the files as the SSD tier, disk/disk_gb staying 0 only without a copy.
+  The INFO line itself is untouched - the plan scoped bug 1 to the STAT line and the finding calls the
+  behaviour compliant.
 
-## Findings 3-7 (review: notes/follow-ups, not blockers)
-- MEDIUM 3 (plain --mmap-experts ram_gb: 0.0 -> the mapped experts' bytes): NOT CHANGED - deliberate.
-  PLAN:9-10 mandates "the mmap page cache when --mmap-experts" as the RAM tier, and the old pairing
-  (ram_used=9728 with ram_gb=0.0) was the inconsistency the plan calls a bug. The change is recorded in
-  817ed91c1's message, as the review suggests for the commit messages; arena and resident-copy values are
-  byte-identical to the old ones and batch paths keep field names/order.
-- LOW 4 (count/bytes can straddle one relief trim): FIXED - the cheap nit. resident_experts() +
-  resident_expert_bytes() become one resident_expert_stats(count, bytes) reading both under a single
-  complement_mu_ pass (expert_source.cpp:4322; generate.cpp:13858 is the only caller). Commit 7a129ca62;
-  rebuilt and both plan-named tests re-run green.
-- LOW 5 (complement_ready_ read lock-free): NOT CHANGED, per the finding itself ("consistency says leave
-  it") - it copies the established style of the existing readers (pinned(), expert_source.cpp:4778) and no
-  figure's correctness depends on it. Noted in 7a129ca62's message.
-- LOW 6 (lent-region experts counted in both tiers at the edge): NOT CHANGED - the finding states no
-  negative or nonsensical share reaches the bar (tier_stats.hpp clamps, tierShares recomputes) and the plan's
-  "the experts the resident complement actually holds" wording sanctions the overlap. Changing the lend
-  region's accounting is a behavior change the plan does not ask for.
-- LOW 7 (no automated exercise of the new pipelined-solo STAT call): NOT CHANGED - the path needs a two-GPU
-  layer split and the plan allows no GPU runs, so nothing CI-runnable was available; the review itself says
-  "a gap to note, not to block on". Noted in aac993d9d's message.
+## Findings 3-4 (review: recorded / note only, no action asked)
+- Finding 3, LOW (resident_expert_stats pre-tests complement_ready_ lock-free; install reallocates under no
+  mutex): NOT CHANGED - the finding itself records it as established style with no action ("pinned() and
+  complement_ready() have exactly this shape", install runs before serving, worst case one line one state
+  behind), and round-1 LOW 5 already left it for the same consistency call (7a129ca62's message).
+- Finding 4, LOW (adaptive-tier exchange storage freezes the STAT line's RAM-tier count/bytes at activation):
+  NOT CHANGED - the finding is "note only"; the freeze predates the change ("the old figures ... were no
+  truer"), and making the line follow commit_exchanges is a behavior change the plan does not ask for.
 
 ## Verification
-Fresh build in scratch/p125s-fix-build + both plan-named test modules run one at a time, before the nit and
-again after it: file_expert_source_test PASS, serve.test_dashboard 91 OK. serve/qfn_engine.py untouched and
-not needed (extractor had nothing to do - engines/qfn/serve/server.py unchanged). Details:
-REPORT-p125s-tiers-panel.md.
+The plan's two modules, one at a time, after both commits: file_expert_source_test PASS (ninja reports "no
+work to do" - the target does not compile generate.cpp, and the C++ edit is comment-only), and
+serve.test_dashboard 91 OK. The comment-only generate.cpp edit was syntax-checked with the build's own flags
+(-fsyntax-only over the ninja -t commands line; OK, the single unused-variable warning at 16236 is
+pre-existing). serve/qfn_engine.py untouched, the extractor had nothing to run (engines/qfn/serve/server.py
+unchanged this round). No GPU runs.
