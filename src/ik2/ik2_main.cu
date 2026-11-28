@@ -27,6 +27,7 @@
 #include "ik2_kernels.cuh"
 #include "ik2_lane.hpp"
 #include "ik2_off.cuh"
+#include "ik2_plan.hpp"   // (the load-time sizing decision as helpers: the committed start step vs the ceiling)
 #include "mm3_link.cuh"   // (two GPUs: the copies between them, peer only where tested)
 #include "maya/artifact/gguf_reader.hpp"
 #include "sf_codecs.h"
@@ -529,6 +530,15 @@ bool g_kv_fp8 = false;
 // cache would not fit in VRAM beside the model (a 24 GB card past ~352K, the trained 1M), else off - as before.
 int g_kv_stream = -1;        // -1 auto, 0 off, 1 on
 int g_kv_resident = -1;      // full visits whose K / V stay in VRAM (-1: as many as fit)
+// (P125e a1, the elastic start step: SAGUARO_IK2_KV_START) the positions of the global layers' K / V the plan and the
+// layout commit to at the load - what a conversation uses at its start, not the --max-context ceiling (which costs
+// ~0 until used: the ceiling's rows past the commit are never written, and the engine announces the committed
+// context as the conversation's ceiling until step 2 grows them; 0: the whole ceiling, as before).  Where the
+// ceiling's cache would crowd every expert out of VRAM but the committed one leaves them room, the experts stay
+// (src/ik2/ik2_plan.hpp, ref/REPORT-p125b-ik2-vram.md); g_kv_run is the ceiling the engine then runs and says.
+int g_kv_start = ik2plan::kKvStartDefault;
+bool g_kv_elastic = false;   // the elastic start was taken (the global layers' K / V laid out for g_kv_run only)
+int g_kv_run = 0;            // the conversation's ceiling the engine announces and enforces (= ctx unless elastic)
 std::vector<char> g_kv_host; // [visit] 1: its K / V in host RAM (set by the plan)
 uint8_t *g_kv_stage_k = nullptr, *g_kv_stage_v = nullptr;   // a host visit's rows for a prompt chunk (VRAM)
 // The staging pair is the "swing" visit's VRAM: a full visit kept in VRAM for tokens that, while a prompt runs, has
@@ -7464,6 +7474,9 @@ int main(int argc, char** argv) {
         else die("unknown argument " + a);
     }
     g_depth = getenv("SAGUARO_IK2_DEPTH") ? std::max(0, std::atoi(getenv("SAGUARO_IK2_DEPTH"))) : 0;   // (tests: a long context's speed without its prompt)
+    g_kv_start = getenv("SAGUARO_IK2_KV_START") ? std::max(0, std::atoi(getenv("SAGUARO_IK2_KV_START")))
+                                                : ik2plan::kKvStartDefault;   // (P125e a1: the committed K/V of the global layers)
+    g_kv_run = ctx;   // (the ceiling the engine runs and announces; the elastic start step may lower it)
     if (drafting.empty()) drafting = draft_path.empty() ? "off" : "on";   // (--draft alone: as before, drafting on)
     if (drafting == "off") draft_path.clear();
     g_lookup = drafting != "off" && !(getenv("SAGUARO_IK2_LOOKUP") && !std::atoi(getenv("SAGUARO_IK2_LOOKUP")));
@@ -7873,6 +7886,22 @@ int main(int argc, char** argv) {
                 kv_b += (l >= c.core0 && l < c.core1 ? c.n_pass : 1) * cap * c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
             }
         }
+        // (P125e a1: the same cache sized for the committed start step (SAGUARO_IK2_KV_START) instead of the ceiling -
+        //  the sliding layers are bounded either way; a kv_start of 0 makes the two sums equal)
+        const int kv_com = ik2plan::kv_committed(ctx, g_kv_start);
+        size_t kv_b_start = 0;
+        for (int l = 0; l < c.n_layer; ++l) {
+            const size_t cap = c.sliding[l] ? (size_t) std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock))
+                                            : (size_t) kv_com;
+            if (g_kv_q4) {
+                const size_t n_vis = (size_t) (l >= c.core0 && l < c.core1 ? c.n_pass : 1);
+                const size_t row_b = (size_t) c.KV * (64 + 8) * 2;
+                if (g_kv_q4_stream && !c.sliding[l]) kv_b_start += (size_t) g_kv_vram_mb << 17;
+                else kv_b_start += n_vis * cap * row_b * (c.sliding[l] && serve ? g_par : 1);
+            } else {
+                kv_b_start += (l >= c.core0 && l < c.core1 ? c.n_pass : 1) * cap * c.KV * c.D * (g_kv_fp8 ? 1 : 2) * 2;
+            }
+        }
         if (S.sv) exp_b = S.sv->compact_bytes();   // (a pack held resident: each expert packed - init_packed)
         if (g_tpn > 1) exp_b /= g_tpn;            // (a member's share; the dense weights counted whole)
         g_dense_bytes = dense_b, g_exp_bytes = exp_b;
@@ -7903,7 +7932,9 @@ int main(int argc, char** argv) {
         //  just miss staying resident - the one-T4 quant at 32K on a 16 GB card)
         const size_t reserve = getenv("SAGUARO_IK2_RESERVE_MB") ? (size_t) std::atof(getenv("SAGUARO_IK2_RESERVE_MB")) << 20
                                                                 : (size_t) 3 << 29;
-        bool fits = exp_b + dense_b + kv_b + reserve <= fr0 && exp_b <= (size_t) (cache_gb * 1073741824.0);
+        const bool fits_ceil = ik2plan::experts_fit(exp_b, dense_b, kv_b, reserve, fr0, cache_gb);
+        const bool fits_start = ik2plan::experts_fit(exp_b, dense_b, kv_b_start, reserve, fr0, cache_gb);
+        bool fits = fits_ceil;
         // KV streaming (g_kv_stream): auto takes it only where the cache alone does not fit beside the dense weights
         // and a half-GiB tier of experts (the offload layout, below), and only where the RAM holds the rows beside its
         // experts; where the offload path does not run, where the cache does not fit beside every expert.  The rows
@@ -8006,6 +8037,29 @@ int main(int argc, char** argv) {
         // !g_pool here).
         const char* off_env = getenv("SAGUARO_IK2_OFF");
         int off_set = off_env && *off_env ? std::atoi(off_env) : -1;
+        // (P125e a1, the elastic start step: where the ceiling's K / V would crowd every expert out of VRAM (the
+        //  offload path with no expert preloaded - the 262144 row of ref/REPORT-p125b-ik2-vram.md) but the K / V a
+        //  conversation USES at its start leaves them room, the experts stay in VRAM and the global layers' cache is
+        //  laid out for the committed start step (SAGUARO_IK2_KV_START) - the ceiling above it costs nothing and
+        //  stays unwritten until step 2 grows it (VMM rows taking VRAM back from the coldest experts), so the
+        //  conversation's ceiling the engine announces and enforces is the commit.  Not taken where KV streaming ran
+        //  (its host rows hold the whole ceiling already), on q4 rows (their own split), two GPUs, --tp,
+        //  --parallel or the expert-parallel mode, nor where the environment refuses the resident path anyway.)
+        if (ik2plan::elastic_start(fits_ceil, fits_start, g_kv_streaming, ctx, g_kv_start, g_two.want, g_kv_q4,
+                                   g_par > 1, g_tpn > 1) && !g_ep && off_set != 1 && !getenv("SAGUARO_IK2_DENSE") &&
+            !(getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")))) {
+            const double freed = kv_b > kv_b_start ? (double) (kv_b - kv_b_start) / 1073741824.0 : 0.0;
+            g_kv_elastic = true;
+            g_kv_run = kv_com;
+            kv_b = kv_b_start;
+            fits = true;
+            std::printf("NOTE context: the global layers' K / V is laid out for the first %d positions of the %d the "
+                        "ceiling allows (SAGUARO_IK2_KV_START) - the experts keep the freed %.1f GiB instead of "
+                        "leaving VRAM; conversations run to %d until the cache can grow into the ceiling "
+                        "(SAGUARO_IK2_KV_START=%d or 0 keeps the ceiling's layout)\n",
+                        kv_com, ctx, freed, kv_com, ctx);
+            std::fflush(stdout);
+        }
         // Two GPUs: where GPU 0 holds every expert, the resident path there alone (one GPU's speed, v1.1.73's path;
         // SAGUARO_IK2_TWO=1: the split anyway), else the split - GPU 0 on the offload path, GPU 1 with the next experts
         if (g_two.want) {
@@ -8133,12 +8187,12 @@ int main(int argc, char** argv) {
             // (the drafter: its context rows in FP16, else in FP8 - SAGUARO_IK2_DRAFT_KV takes one; the load below measures)
             const char* kv_env = getenv("SAGUARO_IK2_DRAFT_KV");
             const bool only16 = kv_env && std::string(kv_env) == "f16", only8 = kv_env && std::string(kv_env) == "fp8";
-            size_t need = draft_room(model_drafter ? draft_path : std::string(), ctx, chunk, c, head_rows, only8);
+            size_t need = draft_room(model_drafter ? draft_path : std::string(), g_kv_run, chunk, c, head_rows, only8);
             std::string why;
             if (model_drafter && S.sv) why = "a Strata pack's output head is not one it reads (FP16 or planar Q8_0)";
             if (why.empty() && model_drafter && !only8 && !only16 && !room_ok(need, why, !model_drafter)) {
                 why.clear();
-                need = draft_room(draft_path, ctx, chunk, c, head_rows, true);
+                need = draft_room(draft_path, g_kv_run, chunk, c, head_rows, true);
             }
             if (why.empty() && room_ok(need, why, !model_drafter)) {
                 std::printf("drafting: %s, %.2f GiB of VRAM beside the model%s\n",
@@ -8408,7 +8462,7 @@ int main(int argc, char** argv) {
         else Vi.l = v - (c.n_pass - 1) * n_core;
         const Layer& Ly = M.L[Vi.l];
         use_dev(Ly.dev);
-        Vi.kv_cap = Ly.sliding ? std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock)) : ctx;
+        Vi.kv_cap = Ly.sliding ? std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock)) : g_kv_run;   // (elastic start: g_kv_run < ctx = the commit)
         const bool kv_host = v < (int) g_kv_host.size() && g_kv_host[v];
         if (g_kv_q4) {
             if (c.D != 128) die("SAGUARO_IK2_KV=q4 requires head_dim == 128");
@@ -9117,12 +9171,12 @@ int main(int argc, char** argv) {
             try {
                 if (g_drem.dev >= 0) {
                     DevScope on(g_drem.dev);
-                    dr = ik2::draft::load(draft_path, c.C, ctx, g_drem.blas, g_drem.s, kv8 != 0);
+                    dr = ik2::draft::load(draft_path, c.C, g_kv_run, g_drem.blas, g_drem.s, kv8 != 0);
                     ik2::draft::fold_q8(dr, g_drem.q8, g_drem.q8d, c.n_rows);
                     ik2::draft::set_head_q8(dr, g_drem.q8, g_drem.q8d);
                     CU(cudaStreamSynchronize(g_drem.s));
                 } else {
-                dr = ik2::draft::load(draft_path, c.C, ctx, g_blas, g_s, kv8 != 0);
+                dr = ik2::draft::load(draft_path, c.C, g_kv_run, g_blas, g_s, kv8 != 0);
                 if (draft_head) {
                     ik2::draft::fold(dr, draft_head, c.n_rows);
                 } else {
@@ -9195,6 +9249,36 @@ int main(int argc, char** argv) {
         std::printf("  pool %zu: %d slots of %.1f MiB (%.1f GiB, %d layers)\n", p, EC.pools[p].n_slots,
                     EC.pools[p].slot_bytes / 1048576.0,
                     (double) EC.pools[p].n_slots * EC.pools[p].slot_bytes / 1073741824.0, EC.pools[p].n_layers);
+    // (P125e b1, preload the offload tier): a card that takes the offload path with NO picks profile copied nothing
+    // into its VRAM tier at the load - "offload: 0 of 3072 experts" (ref/REPORT-p125b-ik2-vram.md 2.2) - and every
+    // cold expert cost a host fetch until the dynamic cache learned.  The pool is there anyway; fill it at the load
+    // with the resident copy loop's own copy, round-robin over the layers of each pool so every layer keeps its
+    // share instead of the first layers eating it all.  A shipped SAGUARO_IK2_WARM profile prices the picks better
+    // and wins; EP fills what it owns.  The copy counts stay out of the request's miss/bytes counters, as with warm.
+    auto preload_tier = [&]() {
+        const double tw = now();
+        const uint64_t m0 = EC.misses, b0 = EC.bytes_up;
+        int n = 0;
+        for (size_t p = 0; p < EC.pools.size(); ++p) {
+            std::vector<int> ls;
+            for (int l = 0; l < c.n_layer; ++l)
+                if (EC.layer_pool[l] == (int) p) ls.push_back(l);
+            int left = EC.pools[p].n_active;
+            for (int e = 0; e < c.E && left > 0; ++e)
+                for (const int l : ls) {
+                    if (left <= 0) break;
+                    EC.get(M.L[l], l, e, EC.tick, g_cs, nullptr, true, true);
+                    --left, ++n;
+                }
+        }
+        CU(cudaStreamSynchronize(g_cs));
+        ++EC.tick;   // (the same tick rule the warm fill uses: the first prefetch's ticks must not evict the tier)
+        std::printf("tier: %d of %d experts (%.1f GiB) copied at the load, every layer its share (no picks file - "
+                    "SAGUARO_IK2_WARM would price them; the cache relearns from here)\n", n, c.n_layer * c.E,
+                    (EC.bytes_up - b0) / 1073741824.0);
+        std::fflush(stdout);
+        EC.misses = m0, EC.bytes_up = b0;
+    };
     const char* wf = getenv("SAGUARO_IK2_WARM");
     if ((wf && *wf) || g_ep) {   // the cache filled with the most picked experts (SAGUARO_IK2_POP_OUT's file or all owned for EP)
         FILE* in = (wf && *wf) ? std::fopen(wf, "rb") : nullptr;
@@ -9208,6 +9292,7 @@ int main(int argc, char** argv) {
         if (cnt.empty() && g_ep) cnt.assign((size_t) c.n_layer * c.E, 1);
         if (cnt.empty()) {
             std::printf("warm: the cache starts empty\n");
+            if (g_off_want && d == 0 && !g_ep) preload_tier();   // (the profile named does not read: still no reason for an empty tier)
         } else {
             const double tw = now();
             const uint64_t m0 = EC.misses, b0 = EC.bytes_up;
@@ -9246,6 +9331,8 @@ int main(int argc, char** argv) {
                         now() - tw);
             EC.misses = m0, EC.bytes_up = b0;
         }
+    } else if (g_off_want && d == 0) {
+        preload_tier();   // (b1: no SAGUARO_IK2_WARM, no EP - the tier starts full rather than empty)
     }
     if (g_off_want && d == 0) {   // the offload path: the tier is what the cache holds (warmed above), tables a layer
         if (pin_later) {   // the experts the tier does not hold: read into their blocks, then pinned a run at a time
@@ -10145,7 +10232,7 @@ int main(int argc, char** argv) {
             const char* wd = getenv("SAGUARO_IK2_WATCHDOG_S");
             std::printf("INFO engine=ik2 engine_kind=ik2 model=Inkling-2 kv=%s ctx=%d gpus=%d dspark=%d lookup=%d "
                         "drafting=%s experts=%d parallel=%d watchdog_s=%d path=%s\n",
-                        g_kv_q4 ? "q4" : (g_kv_fp8 ? "fp8" : "f16"), ctx,
+                        g_kv_q4 ? "q4" : (g_kv_fp8 ? "fp8" : "f16"), g_kv_run,
                         g_two.on ? 2 : n_gpu, sp && drafter ? 1 : 0, sp && g_lookup ? 1 : 0, drafting.c_str(),
                         c.n_layer * c.E, g_par, wd && *wd ? std::max(0, std::atoi(wd)) : 600,
                         g_fast ? "resident" : g_off ? "offload" : "cache");
@@ -10170,9 +10257,9 @@ int main(int argc, char** argv) {
             use_dev(0);
             CU(cudaSetDevice(0));   // (GPU 1 was made current above without use_dev: g_cur still says 0)
             if (g_par > 1) std::printf("READY %d stop multi=%d\n", ctx_s, g_par);
-            else std::printf("READY %d stop\n", ctx);
+            else std::printf("READY %d stop\n", g_kv_run);
         } else {
-            std::printf("@READY ctx %d\n", ctx);
+            std::printf("@READY ctx %d\n", g_kv_run);
         }
         std::fflush(stdout);
         // stdin on a thread: a STOP while a request runs is seen at once (the request loop looks at g_cancel)
@@ -10238,7 +10325,7 @@ int main(int argc, char** argv) {
             char b[400];
             std::snprintf(b, sizeof b, "vram_used=%d ram_used=%d vram_gb=%.2f ram_gb=%.2f vram_hit=%.4f ram_fetch=%.2f "
                           "cpu=%.2f disk=0 promo=0 kv_used=%lld kv_cap=%d kv_gb=%.2f", nv, c.n_layer * c.E - nv, vb / 1e9,
-                          std::max(0.0, (double) g_exp_bytes - vb) / 1e9, hit, fetch, cpu, kv_used, ctx, kv_total / 1e9);
+                          std::max(0.0, (double) g_exp_bytes - vb) / 1e9, hit, fetch, cpu, kv_used, g_kv_run, kv_total / 1e9);
             return std::string(b);
         };
         // a request's expert picks found in VRAM and all of them, as counters (DONE's last two fields: the differences)
@@ -10649,11 +10736,11 @@ int main(int argc, char** argv) {
                 stops = parse_ints(stops_s);
             }
             const std::vector<int> ids = parse_ints(ids_s);
-            if (ids.empty() || (int) ids.size() + max_new > ctx) {
+            if (ids.empty() || (int) ids.size() + max_new > g_kv_run) {
                 if (serve_maya)
                     std::printf("ERR %s\nDONE 0 %zu 0 0 cancel 0 0 0 0 0\n",
                                 ids.empty() ? "an empty prompt" :
-                                    ("the prompt and max_tokens pass the context (" + std::to_string(ctx) + ")").c_str(),
+                                    ("the prompt and max_tokens pass the context (" + std::to_string(g_kv_run) + ")").c_str(),
                                 ids.size());
                 else
                     std::printf("@END error %s %zu 0 0 0\n", ids.empty() ? "empty_prompt" : "context_length", ids.size());
@@ -11176,7 +11263,7 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         std::_Exit(0);   // (QUIT / end of input: out at once, as maya-hy4 - the OS frees the pinned runs and the driver's state)
     }
-    if (g_depth + (int) prompt.size() + gen > ctx) die("prompt + gen past --ctx");
+    if (g_depth + (int) prompt.size() + gen > g_kv_run) die("prompt + gen past the context");
     if (g_depth > 0 && (serve || drafter || g_lookup || g_dev[0].W.T_sup > 0)) die("SAGUARO_IK2_DEPTH: the CLI's plain path only (no drafting)");
     // the prompt
     std::vector<float> logits;

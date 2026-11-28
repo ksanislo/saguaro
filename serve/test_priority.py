@@ -279,6 +279,80 @@ class Ik2LostRead(Ik2Read):
     keeps_cut = False
 
 
+class QfnBatchRead(ReadEngine):
+    """saguaro-qfn --batch with SAGUARO_PIPED_CONCURRENT (the card's shipping shape), as P125m left the engine:
+    the long prompt read runs on a thread of its own (generate.cpp's reader thread, "read N tokens on a thread
+    of its own ... concurrent") while the batch slots decode, and a priority STOP (the server's cut - stdin sets
+    stop_req, generate.cpp:12812-12814) stops that read at the NEXT LAYER BOUNDARY of its chunk - the layer
+    split's head prefill now takes the P125j pause too (prefill.cpp lp_on) - keeping what it read: the DONE says
+    cancel and names the layer (paused_layer/paused_chunk/paused_at), the paused chunk counts as read (the keep:
+    live = lp_pos + lp_tokens, its lower layers read it), and the next call of the same prompt goes on at the end
+    of that chunk (the rows resume INSIDE it - invisible to the driver, which sees only the reuse figure). The
+    driver's fact from the engine's INFO batch line (`layer_pause=1`, generate.cpp: the server may cut batch
+    reads only with it): pauses_batch_read."""
+    batch = 1
+    multi = 0
+    can_pause = False
+    keeps_stopped_read = True
+    pauses_batch_read = True           # what serve/server.py's gate asks for to cut a --batch read at all
+    PAUSE_LAYER = 7                    # the head stage's layer pass the mid-chunk STOP stops at (its [0, 11))
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.last = {}
+        self.resumed_from, self.chunk_reads, self.pauses_at = [], {}, []
+
+    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        self.last = {}
+        with self.lock:
+            self.calls.append((list(ids), max_new, dict(sampling or {})))
+            base = next((b for b in self.bases if ids[:len(b)] == b), None)
+            if base is None:
+                base = list(ids)
+                self.bases.append(base)
+        key, total = id(base), len(base)
+        step = max(1, -(-total // self.CHUNKS))
+        pos = start = self.read_pos.get(key, 0)
+        if 0 < start < total:
+            self.resumed_from.append(start)     # this call goes on where the pause left the read
+        self._tls.own_pp = None
+        if self.reports_reused:                     # (RESUME: what THIS call reads on from - P124b's figure)
+            self.reused = pos
+        try:
+            while pos < total:
+                pos = min(total, pos + step)
+                if cancel.is_set():
+                    return
+                self._tls.own_pp = ((pos, total), None)
+                with self.rlock:
+                    self.read_pos[key] = pos
+                    self.ticks[key] = self.ticks.get(key, 0) + 1
+                    reads = self.chunk_reads.setdefault(key, [0] * self.CHUNKS)
+                    reads[min((pos - 1) // step, self.CHUNKS - 1)] += 1
+                time.sleep(self.delay)
+                yield None                      # a PP line: a keep-alive, a read tick
+        except GeneratorExit:                   # the cut: the reader's run ends between two LAYERS of the
+            if pos < total:                     #  NEXT chunk and keeps its rows (generate.cpp's capture, and
+                kept = min(pos + step, total)   #  the DONE keep counts the paused chunk as read)
+                with self.rlock:
+                    self.read_pos[key] = kept
+                    self.pauses_at.append((pos, kept))   # the chunk from pos, kept through its end
+                    reads = self.chunk_reads.setdefault(key, [0] * self.CHUNKS)
+                    reads[min(pos // step, self.CHUNKS - 1)] += 1
+                self.last = {"finish": "cancel", "generated": 0, "prompt_ms": 0.0, "decode_ms": 0.0,
+                             "paused_layer": self.PAUSE_LAYER, "paused_chunk": pos // step, "paused_at": pos}
+            raise
+        self._tls.own_pp = None
+        text = self.tok.decode(base)
+        answer = next(v for k, v in self.answers.items() if k in text)
+        script = self.tok.encode(answer) + self.end
+        for t in script[len(ids) - len(base):][:max_new]:
+            if cancel.is_set():
+                return
+            time.sleep(self.delay)
+            yield t
+
+
 class FairLockPriority(Env):
     def waiting_order(self, prios):
         """One thread per waiter, enqueued in the order listed; -> the order they got the engine."""
@@ -919,6 +993,49 @@ class ReadsPreempt(Env):
         self.assertEqual(engine.ticks[id(engine.bases[0])], ReadEngine.CHUNKS)
         self.assertEqual(set(engine.chunk_reads[id(engine.bases[0])]), {1})   # every chunk, exactly once
         self.assertNotIn("priority:", log.getvalue())
+
+    def test_a_qfn_batch_read_pauses_between_layers_and_continues_at_the_pause(self):
+        # P125m (the card FAIL of rc124-cand3): under --batch the long read runs on the concurrent reader
+        # thread and the read preemption used to skip it ("the preemption never cuts a batch read"). With the
+        # engine pausing reads between LAYERS (INFO batch ... layer_pause=1 -> pauses_batch_read) the cut
+        # lands within one layer pass, the DONE names the layer, and the resume goes on at the end of the
+        # paused chunk - every token read exactly once. The rc124-cand3 server fails this test: the gate
+        # keeps_stopped_read-and-not-batch never sends the STOP, no pause line, the read runs to its end.
+        engine = QfnBatchRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        out, log = self.race_read(engine, second=PRIORITY_NORMAL)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertLess(out["short one"][1], out["long one"][1])   # the normal one went first, the low after
+        self.assertEqual(out["long one"][0], LONG)
+        long_calls = [c for c in engine.calls if c[0][:len(engine.bases[0])] == engine.bases[0]]
+        self.assertEqual(len(long_calls), 2)                       # cut once, and continued
+        self.assertEqual(long_calls[1][0], long_calls[0][0])       # the same prompt: nothing written yet
+        total = len(engine.bases[0])
+        step = max(1, -(-total // ReadEngine.CHUNKS))
+        self.assertEqual(len(engine.pauses_at), 1)                 # it paused INSIDE a chunk, not at its end
+        self.assertEqual(len(engine.resumed_from), 1)
+        self.assertTrue(0 < engine.resumed_from[0] < total)        # continued inside the read, never from 0
+        self.assertEqual(engine.resumed_from[0], engine.pauses_at[0][1])   # at the END of the paused chunk
+        self.assertEqual(engine.resumed_from[0] % step, 0)         #  (its rows resume inside it - engine-side)
+        reads = engine.chunk_reads[id(engine.bases[0])]
+        self.assertEqual(set(reads), {1})                          # every chunk read EXACTLY once
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("for a normal-priority request", log)   # (the layer figures sit in between: the DONE's
+        self.assertIn(f"at layer {QfnBatchRead.PAUSE_LAYER}", log)      #  pause figures, named, on the pause
+        self.assertIn("inside chunk", log)                              #  line itself)
+        self.assertIn(f"prompt read continued: {engine.resumed_from[0]:,} of {total:,} tokens reused", log)
+
+    def test_a_batch_read_of_an_engine_without_the_layer_pause_is_never_cut(self):
+        # the gate keeps its other half: an engine that drops a stopped batch read (no layer_pause in its
+        # INFO - an older engine, or SAGUARO_LAYER_PAUSE=0) must NOT be cut: its read runs to its end rather
+        # than lose what it read (serve/server.py's keeps_stopped_read-and-not-batch rule stays for those)
+        engine = QfnBatchRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
+        engine.pauses_batch_read = False
+        out, log = self.race_read(engine, second=PRIORITY_NORMAL)
+        self.assertEqual(out["long one"][0], LONG)
+        self.assertEqual(out["short one"][0], SHORT)
+        self.assertEqual(len(engine.pauses_at), 0)                 # nothing was cut, so nothing was kept
+        self.assertEqual(engine.resumed_from, [])                  # one call per read, run to its end
+        self.assertNotIn("prompt read paused", log)
 
     def test_a_glm_read_pauses_by_its_pause(self):
         engine = PausingRead(self.tok, {"long": LONG, "short": SHORT}, delay_s=0.004)
@@ -2002,8 +2119,8 @@ class ClosingTheOtherWrappersClosesTheirRun(unittest.TestCase):
 
 
 class IdleGraceDefault(unittest.TestCase):
-    def test_the_default_grace_is_five_seconds(self):
+    def test_the_default_grace_is_zero(self):
         from serve.server import priority_idle_seconds
         with unittest.mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SAGUARO_PRIORITY_IDLE_S", None)
-            self.assertEqual(priority_idle_seconds(), 5.0)   # (1.2.4: 30 -> 5; 0 once reads pause between layers)
+            self.assertEqual(priority_idle_seconds(), 0.0)   # (1.2.4: 30 -> 5; P125j: 0 - reads pause between layers)
