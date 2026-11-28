@@ -116,26 +116,37 @@ export function identityChanged(h, eng) {
   return false;
 }
 
-// behind llama-swap (the page at /upstream/<id>/, health saying supervisor "llama-swap"), EVERY request under that
-// path LOADS the model - and evicts another one from the card - so one open Monitor tab's per-second /metrics keeps
-// reloading it.  llama-swap's own GET <root>running (the origin two levels up: it loads nothing) says which model is
-// ready; while ours is not, the page asks only that - every 5 s - and the Monitor shows a quiet unloaded state.
-// And in every setup a hidden tab asks nothing at all: visible again, the polls pick up where they stopped.
+// behind llama-swap (the page at /upstream/<id>/), EVERY request under that path LOADS the model - and evicts another
+// one from the card - so one open Monitor tab's per-second /metrics keeps reloading it.  llama-swap's own GET
+// <root>running (the origin two levels up: it loads nothing) says which model is ready; while ours is not, the page
+// asks only that - every 5 s - and the Monitor shows a quiet unloaded state with a Load button for the one deliberate
+// request.  The gate trusts /running's ANSWER, not /health's supervisor name: P125n's card test woke an unloaded model
+// because llama-swap started us through a wrapper script (its parent-process detection missed), /health said no
+// supervisor, and the page took that for "no gate here" - polling /metrics under /upstream/ every second, which is
+// exactly the request llama-swap loads on.  A path under /upstream/ gates on the probe; a probe that does not answer
+// with llama-swap's {"running": [...]} shape (an older llama-swap without /running, a key refusing it, another proxy
+// under that path) is no gate: poll as today.  And in every setup a hidden tab asks nothing at all: visible again, the
+// polls pick up where they stopped.
 const swapAt = () => { const m = (location.pathname || "").match(/^(.*\/)upstream\/([^/]+)/);
                        return m && {root: m[1], id: decodeURIComponent(m[2])}; };
 let swapReady = null;                    // (true ready, false swapped out (the gate), null: no gate - not behind
                                          //  llama-swap, or its /running does not answer (404, a key refused): poll as today)
+let swapWaking = false;                  // (the Load button was clicked: one /health is in flight to start the model)
 export const unloaded = () => swapReady === false;
+export const waking = () => swapWaking;
 export const stopPoll = () => clearTimeout(timer);
 
 // llama-swap's {"running": [{model, state}]}: loads nothing itself.  "ready", "loading" (listed, not ready), "off" (not
-// listed), null = no gate (an older llama-swap without /running (404), or a key it refuses (401, 403): poll as today)
+// listed), null = no gate (an older llama-swap without /running (404), a key that refuses it (401, 403), or an answer
+// that is not its shape - another proxy under /upstream/: poll as today)
 async function swapState(swap) {
   try {
     const r = await fetch(`${swap.root}running`, {headers: headers()});
     if (r.status === 404 || r.status === 401 || r.status === 403) return null;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const x = ((await r.json()).running || []).find((m) => m.model === swap.id);
+    const j = await r.json();
+    if (!j || !Array.isArray(j.running)) return null;    // (P125n: only llama-swap's own shape gates the page)
+    const x = j.running.find((m) => m.model === swap.id);
     return !x ? "off" : x.state === "ready" ? "ready" : "loading";
   } catch (e) { return undefined; }      // (a blip)
 }
@@ -144,6 +155,19 @@ async function swapRunning(swap, was) {
   return at === undefined ? was : at === null ? null : at === "ready";   // (a blip is not "no gate": one opening the
 }                                                                        //  closed gate would load the model back)
 
+// the unloaded Monitor's Load button: ONE deliberate request under /upstream/ - llama-swap starts the model for it and
+// holds the request until it answers.  Until /running says ready the page stays in its quiet state; the polls never
+// load the model by themselves.
+export async function loadNow() {
+  if (swapReady !== false || swapWaking) return;
+  swapWaking = true;
+  emit();
+  try {
+    const r = await fetch("health", {headers: headers(), cache: "no-store"});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  } catch (e) { swapWaking = false; emit(); throw e; }
+}
+
 export async function poll() {
   clearTimeout(timer);
   if (document.hidden || polling) return;                       // (hidden: nothing asked; one poll at a time)
@@ -151,7 +175,8 @@ export async function poll() {
   try {
     const swap = swapAt();
     const was = swapReady;
-    swapReady = swap && (S.health.supervisor === undefined || S.health.supervisor === "llama-swap") ? await swapRunning(swap, was) : null;
+    swapReady = swap ? await swapRunning(swap, was) : null;    // (P125n: the path and the probe answer decide, never
+    if (swapReady !== false) swapWaking = false;               //  /health's supervisor name, which can be missing)
     if (swapReady === false) {
       if (was !== false) { S.metrics = null; S.conn = "unloaded"; emit(); }   // (the Monitor's quiet unloaded state)
       timer = setTimeout(poll, 5000);                           // (/running alone, until the model is back on the card)
@@ -190,7 +215,8 @@ document.addEventListener("visibilitychange", async () => {
   if (document.hidden) { clearTimeout(timer); return; }           // (hidden: every poll stops, in every setup)
   if (starting) { if (startTick) startTick(); return; }   // (the starting watch resumes; nothing else runs yet)
   const swap = swapAt();                                          // (the gate first: /health or /metrics would load the model)
-  if (swap && (S.health.supervisor === undefined || S.health.supervisor === "llama-swap")) swapReady = await swapRunning(swap, swapReady);
+  if (swap) swapReady = await swapRunning(swap, swapReady);       // (P125n: as in poll, the probe answer decides, not the supervisor name)
+  if (swapReady !== false) swapWaking = false;
   if (healthWait) { healthWait = false; loadHealth(); }           // (seen again: it picks up at once, and makes up
   if (mcpWait) { mcpWait = false; loadMcp(); }                    //  any health or mcp retry the dark swallowed)
   poll();

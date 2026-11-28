@@ -1178,6 +1178,147 @@ console.log(JSON.stringify({off, offConn, log, conn: st.S.conn, metrics: !!st.S.
         self.assertEqual(got["conn"], "ok")
         self.assertTrue(got["metrics"])
 
+    def test_the_gate_needs_no_supervisor_name_only_lama_swap_running(self):
+        # P125n (mangonel 11-27): llama-swap started the server through a wrapper script, its parent-process
+        # detection missed, /health said no supervisor - and the page took that for "no gate here" and polled
+        # /metrics under /upstream/ every second, which is exactly the request llama-swap loads a model on (the
+        # unloaded model was back on the card within a minute).  The gate now trusts the probe's answer, not the
+        # name in /health: under /upstream/, llama-swap's {"running": [...]} decides.
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = null;   // (/health never named the supervisor)
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : [{model: "other", state: "ready"}]}
+    : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();
+const off = {log: log.slice(), conn: st.S.conn, metricsNull: st.S.metrics === null};
+ready = true;
+await sv.poll(); sv.stopPoll();                                     // (back on the card: the usual health, metrics)
+console.log(JSON.stringify({off, log: log.slice(), conn: st.S.conn}));""")
+        self.assertEqual(got["off"]["log"], ["/running"])           # (asked nothing of the model, name or no name)
+        self.assertEqual(got["off"]["conn"], "unloaded")
+        self.assertTrue(got["off"]["metricsNull"])
+        self.assertEqual(got["log"], ["/running", "/running", "health", "metrics"])   # (back: its facts, then the poll)
+        self.assertEqual(got["conn"], "ok")
+
+    def test_the_load_button_is_the_one_deliberate_request_while_unloaded(self):
+        # P125n: the quiet unloaded state now says so and offers a Load button for the ONE request that does it on
+        # purpose (a /health llama-swap answers by starting the model and holding the request until it is ready);
+        # a second click asks nothing, and the polls stay on /running until it says ready.
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (off the card: the gate closed)
+await sv.loadNow();                                                 // (the click: the one deliberate request)
+await sv.loadNow();                                                 // (and no second one while it is in flight)
+const clicked = {log: log.slice(), waking: sv.waking()};
+ready = true;
+await sv.poll(); sv.stopPoll();                                     // (ready: health once, metrics back, waking off)
+console.log(JSON.stringify({clicked, log: log.slice(), waking: sv.waking(), conn: st.S.conn}));""")
+        self.assertEqual(got["clicked"]["log"], ["/running", "health"])   # (the deliberate /health, nothing else)
+        self.assertTrue(got["clicked"]["waking"])                   # (... and until /running says ready it is loading)
+        self.assertEqual(got["log"], ["/running", "health", "/running", "health", "metrics"])
+        self.assertFalse(got["waking"])
+        self.assertEqual(got["conn"], "ok")
+
+    def test_the_unloaded_monitor_card_offers_the_load_button(self):
+        # P125n: what the off-card Monitor page shows instead of the figures: the unloaded sentence with its Load
+        # button, and while that request is in flight, the loading sentence with no second button.
+        got = self.node(self.WALK + """
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const mo = await import(web + "/monitor.js");
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (off the card)
+st.S.metrics = null;
+const keep = (v) => strs(v).filter((s) => s.startsWith("Unloaded -") || s.includes("Loading the model") || s === "Load it now");
+const closed = keep(mo.MonitorPage());
+await sv.loadNow();                                                 // (the button was clicked)
+const wakingTree = keep(mo.MonitorPage());
+sv.stopPoll();
+console.log(JSON.stringify({closed, wakingTree}));""")
+        self.assertEqual(len(got["closed"]), 2, got["closed"])      # (the sentence and the button, nothing else)
+        self.assertTrue(any(s.startswith("Unloaded") for s in got["closed"]), got["closed"])
+        self.assertIn("Load it now", got["closed"])
+        self.assertEqual(len(got["wakingTree"]), 1, got["wakingTree"])
+        self.assertTrue(got["wakingTree"][0].startswith("Loading the model"), got["wakingTree"])
+
+    def test_booting_off_card_asks_no_turbo_and_asks_it_once_the_gate_opens(self):
+        # P125n: app.js' boot chain calls loadTurbo() - api/turbo under /upstream/ is an upstream request like
+        # /metrics, so a page opened or restored off the card loaded the model back with it (the last unguarded
+        # loader of the boot chain).  It refuses while the gate is closed; app.js re-arms it through whenHealth, and
+        # the first health after the gate opens brings the Turbo state.
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const tb = await import(web + "/turbo.js");
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "api/turbo" ? {supported: true, on: false, engine: false, plan: {}, env: {}, restarts: false}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (off the card)
+await tb.loadTurbo();                                               // (the boot's call: asks nothing, wants nothing)
+const off = {log: log.slice(), unavailable: !!st.S.turbo.unavailable};
+ready = true;
+await sv.poll();                                                    // (back on the card: its health lands)
+await tb.loadTurbo();                                               // (... and the re-armed call asks once)
+sv.stopPoll();
+console.log(JSON.stringify({off, log: log.slice(), turbo: {supported: st.S.turbo.supported,
+                                                           unavailable: !!st.S.turbo.unavailable}}));""")
+        self.assertEqual(got["off"]["log"], ["/running"])           # (off-card boot: nothing asked of the model)
+        self.assertFalse(got["off"]["unavailable"])                 # (not marked "no Turbo": nothing was answered)
+        self.assertEqual(got["log"], ["/running", "/running", "health", "metrics", "api/turbo"])
+        self.assertTrue(got["turbo"]["supported"])                  # (the state is here as soon as it may be asked)
+        self.assertFalse(got["turbo"]["unavailable"])
+
+    def test_a_resumed_answer_waits_out_the_closed_gate(self):
+        # P125n: an answer cut off by a reload - or one whose stream died when llama-swap unloaded the model - took
+        # itself back up through v1/strata/stream every 2 s for ten minutes, and behind llama-swap every one of
+        # those reconnects is an upstream request that loads the model straight back.  While the gate is closed it
+        # waits; once /running says ready, it takes the stream up again.
+        got = self.node("""
+location.pathname = "/upstream/glm-5.3-flash/";
+st.S.health.model = "glm-5.3-flash"; st.S.health.supervisor = "llama-swap";
+const ch = await import(web + "/chats.js");
+const log = [];
+let ready = false;
+globalThis.fetch = async (u) => { log.push(u);
+  if (u.startsWith("v1/strata/stream")) return {ok: false, status: 404, json: async () => ({})};
+  return {ok: true, status: 200, json: async () => u.endsWith("/running")
+    ? {running: ready ? [{model: "glm-5.3-flash", state: "ready"}] : []}
+    : u === "health" ? {model: "glm-5.3-flash", supervisor: "llama-swap"} : {model: "glm-5.3-flash", live: {state: "idle"}}}; };
+await sv.poll();                                                    // (the model is off the card)
+const c = ch.newChatObj(); st.S.current = c; st.S.chats = [c];
+c.messages.push({role: "user", text: "tell me about cacti"});
+c.messages.push({role: "assistant", text: "", pending: true, job: "j1"});
+ch.resumePending();                                                 // (the reload took this chat back up)
+await new Promise((ok) => setTimeout(ok, 300));
+const off = {log: log.slice(), conn: st.S.conn};
+ready = true;
+await sv.poll();                                                    // (back on the card)
+await new Promise((ok) => setTimeout(ok, 6200)); sv.stopPoll();     // (its wait is over: the stream is asked again)
+console.log(JSON.stringify({off, asked: log.filter((u) => u.startsWith("v1/strata/stream"))}));""")
+        self.assertEqual(got["off"]["log"], ["/running"])           # (the reconnect loop asked nothing of the model)
+        self.assertEqual(got["off"]["conn"], "unloaded")
+        self.assertEqual(got["asked"], ["v1/strata/stream?id=j1&from=0"])   # (the gate open: it takes the answer up)
+
     def test_a_hidden_tab_asks_nothing_in_every_setup(self):
         # a hidden tab stops all polling - plain, and behind llama-swap; visible again it picks up at once
         got = self.node("""
@@ -1202,21 +1343,24 @@ console.log(JSON.stringify({hiddenPlain, shown, hiddenSwap: log.slice(), conn: s
         self.assertEqual(got["conn"], "ok")
 
     def test_not_behind_llama_swap_polls_exactly_as_before(self):
-        # no supervisor (the usual single-server setup), or an /upstream/ path without one (another proxy): /metrics
-        # directly, as before - /running is never asked
+        # no supervisor (the usual single-server setup): /metrics directly, as before - /running is never asked.
+        # An /upstream/ path whose /running is NOT llama-swap's {"running": [...]} shape (another proxy under that
+        # path): the probe is asked once, gets no shape to trust, and the page polls as before - P125n dropped the
+        # old /health supervisor-name condition (a llama-swap that started us through a wrapper script never got
+        # named, and the page polled /metrics under /upstream/ and woke the model), but a foreign answer is still
+        # "no gate here", not "off the card".
         got = self.node("""
 const log = [];
 globalThis.fetch = async (u) => { log.push(u);
   return {ok: true, status: 200, json: async () => ({model: "glm-5.3-flash", live: {state: "idle"}})}; };
 await sv.poll(); sv.stopPoll();
 const plain = log.slice();
-location.pathname = "/upstream/glm-5.3-flash/";                     // (the path alone is not enough: health said no supervisor)
-st.S.health.supervisor = null;
+location.pathname = "/upstream/glm-5.3-flash/";
 await sv.poll(); sv.stopPoll();
 console.log(JSON.stringify({plain, pathOnly: log.slice(), conn: st.S.conn}));""")
-        self.assertEqual(got["plain"], ["metrics"])
-        self.assertEqual(got["pathOnly"], ["metrics", "metrics"])
-        self.assertEqual(got["conn"], "ok")
+        self.assertEqual(got["plain"], ["metrics"])                                    # (plain port: no probe, ever)
+        self.assertEqual(got["pathOnly"], ["metrics", "/running", "metrics"])          # (probe once; its answer is
+        self.assertEqual(got["conn"], "ok")                                            #  not llama-swap's: poll on)
 
     def test_the_first_poll_of_a_page_load_asks_no_health_of_its_own(self):
         # (the model-names review's nit 2: app.js starts poll() next to loadChats().then(loadHealth), and the first
