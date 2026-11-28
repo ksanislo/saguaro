@@ -270,6 +270,42 @@ int main() {
         check(got && got->live.ids == full.live.ids && got->kv.size() == 1 && got->kv[0].k.external() &&
               got->kv[0].k == full.kv[0].k, "write_now: fetched back as a mapped view with the same K/V");
     }
+    // P125t: a read refused by the RAM admission (limits.admit) is TRANSIENT: fetch answers nothing (the request
+    // rereads its prompt) instead of re-taking the kept entry and being refused again forever, the file stays in
+    // the folder, and a later turn with the admission open reads it back
+    {
+        const fs::path d5 = fs::temp_directory_path() / ("strata-sessiondir-refused-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(d5);
+        const auto r = tokens(500000, 2500);
+        auto rp = r; rp.push_back(9);
+        {
+            SessionDir sd(opts(d5, id));
+            sd.open();
+            sd.write(std::make_shared<SavedConversation>(conv(r, 17)));
+            sd.flush();
+        }
+        std::atomic<bool> short_ram{true};
+        SessionDir::Options o = opts(d5, id);
+        o.limits.admit = [&](uint64_t, std::string& why) {
+            if (short_ram) { why = "no RAM to spare (test)"; return false; }
+            return true;
+        };
+        SessionDir sd(o);
+        sd.open();
+        check(sd.files() == 1, "refused: the kept file is indexed");
+        int64_t t = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        auto got = sd.fetch(rp, {}, false, 0, t);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        check(!got.has_value() && t == 0, "refused: fetch returns nothing, the request rereads the prompt");
+        check(ms < 5000.0, "refused: fetch returns instead of re-admitting the kept file forever");
+        check(sd.files() == 1 && session_files(d5) == 1, "refused: the file is kept, not deleted as unreadable");
+        short_ram = false;
+        got = sd.fetch(rp, {}, false, 0, t);
+        check(got && got->live.ids == r && t == (int64_t) r.size(), "kept for a later turn: the open admission reads it back");
+        fs::remove_all(d5);
+    }
     // age: a file not written or resumed for max_age is deleted at open
     {
         SessionDir::Options o = opts(dir, id);
