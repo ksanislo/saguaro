@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 
@@ -161,10 +162,34 @@ bool read_ahead_enabled() { return false; }
 void advise_willneed(const void*, uint64_t) {}
 void advise_willneed(int, uint64_t, uint64_t) {}
 #else
+namespace {
+/// The soft RLIMIT_MEMLOCK as `ulimit -l` shows it (KiB / GiB; "unlimited"), for the failure notes: an mlock
+/// that fails under this limit should say the limit it hit rather than only "raise ulimit -l".
+std::string memlock_limit_text() {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_MEMLOCK, &rl) != 0) return "unknown";
+    if (rl.rlim_cur == RLIM_INFINITY) return "unlimited";
+    char buf[64];
+    const uint64_t b = (uint64_t) rl.rlim_cur;
+    if (b >= (1ull << 30)) { std::snprintf(buf, sizeof buf, "%.2f GiB", (double) b / 1073741824.0); return buf; }
+    std::snprintf(buf, sizeof buf, "%llu KiB", (unsigned long long) (b >> 10));
+    return buf;
+}
+std::string gib_text(uint64_t bytes) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.2f GiB", (double) bytes / 1073741824.0);
+    return buf;
+}
+}  // namespace
+
 LockResult lock_resident(void* p, uint64_t bytes) {
     LockResult r;
     if (p == nullptr || bytes == 0) { r.note = "nothing to lock"; return r; }
-    if (mlock(p, bytes) != 0) { r.note = "mlock failed (raise ulimit -l)"; return r; }
+    if (mlock(p, bytes) != 0) {
+        r.note = "mlock failed (raise ulimit -l): the limit it hit is " + memlock_limit_text() +
+                 ", all " + gib_text(bytes) + " stay pageable";
+        return r;
+    }
     r.ok = true;
     r.locked_bytes = bytes;
     r.note = "mlock";
@@ -173,9 +198,17 @@ LockResult lock_resident(void* p, uint64_t bytes) {
 
 LockResult lock_resident_ranges(const std::vector<std::pair<void*, uint64_t>>& regions) {
     LockResult r;
+    uint64_t total = 0;
+    for (const auto& g : regions) total += g.second;
     for (const auto& g : regions) {
         if (g.first == nullptr || g.second == 0) continue;
-        if (mlock(g.first, g.second) != 0) { r.note = "mlock failed (raise ulimit -l)"; r.ok = r.locked_bytes > 0; return r; }
+        if (mlock(g.first, g.second) != 0) {
+            r.note = "mlock failed (raise ulimit -l): the limit it hit is " + memlock_limit_text() + ", " +
+                     gib_text(total > r.locked_bytes ? total - r.locked_bytes : total) + " of " +
+                     gib_text(total) + " stay pageable";
+            r.ok = r.locked_bytes > 0;
+            return r;
+        }
         r.locked_bytes += g.second;
     }
     r.ok = r.locked_bytes > 0;
