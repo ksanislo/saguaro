@@ -178,6 +178,7 @@ bool VmmRange::reserve(uint64_t bytes, int dev) {
     gran_ = d->gran;
     dev_ = dev;
     h_.assign((size_t) n, 0);
+    va_log("reserve", dev, (uint64_t) base_, (uint64_t) n * gran_, va_tag_);   // (SAGUARO_DEBUG_VA)
     return true;
 }
 
@@ -187,6 +188,7 @@ void VmmRange::release() {
     // the runtime tore itself down - the round-8 core is exactly this function's unmap/free calls landing on a
     // null pointer inside the runtime.  At exit, drop the bookkeeping and leave the range to the kernel.
     if (vmm_exiting()) { base_ = 0; h_.clear(); return; }
+    va_log("release", dev_, (uint64_t) base_, (uint64_t) chunks() * gran_, va_tag_);   // (SAGUARO_DEBUG_VA)
     for (int64_t i = 0; i < chunks(); ++i) vmm_chunk_free(unmap(i));
     api().free_va((CUdeviceptr) base_, (size_t) ((uint64_t) h_.size() * gran_));
     base_ = 0;
@@ -234,6 +236,7 @@ VmmChunk VmmRange::unmap(int64_t i) {
     const VmmChunk h = h_[(size_t) i];
     if (api().unmap((CUdeviceptr) (base_ + (uint64_t) i * gran_), (size_t) gran_) != CUDA_SUCCESS) return 0;
     h_[(size_t) i] = 0;
+    va_log("unmap", dev_, (uint64_t) base_ + (uint64_t) i * gran_, gran_, va_tag_);   // (SAGUARO_DEBUG_VA)
     return h;
 }
 
@@ -355,6 +358,7 @@ bool VmmRange::reserve(uint64_t bytes, int) {   // (one device under HIP)
     if (const hipError_t e = hipMemAddressReserve(&p, (size_t) (n * a.gran), 0, nullptr, 0); e != hipSuccess) { fail("hipMemAddressReserve", e); return false; }
     base_ = (unsigned long long) (uintptr_t) p;
     h_.assign((size_t) n, 0);
+    va_log("reserve", a.dev, (uint64_t) base_, (uint64_t) n * a.gran, va_tag_);   // (SAGUARO_DEBUG_VA)
     return true;
 }
 
@@ -365,6 +369,7 @@ void VmmRange::release() {
     // At exit the addresses and chunks are the kernel's; leave them and return with no HIP call.
     if (vmm_exiting()) { base_ = 0; h_.clear(); return; }
     const Api& a = api();
+    va_log("release", dev_, (uint64_t) base_, (uint64_t) chunks() * gran_, va_tag_);   // (SAGUARO_DEBUG_VA)
     for (int64_t i = 0; i < chunks(); ++i) vmm_chunk_free(unmap(i));
     (void) hipMemAddressFree((void*) (uintptr_t) base_, (size_t) ((uint64_t) h_.size() * a.gran));
     base_ = 0;
@@ -415,6 +420,7 @@ VmmChunk VmmRange::unmap(int64_t i) {
     const VmmChunk h = h_[(size_t) i];
     if (hipMemUnmap((void*) (uintptr_t) (base_ + (uint64_t) i * a.gran), (size_t) a.gran) != hipSuccess) { (void) hipGetLastError(); return 0; }
     h_[(size_t) i] = 0;
+    va_log("unmap", dev_, (uint64_t) base_ + (uint64_t) i * gran_, gran_, va_tag_);   // (SAGUARO_DEBUG_VA)
     return h;
 }
 }  // namespace strata::core

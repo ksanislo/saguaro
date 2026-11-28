@@ -806,6 +806,8 @@ int32_t host_pool_make(const std::vector<uint64_t>& per, int64_t pages, int64_t 
     // (prefix mode: nothing is registered yet - the first qsa_host_grow backs and pins the start step, and the
     // state's `host` pointers arrive with it; the arrays' addresses stay the owner's business)
     g_kv_host_reserved += (uint64_t) pages * std::accumulate(per.begin(), per.end(), (uint64_t) 0);
+    // (SAGUARO_DEBUG_VA: the elastic copy's whole host range - backed pieces/prefixes log their own pin/unpin)
+    va_log("reserve", pool->dev, (uint64_t) (uintptr_t) pool->base, pool->total, "kv host copy VA (elastic)");
     std::lock_guard<std::mutex> lk(g_host_mu);
     g_host_pools.push_back(std::move(pool));
     return (int32_t) g_host_pools.size() - 1;
@@ -821,6 +823,7 @@ void host_unpin_locked(HostPool& p, int64_t pages) {
             uint8_t* a = p.base + p.off[i] + (uint64_t) (p.pinned[i] - 1) * kHostPiece;
             (void) cudaHostUnregister(a);
             (void) cudaGetLastError();
+            va_log("unpin", p.dev, (uint64_t) (uintptr_t) a, kHostPiece, "kv host piece");   // (SAGUARO_DEBUG_VA)
             (void) madvise(a, (size_t) kHostPiece, MADV_DONTNEED);
             g_kv_host_bytes -= kHostPiece;
         }
@@ -868,6 +871,8 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
         if (p.d[i] == nullptr) continue;
         (void) cudaHostUnregister(p.base + p.off[i]);
         (void) cudaGetLastError();
+        va_log("unpin", p.dev, (uint64_t) (uintptr_t) (p.base + p.off[i]),
+               kv_host_prefix_bytes(old_backed, p.per[i], 4096), "kv host prefix");   // (SAGUARO_DEBUG_VA)
         p.d[i] = nullptr;
         if (pages < old_backed) {   // P124e review finding 2: unpinning is not releasing - the range is a
                                     // MAP_NORESERVE mapping whose pages STAY populated once touched, so a trim
@@ -900,6 +905,7 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
         if (e == cudaSuccess && e2 == cudaSuccess && d != nullptr) {
             nd[i] = (uint8_t*) d;
             got += bytes;
+            va_log("pin", p.dev, (uint64_t) (uintptr_t) at, bytes, "kv host prefix");   // (SAGUARO_DEBUG_VA)
         } else {
             whole = false;
             if (err != nullptr && *err == cudaSuccess)
@@ -909,7 +915,10 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
             // rollback unregisters only the arrays whose alias arrived, so without this the refused array's run
             // stays registered, uncounted in g_kv_host_bytes - and every later registration at that address
             // fails with it, dooming every grow of this copy to the fallback.
-            if (e == cudaSuccess) (void) cudaHostUnregister(at);
+            if (e == cudaSuccess) {
+                (void) cudaHostUnregister(at);
+                va_log("unpin", p.dev, (uint64_t) (uintptr_t) at, bytes, "kv host prefix (no alias)");   // (SAGUARO_DEBUG_VA)
+            }
             (void) cudaGetLastError();
             break;
         }
@@ -955,7 +964,10 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
                     // alias was refused must not stay registered - the give-back loop below walks the arrays that
                     // ANSWERED an alias (rd != null) and would skip it, poisoning the address for every later step
                     // and every later grow of this copy.
-                    if (e == cudaSuccess) (void) cudaHostUnregister(at);
+                    if (e == cudaSuccess) {
+                        (void) cudaHostUnregister(at);
+                        va_log("unpin", p.dev, (uint64_t) (uintptr_t) at, bytes, "kv host prefix (no alias)");   // (SAGUARO_DEBUG_VA)
+                    }
                     (void) cudaGetLastError();
                     fits = false;
                 }
@@ -1052,13 +1064,17 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
                 const cudaError_t e2 = e == cudaSuccess ? cudaHostGetDevicePointer(&d, a, 0) : e;
                 if (e != cudaSuccess || e2 != cudaSuccess || d != (void*) a) {
                     why = e != cudaSuccess ? e : (e2 != cudaSuccess ? e2 : cudaErrorUnknown);   // (d != a: no alias)
-                    if (e == cudaSuccess) (void) cudaHostUnregister(a);   // (the device address is not the host's)
+                    if (e == cudaSuccess) {
+                        (void) cudaHostUnregister(a);   // (the device address is not the host's)
+                        va_log("unpin", p.dev, (uint64_t) (uintptr_t) a, kHostPiece, "kv host piece (no alias)");   // (SAGUARO_DEBUG_VA)
+                    }
                     (void) cudaGetLastError();
                     failed = true;
                     break;
                 }
                 ++p.pinned[i];
                 g_kv_host_bytes += kHostPiece;
+                va_log("pin", p.dev, (uint64_t) (uintptr_t) a, kHostPiece, "kv host piece");   // (SAGUARO_DEBUG_VA)
             }
         }
         if (!failed) {
@@ -1079,6 +1095,7 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
             for (; p.pinned[j] > had[j]; --p.pinned[j]) {
                 uint8_t* q = p.base + p.off[j] + (uint64_t) (p.pinned[j] - 1) * kHostPiece;
                 (void) cudaHostUnregister(q);
+                va_log("unpin", p.dev, (uint64_t) (uintptr_t) q, kHostPiece, "kv host piece (give-back)");   // (SAGUARO_DEBUG_VA)
                 (void) madvise(q, (size_t) kHostPiece, MADV_DONTNEED);
                 g_kv_host_bytes -= kHostPiece;
             }
@@ -1408,11 +1425,13 @@ uint64_t qsa_slot_budget_add(int dev, uint64_t bytes) {
     }
     return made;
 }
-void qsa_slot_budget_give(int dev, strata::core::VmmChunk h) {
+void qsa_slot_budget_give(int dev, strata::core::VmmChunk h) {   // (SAGUARO_DEBUG_VA: physical chunks carry no VA -
+                                                                  //  they get one where a pool's map_range maps them)
     std::lock_guard<std::mutex> lk(g_slot_mu);
     SlotBudget& b = g_slot_budget[dev];
     b.free.push_back(h);
     ++b.total;
+    va_log("budget+", dev, h, vmm_granularity(dev), "chunk -> slot budget");   // (SAGUARO_DEBUG_VA: handle, no VA yet)
 }
 int64_t qsa_slot_budget_take(int dev, int64_t n, std::vector<strata::core::VmmChunk>& out) {
     std::lock_guard<std::mutex> lk(g_slot_mu);
@@ -1423,6 +1442,7 @@ int64_t qsa_slot_budget_take(int dev, int64_t n, std::vector<strata::core::VmmCh
         b.free.pop_back();
         --b.total;
     }
+    if (k > 0) va_log("budget-", dev, 0, (uint64_t) k * vmm_granularity(dev), "slot budget chunks -> grow");   // (SAGUARO_DEBUG_VA)
     return k;
 }
 int64_t qsa_slot_budget_release(int dev, int64_t n) {
@@ -1433,6 +1453,8 @@ int64_t qsa_slot_budget_release(int dev, int64_t n) {
         for (; (int64_t) out.size() < n && !b.free.empty(); b.free.pop_back()) out.push_back(b.free.back());
         b.total -= (int64_t) out.size();
         b.made = std::max<int64_t>(0, b.made - (int64_t) out.size());
+        if (!out.empty())
+            va_log("budget-free", dev, 0, (uint64_t) out.size() * vmm_granularity(dev), "slot budget chunks -> driver");   // (SAGUARO_DEBUG_VA)
     }
     for (const strata::core::VmmChunk h : out) strata::core::vmm_chunk_free(h);
     return (int64_t) out.size();
@@ -1944,6 +1966,7 @@ int32_t qsa_scores_make(int64_t cells) {
                                                (uint64_t) cells * 4ull);
     std::vector<strata::core::VmmChunk> got;
     strata::core::VmmRoomStat room;   // (the load's room: the relief is not asked yet - nothing to give way for)
+    sp->range.set_va_tag("scores scratch");   // (SAGUARO_DEBUG_VA: the owner in the op lines)
     const bool ok = sp->range.reserve((uint64_t) cells * (uint64_t) sp->unit) &&
                     follow_room(sp->range.device(), scores_need_locked(*sp, follow_start_cells()),
                                 sp->range.granularity(), false, got, room) &&
@@ -2107,6 +2130,33 @@ RopeGrow* yarn_of(const float* cos_tab) {
         if (o.cos == cos_tab) return o.yarn;
     return nullptr;
 }
+// P124e (round 12, manager card B0): keep the KERNEL-REGISTRABLE extent of a grown RoPE table equal to its
+// MAPPED extent.  rope_table_set registers a table with the kernels up to `max_pos`, and the rope kernels
+// read through there (rope_tab_cs indexes row p - min_pos directly); the elastic tables reserve the whole
+// --max-context and back only the prefix their conversations reached, so registering the RESERVED extent let
+// a read step off the mapped prefix into an unmapped VMM chunk - a GPU page fault whose wave retries forever
+// (mortar, 2026-11-27: the 546K read's prompt rope_kernel<true> died 3 s into it, the launch never returned).
+// Every registration of a grown table and every map/trim of one goes through here (g_rope_mu held), so the
+// rows a kernel can reach are exactly the rows that are mapped; a read that races past the backing computes
+// its angle instead of faulting (the read-back gate already refuses such a read - a wrong number is
+// recoverable, a wedged GPU is not).  An ungrown table is registered for its extent as always: it is whole.
+void rope_registry_sync(const RopeGrow& r) {   // (the caller holds g_rope_mu)
+    int dev = -1;
+    if (cudaGetDevice(&dev) != cudaSuccess) { (void) cudaGetLastError(); return; }
+    for (const RopeOwner& o : g_rope_owners) {
+        if (o.dev != dev) continue;   // (the registry is per device: never write another card's entry)
+        if (o.yarn == &r) {           // the card's YaRN-level table: readable rows kRopeYarnOff .. + r.cells
+            strata::kernels::rope_table_set((const float*) r.cos.base(), (const float*) r.sin.base(),
+                                            strata::kernels::kRopeYarnOff + (int) r.cells,
+                                            strata::kernels::rope_scaling(), strata::kernels::kRopeYarnOff);
+            return;
+        }
+        if (!g_rope_rows && o.n_rot == 64 && o.cos == (const float*) r.cos.base()) {   // (2749's gate)
+            strata::kernels::rope_table_set(o.cos, o.sin, (int) r.cells, strata::kernels::rope_scaling());
+            return;
+        }
+    }
+}
 
 constexpr int64_t kRopeBase = 262144, kRopeMargin = 4096;   // backed at load; past the cells asked for (drafts)
 bool rope_grow_on(int64_t max_cells) {
@@ -2152,6 +2202,7 @@ bool rope_map(RopeGrow& r, int64_t cells, const std::function<strata::core::VmmC
         return false;
     }
     r.cells = to;
+    rope_registry_sync(r);   // (B0: what just became readable is what just became mapped)
     return true;
 }
 }  // namespace
@@ -2321,6 +2372,8 @@ int64_t qsa_rope_yarn_trim() {
         std::fprintf(stderr, "saguaro: CUDA%d's YaRN RoPE table given back (%lld positions; no YaRN conversation is live)\n",
                      dev, (long long) r->cells);
         r->cells = 0;
+        rope_registry_sync(*r);   // (B0: the rows just unmapped are no longer kernel-readable; the next
+                                  //  YaRN conversation re-fits them and re-registers through rope_map)
     }
     return n;
 }
@@ -2524,6 +2577,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         };
         for (const uint64_t b : kv_per_slot(s, st.kv_hybrid, st.kv_q4, st.kv_int8)) add(b, p.slots, true);
         rows_idx = add((uint64_t) s.idx_dim * 4, p.pooled_rows, false);
+        spool->range.set_va_tag("slot pool (elastic kv/indexer arrays)");   // (SAGUARO_DEBUG_VA: the owner)
         if (!spool->arr.empty() && !spool->range.reserve(strata::core::slot_layout(spool->arr, slot_G))) {
             std::fprintf(stderr, "saguaro: elastic slots: reserving a slot state's addresses failed\n");
             return 0;
@@ -2548,6 +2602,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         pool->per_slot = per;
         pool->n_slots = p.slots;
         pool->page_size = s.page_size;
+        pool->range.set_va_tag("kv pools (vram-elastic arrays)");   // (SAGUARO_DEBUG_VA: the owner)
         if (!pool->range.reserve(at) || !pool_grow(*pool, g_kv_elastic_init, [] { return (strata::core::VmmChunk) 0; })) {
             std::fprintf(stderr, "saguaro: the elastic K/V could not reserve or map its pools\n");
             return 0;
@@ -2598,6 +2653,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         const uint64_t follow_va = strata::core::slot_layout(fpool->arr, fG);
         const strata::core::DeviceNote follow_va_note("the streamed states' context device addresses (follow pools, --max-context)",
                                                       follow_va);
+        fpool->range.set_va_tag("follow pool (device follow state)");   // (SAGUARO_DEBUG_VA: the owner)
         if (!fpool->range.reserve(follow_va)) {
             std::fprintf(stderr, "saguaro: reserving a state's context device addresses failed\n");
             return 0;
@@ -2638,6 +2694,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         const uint64_t bytes = (uint64_t) max_cells * (s.n_rot / 2) * 4;
         // P124e (round 5, manager card): the grown table's addresses and its first 262144 positions, accounted.
         const strata::core::DeviceNote rope_note("the grown RoPE table (addresses; the trained positions backed)", bytes * 2);
+        r->cos.set_va_tag("rope cos (grown session table)");   // (SAGUARO_DEBUG_VA: the owner in the op lines)
+        r->sin.set_va_tag("rope sin (grown session table)");
         if (!r->cos.reserve(bytes) || !r->sin.reserve(bytes) ||
             !rope_map(*r, kRopeBase - kRopeMargin, [] { return (strata::core::VmmChunk) 0; })) {
             std::fprintf(stderr, "saguaro: SAGUARO_ROPE_GROW: the RoPE table's addresses or first positions failed\n");
@@ -2702,6 +2760,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         }
         g_kv_host_bytes += bytes;
         g_kv_host_reserved += bytes;
+        va_log("pin", -1, (uint64_t) (uintptr_t) h, bytes, "kv host copy (pinned whole)");   // (SAGUARO_DEBUG_VA)
         Cursor hc{d};
         if (st.kv_hybrid) {
             st.host.k_q = hc.take<int8_t>(hrows * s.head_dim);
@@ -2745,6 +2804,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
                 const uint64_t bytes = (uint64_t) max_cells * (s.n_rot / 2) * 4;
                 // P124e (round 5, manager card): its addresses are --max-context-sized too - accounted, no backing yet.
                 const strata::core::DeviceNote yarn_note("the YaRN level's RoPE table (addresses for --max-context)", bytes * 2);
+                r->cos.set_va_tag("yarn cos (YaRN-level table)");   // (SAGUARO_DEBUG_VA: the owner in the op lines)
+                r->sin.set_va_tag("yarn sin (YaRN-level table)");
                 if (!r->cos.reserve(bytes) || !r->sin.reserve(bytes)) {
                     std::fprintf(stderr, "saguaro: SAGUARO_YARN_ELASTIC: the YaRN table's addresses failed\n");
                     return 0;
@@ -2755,13 +2816,18 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
             }
             std::lock_guard<std::mutex> lk(g_rope_mu);
             g_rope_owners.push_back({st.cos_tab, st.sin_tab, (int) s.n_rot, max_cells, dev, y});
-            if (y != nullptr)   // the kernels: rows at kRopeYarnOff + p read it, the plain ones compute their angle
-                strata::kernels::rope_table_set((const float*) y->cos.base(), (const float*) y->sin.base(),
-                                                strata::kernels::kRopeYarnOff + (int) max_cells, strata::kernels::rope_scaling(),
-                                                strata::kernels::kRopeYarnOff);
+            if (y != nullptr)   // the kernels: rows at kRopeYarnOff + p read it, the plain ones compute their
+                rope_registry_sync(*y);   // angle.  (B0: registered for its BACKED rows - none yet - so no
+                                          //  kernel reads an unmapped one before the first YaRN fit)
         }
         if (s.n_rot == 64 && !g_rope_rows)   // the native and prompt-path rope kernels read it (mrope.hpp, SAGUARO_ROPE_TABLE=1)
-            strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
+        {   // (B0 too: a grown plain table is registered for its backed prefix - the trained positions - and
+            //  grows with qsa_rope_grow; an ungrown one is whole, and says so, as its carve always was)
+            std::lock_guard<std::mutex> lk(g_rope_mu);
+            const RopeGrow* pr = rope_grown ? rope_grow_of(st.cos_tab) : nullptr;
+            if (pr != nullptr) rope_registry_sync(*pr);
+            else strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
+        }
     }
     // the page table starts as the IDENTITY, which is the simplest legal mapping and what a caller that does
     // not page at all wants; a streamed state starts with nothing resident, a ring at `block % n_slots`.

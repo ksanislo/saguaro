@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "strata/core/va_debug.hpp"   // SAGUARO_DEBUG_VA (manager card 12b/B1): the op lines
+
 namespace strata::core {
 
 /// A physical chunk: the driver's allocation handle (CUmemGenericAllocationHandle); 0 = none.
@@ -52,6 +54,10 @@ public:
     template <class Take> bool map_range(int64_t lo, int64_t hi, Take take);
     /// Unmaps chunk i and hands back its physical chunk (0 when it was not mapped).
     VmmChunk unmap(int64_t i);
+    /// SAGUARO_DEBUG_VA: who owns this range - the name in every op line ("rope cos", "follow pool", ...).
+    /// Set it BEFORE reserve(): the reserve line carries it too.  A string literal (never freed).
+    void set_va_tag(const char* tag) { va_tag_ = tag; }
+    const char* va_tag() const { return va_tag_; }
 
 private:
     bool map_one(int64_t i, VmmChunk h);
@@ -59,19 +65,27 @@ private:
     /// Readable and writable [lo, hi) (all newly mapped); when that fails they are unmapped and freed again, so no
     /// chunk counts as mapped without access.
     bool commit_run(int64_t lo, int64_t hi);
+    /// (SAGUARO_DEBUG_VA) One "map" line naming [lo, hi) when this call mapped anything (the header side, shared
+    /// by the CUDA and HIP backends; the reserve/unmap/release lines live with their driver calls).
+    void va_note_map(int64_t lo, int64_t hi, int64_t fresh) const {
+        if (fresh <= 0 || base_ == 0) return;
+        va_log("map", dev_, (uint64_t) base_ + (uint64_t) lo * gran_, (uint64_t) (hi - lo) * gran_, va_tag_);
+    }
     unsigned long long base_ = 0;
     uint64_t gran_ = 0;
     int dev_ = -1;
     std::vector<VmmChunk> h_;   // per chunk: its physical chunk, 0 = unmapped
+    const char* va_tag_ = "vmm";   // (SAGUARO_DEBUG_VA: the owner's name; set_va_tag before reserve)
 };
 
 template <class Take> bool VmmRange::map_range(int64_t lo, int64_t hi, Take take) {
     lo = lo < 0 ? 0 : lo;
     hi = hi > chunks() ? chunks() : hi;
     int64_t run = -1;   // access is set once per run of newly mapped chunks (it costs as much as the map)
+    int64_t fresh = 0;  // (SAGUARO_DEBUG_VA: chunks this call mapped - one "map" line names the run)
     for (int64_t i = lo; i < hi; ++i) {
         if (mapped(i)) {
-            if (run >= 0 && !commit_run(run, i)) return false;
+            if (run >= 0 && !commit_run(run, i)) return false;   // (the run came back unmapped: nothing to note)
             run = -1;
             continue;
         }
@@ -79,12 +93,15 @@ template <class Take> bool VmmRange::map_range(int64_t lo, int64_t hi, Take take
         if (h == 0) h = vmm_chunk_new(dev_);
         if (h == 0 || !map_one(i, h)) {
             if (h != 0) vmm_chunk_free(h);
-            if (run >= 0) commit_run(run, i);
+            if (run >= 0) { commit_run(run, i); va_note_map(run, i, fresh); }   // (what landed stays landed)
             return false;
         }
+        ++fresh;
         if (run < 0) run = i;
     }
-    return run < 0 || commit_run(run, hi);
+    const bool ok = run < 0 || commit_run(run, hi);
+    va_note_map(run < 0 ? lo : run, hi, fresh);
+    return ok;
 }
 
 }  // namespace strata::core

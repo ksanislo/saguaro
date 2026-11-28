@@ -3,9 +3,11 @@
 // steps a growing conversation pays for the positions it uses, and the trim that gives RAM back to
 // the expert tier when it is parked.  Pure arithmetic - no GPU, no allocation.
 #include "strata/core/kv_host_growth.hpp"
+#include "strata/core/va_debug.hpp"   // P124e round 12 (card B1): the SAGUARO_DEBUG_VA line
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 using namespace strata::core;
 
@@ -79,6 +81,21 @@ int main() {
           "a prefix registers whole pages");
     check(kv_host_prefix_bytes(UNIT, PER, 4096) == (UNIT * PER + 4095) / 4096 * 4096,
           "the start step's prefix bytes");
+
+    // P124e round 12 (manager card B1): the SAGUARO_DEBUG_VA line - the fault address must fall in exactly
+    // one logged range, so the format names the op, the device, the range and the owner on one line.
+    char buf[256];
+    va_debug_format(buf, sizeof buf, "map", 0, 0x7f9ebba00000ull, 2ull << 20, "yarn cos (YaRN-level table)");
+    check(std::strstr(buf, "map") != nullptr && std::strstr(buf, "0x7f9ebba00000") != nullptr &&
+              std::strstr(buf, "2097152") != nullptr && std::strstr(buf, "yarn cos") != nullptr,
+          "the va line names the op, the range [base, +size) and the owner");
+    va_debug_format(buf, sizeof buf, "unpin", -1, 0, 4096, nullptr);
+    check(std::strstr(buf, "unpin") != nullptr && std::strstr(buf, "dev -1") != nullptr &&
+              std::strstr(buf, "-") != nullptr,
+          "a host op says dev -1 and a null owner prints -");
+    // (the gate itself: env unset here, so va_debug_on() is false and the hooks print nothing - the card's
+    //  run sets SAGUARO_DEBUG_VA=1 and that line is the manager's test of the on side)
+    check(!va_debug_on(), "SAGUARO_DEBUG_VA off by default: every hook is one static-bool test");
 
     std::printf("kv_host_growth_test: %d checks OK\n", checks);
     return 0;

@@ -510,6 +510,7 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int6
     } else if (g_cache_vmm && vmm_available()) {
         // the elastic K/V: every chunk mapped now; the K/V may later take some of them (and give them back)
         auto r = std::make_unique<VmmRange>();
+        r->set_va_tag("expert cache arena (vmm)");   // (SAGUARO_DEBUG_VA: the owner in the op lines)
         if (!r->reserve(want) || !r->map_range(0, r->chunks(), [] { return (VmmChunk) 0; })) {
             char buf[256];
             // P124e (round 6, manager card): the driver's words, never a bare "out of memory" / "no error"
