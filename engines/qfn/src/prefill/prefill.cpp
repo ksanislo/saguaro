@@ -2971,11 +2971,19 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     const auto& stop_cb = job ? job->should_stop : should_stop;
     const auto& layer_cb = job ? job->on_layer_pass : on_layer_pass;   // U5 read heartbeat (output only)
     const float* const* const embd_rows = job ? job->embd_rows : this->embd_rows;
-    // P125j: a STOP taken between a chunk's LAYER passes, not only before the chunk.  Only the solo prompt
-    // path can pause this way: a queued job, a batched chunk or a layer-split stage ends its run in ways
-    // (hand-offs, per-segment callbacks) the saved rows do not cover, and picture rows upload per chunk.
-    // With SAGUARO_LAYER_PAUSE=0 (or no callback set) this is false for every run and nothing below runs.
-    const bool lp_on = !job && hand_in_ == nullptr && next_ == nullptr && !bat && embd_rows == nullptr &&
+    // P125j: a STOP taken between a chunk's LAYER passes, not only before the chunk.  Only a path that owns
+    // its own rows can pause this way: a queued job, a batched chunk or a stage reading handed-off rows ends
+    // its run in ways (hand-offs, per-segment callbacks) the saved rows do not cover, and picture rows
+    // upload per chunk.  A layer split's HEAD qualifies (P125m, the card's --layer-split box): the pause is
+    // taken INSIDE a chunk whose rows have not left this stage - returning ends the run before the chunk's
+    // hand-off and before any later chunk launches, and the chunks already handed on (one per later stage)
+    // go on reading: a stage run never consults should_stop (only the head's is wired), and Prefill::run
+    // drains them (drain_pipeline) before the caller keeps the read.  So every chunk before the paused one
+    // ends fully written through every layer, the paused chunk holds the layers below the saved one, and
+    // the resume feeds its rows back HERE at that layer - the chunk goes down the pipe on its chunk end,
+    // which the later stages are seeing for the first time.  With SAGUARO_LAYER_PAUSE=0 (or no callback
+    // set) this is false for every run and nothing below runs.
+    const bool lp_on = !job && hand_in_ == nullptr && !bat && embd_rows == nullptr &&
                        stop_between_layers != nullptr && layer_pause_wanted();
     for (size_t i = 0; i < std::max<size_t>(1, bsegs.size()); ++i) {
         const core::SessionState& x = bsegs.empty() ? ss : *bsegs[i].ss;

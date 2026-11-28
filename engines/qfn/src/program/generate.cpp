@@ -13029,13 +13029,18 @@ vs.d_skip_usage = gs.d_skip_usage;
                         (long long) o.prefill_chunk, sp.stage_count(),
                         (long long) strata::prefill::Prefill::stream_all_min_tokens(),
                         strata::prefill::Prefill::pipe_setting(),
-                        o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
-                                       " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
-                                       " batch_groups=" + std::to_string(o.batch_groups) +
-                                       (slot_admit ? " slot_admit=1" : "") +
-                                       // SAGUARO_PIPED_MTP: a window holds live slots only, so an idle slot keeps its
-                                       // conversation for its next turn (the server picks slots by what they hold)
-                                       (piped_mtp ? " slot_keep=1" : "")).c_str() : "");
+                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
+                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
+                                        " batch_groups=" + std::to_string(o.batch_groups) +
+                                        (slot_admit ? " slot_admit=1" : "") +
+                                        // SAGUARO_PIPED_MTP: a window holds live slots only, so an idle slot keeps its
+                                        // conversation for its next turn (the server picks slots by what they hold)
+                                        (piped_mtp ? " slot_keep=1" : "") +
+                                        // P125m: a prompt read here steps aside between LAYERS of a chunk (P125j,
+                                        // SAGUARO_LAYER_PAUSE, off with =0): the server may cut a BATCH prompt read
+                                        // by a priority STOP - the pause keeps it with the conversation
+                                        (strata::prefill::Prefill::layer_pause_wanted() ? " layer_pause=1" : "")).c_str()
+                                   : "");
             // the Monitor's "Where the experts live" layout (parity with the maya engines' Qwen path, which names
             // itself the same way): engine_kind=qfn picks TIER_SETS.qfn (serve/web/monitor.js), and tierShares()
             // (serve/web/server.js) reads experts / vram_slots / vram_gb / ram_slots / ram_gb from here and
@@ -21207,7 +21212,13 @@ vs.d_skip_usage = gs.d_skip_usage;
                             e = "a pipelined batch window failed";
                             return false;
                         }
-                        const int64_t q = read_ok && sp.stopped_at() >= 0 ? q0 + sp.stopped_at() : b0;
+                        // P125m: this leg can end three ways: whole (b0), at a chunk for a BYIELD/lend
+                        // (stopped_at), or between two LAYERS on a priority STOP the prefill took mid-chunk
+                        // ("layer paused"): the pause's rows say where it got to, lp_pos + lp_tokens, and
+                        // the run's log says that, not the full piece.
+                        const bool lp_stop = !read_ok && sp.paused_chunk() >= 0;
+                        const int64_t q = lp_stop ? sp.paused_chunk() + sp.paused_tokens()
+                                                  : read_ok && sp.stopped_at() >= 0 ? q0 + sp.stopped_at() : b0;
                         const double read_ms = std::chrono::duration<double, std::milli>(Clock::now() - tc).count();
                         std::string per;
                         for (int k = 0; k < n_pipe; ++k) {
@@ -21226,11 +21237,19 @@ vs.d_skip_usage = gs.d_skip_usage;
                                      (long long) (pipe_rows - rows0),
                                      read_ms > 0.0 ? 1000.0 * (double) (pipe_rows - rows0) / read_ms : 0.0,
                                      per.c_str());
-                        if (!read_ok) {
-                            e = read_err;
-                            return false;
-                        }
-                        // review 4b: the read stopped at this chunk for a pending lend (not a BYIELD).  pipe_drain
+                         if (!read_ok) {
+                             if (lp_stop) {   // P125m: the reader thread's run stopped between two layers
+                                 lp_pos = sp.paused_chunk();        //   (absolute token of the paused chunk's
+                                 lp_layer = sp.paused_layer();      //   start) - the same capture the inline
+                                 lp_tokens = sp.paused_tokens();    //   run lambda does above, so the DONE keep
+                                 lp_chunk = sp.paused_chunk_index();   // arms on this leg too and the next
+                                 // request of the same prompt goes on at lp_layer; without it the rows
+                                 // prefill saved would be dropped (the cancelled-and-kept-nothing path)
+                             }
+                             e = read_err;
+                             return false;
+                         }
+                         // review 4b: the read stopped at this chunk for a pending lend (not a BYIELD).  pipe_drain
                         // above left nothing in flight, so CUDA0 is quiet: run the give / take-back step on it (the
                         // card the read just released), say the hold length, and resume from the next chunk.
                         if (q < b0 && !pipe_inflight() && lend_yield.load(std::memory_order_acquire) &&
