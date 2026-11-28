@@ -7184,12 +7184,14 @@ void decode_greedy(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, in
     //  run before READY; their prompt pass runs before this hook, so trial() commits the request's whole span
     //  there too, and what is committed here is the part the run can still reach, clamped to ctx.  VRAM short
     //  (it should not be, trial pre-committed): out stays empty and the trial drops that request from the
-    //  measurement.  The drafter's own context rows end at the commit (a3): a trial past it runs undrafted)
+    //  measurement.  The drafter's own context rows end at the commit (a3): a trial past it runs undrafted -
+    //  on this step's VMM-backed cards only, where the run can reach past the commit; every other layout
+    //  measures drafting as P125e did)
     std::string gerr;
     // (the run stops at ctx, so nothing past it is ever written: commit up to the ceiling only - an oversized
     //  SAGUARO_IK2_DRAFT_TOKENS must not count chunks the ceiling's range never holds)
     if (!kv_grow(std::min(P + gen, ctx), gerr)) return;
-    if (drafter && P + gen > ik2::draft::context_rows(g_kv_commit)) drafter = nullptr;
+    if (g_kv_vmm && drafter && P + gen > ik2::draft::context_rows(g_kv_commit)) drafter = nullptr;
     out.push_back(anchor);
     while ((int) out.size() < gen && P < ctx) {
         lk.append(anchor);
@@ -11026,8 +11028,11 @@ int main(int argc, char** argv) {
             //  figures - STAT draft_acc / draft_off, DONE's kept and offered - this request's drafts)
             // (a3: the drafter's context rows are laid out for the committed start step, not for the whole ceiling
             //  its requests can now reach (the drafter's own growth is not part of this step): a request that may
-            //  write past the commit runs without drafting - the answers are the same, its tokens the plain ones)
-            const bool spec_rows = !drafter || ids.size() + (size_t) max_new <= (size_t) ik2::draft::context_rows(g_kv_commit);
+            //  write past the commit runs without drafting - the answers are the same, its tokens the plain ones.
+            //  Only this step's VMM-backed cards reach past the commit at all - elsewhere the rows hold every
+            //  request the guard above admits, so drafting is on as it was before the step)
+            const bool spec_rows = !g_kv_vmm || !drafter ||
+                                   ids.size() + (size_t) max_new <= (size_t) ik2::draft::context_rows(g_kv_commit);
             const bool req_spec = spec_on && spec_key != 1 && spec_rows;
             const int req_wmax = spec_key >= 2 ? std::min(spec_key, kBlockMax) : kBlockMax;
             const uint64_t kept0 = sctl.kept(), offered0 = sctl.offered();
@@ -11415,13 +11420,15 @@ int main(int argc, char** argv) {
     }
     if (g_depth + (int) prompt.size() + gen > g_kv_run) die("prompt + gen past the context");
     {   // (a3: the CLI run writes positions [0, depth + prompt + gen) - their chunks are committed now, before
-        //  the prompt's first pass (at load, so a failure ends the run with the load's exit code).  The drafter's
-        //  context rows end at the committed start step: a run reaching past it goes on without the drafter)
+        //  the prompt's first pass (at load, so a failure ends the run with the load's exit code).  The drafter
+        //  drop below: only where the run can reach past the commit at all, this step's VMM-backed cards)
         std::string gerr;
         if (!kv_grow(g_depth + (int) prompt.size() + gen, gerr))
             die("the elastic K / V could not grow for this run: " + gerr + " - a smaller --tokens/--gen or --ctx");
     }
-    if (drafter && g_depth + (int) prompt.size() + gen > ik2::draft::context_rows(g_kv_commit)) {
+    // (the same run-past-the-commit drop as the serve requests, and for the same reason, on this step's
+    //  VMM-backed cards only - every other layout drafts as before the step)
+    if (g_kv_vmm && drafter && g_depth + (int) prompt.size() + gen > ik2::draft::context_rows(g_kv_commit)) {
         std::printf("drafting off: the drafter's context rows hold %d positions, this run reaches %d (plain tokens)\n",
                     ik2::draft::context_rows(g_kv_commit), g_depth + (int) prompt.size() + gen);
         drafter = nullptr;
