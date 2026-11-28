@@ -179,8 +179,8 @@ class Fit(unittest.TestCase):
     def test_a_24_gb_card_holds_it_alone(self):
         lay = F.layout([t4(0), t4(1, 24.0, "86", "NVIDIA GeForce RTX 3090")])
         self.assertEqual(([g["index"] for g in lay["gpus"]], lay["resident"], lay["measured"]), ([1], True, False))
-        self.assertEqual(lay["context"], 131072)                # (18.3 GiB + 4 GiB of F16 cache in 23.5)
-        self.assertEqual(F.big_context(24.0, "fp8"), 262144)
+        self.assertEqual(lay["context"], 262144)                # (elastic start: 18.3 + the committed 1 GiB of F16
+        self.assertEqual(F.big_context(24.0, "fp8"), 262144)    #  cache in 23.5; the ceiling costs ~0 until used)
         self.assertEqual(F.speeds(lay), "")                     # (nothing claimed for a card not measured)
         self.assertNotIn("SAGUARO_IK2_ROOM_MB", lay["env"])
 
@@ -198,12 +198,14 @@ class Fit(unittest.TestCase):
 
     def test_upstream_figures(self):
         """Upstream's figures (an RTX 3090, the FP8 cache): 262,144 with every expert in VRAM; the trained million
-        keeps the cache on the card (the experts leave first) - on AMD too."""
+        plans resident too since the elastic start step (P125e a1): the experts stay and the cache is laid out for
+        the committed 32768 - on AMD too."""
         self.assertEqual(F.recommended_context(24.0, "fp8"), 262144)
         self.assertTrue(F.plan(24.0, 262144, "fp8")["resident"])
         p = F.plan(24.0, 1048576, "fp8")
-        self.assertEqual((p["layout"], p["kv_streamed"]), ("offload", False))
-        self.assertEqual(F.plan(24.0, 1048576, "fp8", hip=True)["layout"], "offload")
+        self.assertEqual((p["layout"], p["kv_streamed"]), ("resident", False))
+        self.assertEqual(p["kv_committed"], 32768)              # (the ceiling above the commit arrives with step 2)
+        self.assertEqual(F.plan(24.0, 1048576, "fp8", hip=True)["layout"], "resident")
         self.assertEqual(F.plan(0, 262144)["resident"], True)          # (VRAM not read: the engine measures)
 
     def test_plan_two(self):
