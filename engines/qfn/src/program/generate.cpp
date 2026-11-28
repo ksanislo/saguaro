@@ -22691,6 +22691,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                 };
                 const Clock::time_point pl_t0 = Clock::now();
+                // P125s: this reply's STAT measurement starts fresh here, as the serial loop's does at its own start:
+                // without it the first line after an idle gap would divide the reply's few tokens by the whole gap.
+                if (o.batch == 0) bstat_reset();
                 for (int st = 0; st < 2; ++st)
                     for (int par = 0; par < 2; ++par) g_pl_diag.v[st][par] = PV[st][par];
                 strata::core::diag_pipeline_fn().store(&pl_diag_print);
@@ -22930,6 +22933,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     dec_T += A.T;
                     const bool nf = nonfinite_hit(V1(A), "decode");   // #879: none of its tokens goes out
                     bool eos = false;
+                    const int64_t pl_prod0 = produced_n;   // the tokens this window emits: the solo STAT line's denominator
                     for (int i = 0; !nf && i <= a && produced_n < max_new && !eos; ++i) {
                         std::printf("T %d\n", (int) outp[(size_t) i]);
                         strata::core::progress_beat();
@@ -22938,6 +22942,15 @@ vs.d_skip_usage = gs.d_skip_usage;
                         eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outp[(size_t) i]) != o.eos_ids.end();
                     }
                     std::fflush(stdout);
+                    // P125s: the pipelined solo loop is a solo decode path too - the Monitor's "where the experts
+                    // live" card must fill in beside a --pipeline-windows reply as it does beside the serial one.
+                    // Same counters, same once-a-second cadence, same function (the serial loop's call below).
+                    if (o.batch == 0) {
+                        bstat_toks += produced_n - pl_prod0;
+                        bstat_off += A.T - 1;   // (the window's rows are drafts: pipelined replies have no merged one)
+                        bstat_acc += a;
+                        batch_stat_line(1);   // one active slot (this request)
+                    }
                     if (nf) finish = "nonfinite";
                     else if (eos) finish = "stop";
                     else if (stop_req.load()) finish = "cancel";
