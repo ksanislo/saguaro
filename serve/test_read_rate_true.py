@@ -370,16 +370,20 @@ class CardTrueReadout(Base):
     prefill_tok_s_mean column, which gives each cut's engine ms (value / mean: 6,480, 8,387,
     10,317, 12,257, 14,199, 16,070 ms) - synthesized into RHB beats at the engine's ~4/s cadence
     (done = whole cuts done, pos0/chunk = the cut in flight, pass = its fraction by the engine's
-    own run clock) and cut-end BRP steps whose new_read lags the share the beats already booked
-    (the cut's whole count 13,824 lands below the booked 13,900), closing with the BRA that carries
-    the read's last mean.  That fall below the booked share used to fire _note_read's restart
-    branch (a retry/slice signal): read_pos, the interval, engine_t0 and the pair all reset
-    mid-read and the readout became (tokens since the false restart) / (the ~0.47 s since it) -
-    4,608 / 0.466 = 9,881 at 10.66 s.  The fixed readout is cumulative tokens read / time since
-    THIS read started: never blank or 0 after the read's first RHB, never over 1.25 x 1,580 on
-    this read, closing within 10 % of 1,580 (the client's figure), the read never re-based
-    (read_pos never steps down, the open interval is never re-opened), and the peak it feeds
-    (the same readout, windows >= 5 s) stays under 1.25 x 1,580."""
+    own run clock) and cut-end BRP steps carrying the engine's cumulative figure, closing with
+    the BRA that carries the read's last mean.  (Round 8 nit - this docstring kept the fall
+    causation after the report corrected it: with PASSES = 60 and every beat strictly before its
+    cut end the booked share maxes ~77 tokens BELOW each cut, so no BRP step lands under read_pos
+    and the replay produces NO fall - the monotone / never-re-opened gates pass because nothing
+    falls, and the capture itself held no RHB lines: the 9,881's exact cause stays unproven
+    (review round 5, P1).  A whole-cut step that DID fall below the booked share used to fire
+    _note_read's restart branch (a retry/slice signal): read_pos, the interval, engine_t0 and the
+    pair all reset mid-read and the readout became (tokens since the false restart) / (the
+    ~0.47 s since it) - 4,608 / 0.466 = 9,881 at 10.66 s.)  The fixed readout is cumulative
+    tokens read / time since THIS read started: never blank or 0 after the read's first RHB,
+    never over 1.25 x 1,580 on this read, closing within 10 % of 1,580 (the client's figure),
+    the read never re-based (read_pos never steps down, the open interval is never re-opened),
+    and the peak it feeds (the same readout, windows >= 5 s) stays under 1.25 x 1,580."""
 
     FIXTURE = ROOT / "serve" / "fixtures" / "card-rc2-read-rate-timeline.txt"
     TOTAL = 27299                 # prompt_total on the timeline
