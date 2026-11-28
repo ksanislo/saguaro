@@ -613,6 +613,47 @@ class CounterFallsRestartOrCorrectDown(Base):
         pk = self.svc.totals.get("peak_prefill")                   # (row()'s metrics ran the live readout:
         self.assertTrue(pk is None or pk["tok_s"] < 1000, f"peak_prefill {pk}")   #  a peak from it too)
 
+    def test_the_restart_exclusion_survives_the_next_admission_hook(self):
+        """P124v2 review round 8 (P1, the blocker, re-deriving round 7): round 6's exclusion release in
+        _read_start rests on the premise that the hook does NOT zero read_leg_ms - true only while the
+        span was not JUST zeroed by the restart branch.  _admission_wait fires _read_start on EVERY
+        admission (serve/server.py:9907-9909, the hook installed at :6326), so the next admission of a
+        retried read - its slice's next leg, or a retried read's fresh admission - released the
+        exclusion while the span still stood zeroed: the abandoned attempt's 9,600 tokens went back
+        into the numerator without their time (the gate test's exact shape, this hook fired between the
+        restart and the retry's steps: 3,500..1,500 tok/s where the engine says 300, pre-fix), and
+        _prefill_tok_s feeds that to peak_prefill (read_eng_n >= PEAK_MIN_READ_TOKENS over the retry's
+        pair).  The exclusion now survives the hook: it and the closed intervals it counts against
+        both outlive _read_start, and min(excl, closed) keeps it coherent as they prune - without a
+        restart it is 0 anyway, so a plain slice leg is unchanged."""
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        for k in range(1, 25):                           # 24 s of RHB beats at 400 tok/s: 9,600 tokens
+            eng.feed(7, f"RHB rid=0 stage=read done={400 * k} new=40000 reused=0 pass=1/40 "
+                        f"ms={k * 1000} stage_ms=0 slot=7")
+            self.assertIsNone(eng.step(it))
+            self.tick()
+        eng.feed(7, "BRP 7 600 40000 25200 300.0 new_read=600 read_ms=2000.0 stage_ms=0")   # the retry:
+        self.assertIsNone(eng.step(it))                  #  600 under the live beat's done=9,600: restart
+        self.assertEqual(self.svc._read_counted(stat), 10200)      # (history keeps both attempts: 9,600 + 600)
+        self.svc._read_start(stat)                       # the NEXT admission of this request (exactly
+        self.assertGreater(stat.read_count_reset, 0,     #  what tls.on_read_start calls for a slice leg
+                           "the admission released the restart exclusion")
+        for k in range(1, 7):                            # the retry runs on at 300 tok/s (BRP steps)
+            eng.feed(7, f"BRP 7 {600 + 300 * k} 40000 {25200 + k * 1000} 300.0 "
+                        f"new_read={600 + 300 * k} read_ms={2000 + k * 1000}.0 stage_ms=0")
+            self.assertIsNone(eng.step(it))
+            self.tick()
+            r = self.svc._own_read_rate(stat, self.t[0], self.svc._read_counted(stat))
+            self.assertLess(r, 1000.0, f"retry step {k} after restart + admission: readout {r} - the "
+                                       "released exclusion put the abandoned attempt back in the numerator")
+        self.assertAlmostEqual(r, 300.0, delta=50.0)     # (the engine's own: 2,400 tokens / 8.0 s = 300)
+        self.assertLess(self.row()["prefill_tok_s"], 1000)        # the chat row shows the fixed readout
+        pk = self.svc.totals.get("peak_prefill")
+        self.assertTrue(pk is None or pk["tok_s"] < 1000, f"peak_prefill {pk}")   # (a peak from it too)
+
 
 class SplitReadFollowsEngineFigure(Base):
     """P124v2 review round 5 (P2): a two-card layer split (each card half the layers, 78 passes each), one

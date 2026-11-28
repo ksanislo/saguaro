@@ -3159,7 +3159,9 @@ class RequestStat:
         self.read_leg_ms = 0.0                          # P124v2: the read's closed legs' wall time (ms) so far
         self.read_count_reset = 0                       # P124v2 round 6 (review P1): the tokens a mid-read
         #  restart dropped from the readout's NUMERATOR - the span restarted with the attempt (read_leg_ms
-        #  zeroed, engine_t0 moved), so its counted tokens restart with it; _read_counted keeps them as history
+        #  zeroed, engine_t0 moved), so its counted tokens restart with it; _read_counted keeps them as
+        #  history; _read_start does NOT release it (round 8, P1: the next admission of the SAME request
+        #  stands on the restarted span - the exclusion and the closed legs it counts against age together)
         # U5 read heartbeat (PLAN-u5-read-heartbeat): the engine's last RHB report of the read in flight - stage
         # (staging the reused prefix from RAM, or reading new tokens), done/new (new tokens done of total),
         # reused, the rate over the last heartbeat interval and when it arrived (consumers ignore a stale one)
@@ -4536,7 +4538,9 @@ class Service:
         engine): its counted tokens over the time since the engine took it, as before - drained to
         0 once nothing has landed for a full window.  After a mid-read restart the NUMERATOR
         re-baselines with the span (round 6, P1): the abandoned attempt's counted tokens stay in
-        _read_counted as history and never divide the new read's span."""
+        _read_counted as history and never divide the new read's span - and the exclusion
+        SURVIVES the next admission hook (round 8, P1: _read_start fires on every
+        _admission_wait; clearing it there let those tokens back over the restarted span."""
         excl = getattr(st, "read_count_reset", 0) or 0   # (P124v2 review round 6, P1: the restart branch
         if excl:                                         #  zeroed read_leg_ms and moved engine_t0 - the
             closed = sum(r[3] or 0 for r in self.reads   #  span restarted with the attempt; its counted
@@ -4594,9 +4598,19 @@ class Service:
             #  _note_read belt keys on its done/chunk; both belong to the interval that just closed)
             stat.read_share_unit, stat.read_split_share = None, False   # (round 5: a fresh read shares its units
             #  again until a split's two cards show themselves on it)
-            stat.read_count_reset = 0                   # (round 6, P1: this hook does NOT zero read_leg_ms -
-            #  the closed legs' wall time stands in the span - so their counted tokens stand in the numerator
-            #  too; the exclusion belongs to the restart that zeroed the span, and it dies with that signal)
+            #  (round 8, P1: read_count_reset is NOT cleared HERE - round 6's release re-opened
+            #  round 6's own spike.  This hook fires on EVERY _admission_wait (9907-9909, the
+            #  thread-local installed at :6326): the next admission of a read whose span the
+            #  restart branch JUST zeroed (a retry's or a slice's next leg) put the abandoned
+            #  attempt's counted tokens back over a span that no longer holds their time -
+            #  3,500..1,500 tok/s on a 300 tok/s retry (the round-6 gate's own shape with this
+            #  hook between restart and steps, scratch probe), and _prefill_tok_s feeds that
+            #  to peak_prefill (read_eng_n >= PEAK_MIN_READ_TOKENS over the retry's pair).
+            #  Without a restart the exclusion is 0, so a plain slice leg is unchanged; with
+            #  one it stays coherent across this hook: the snapshot and the closed intervals
+            #  it counts against both survive it, and min(excl, closed) tracks their pruning -
+            #  what ages out with the history then reads LOW, never the spike: the pair floor
+            #  keeps the readout under the engine's own figure.)
             self._read_open(stat, now)
 
     def _note_read_safe(self, *a):
