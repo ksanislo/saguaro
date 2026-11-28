@@ -290,12 +290,11 @@ uint64_t session_host_trim(SessionState& s, int64_t cells) {
     uint64_t n = 0;
     for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j) {
         n += qsa_host_trim(s.qsa_states[s.qsa_ord0 + j], cells);
-        qsa_follow_trim(s.qsa_states[s.qsa_ord0 + j], cells);   // P124e round 4 (device bytes back to the driver,
-    }                                                          // not counted as pinned RAM given back)
-    if (s.host_follow != nullptr) {
-        n += qsa_host_trim(*s.host_follow, cells);
-        qsa_follow_trim(*s.host_follow, cells);
+    // 1.2.4-pre crash (mortar, the fatal-signal stack: qsa_follow_trim <- session_host_trim <- solo_host_trim): the HOST
+    // copies only - the solo session's device follow state may still be named by the VRAM ring's residency map
+    // (generate.cpp solo_host_trim's own rule); its device pools are trimmed with a state reset (session.cpp ~227-249).
     }
+    if (s.host_follow != nullptr) n += qsa_host_trim(*s.host_follow, cells);
     qsa_scores_trim(s.scores_elastic, cells);
     return n;
 }
