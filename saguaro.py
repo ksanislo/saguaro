@@ -8707,6 +8707,21 @@ QFN_METAL_OVERHEAD_GB = 12.0 * 1.073741824         # prompt buffers, K/V, the hy
 QFN_METAL_SHARE = 0.75                             # Metal's recommendedMaxWorkingSetSize, conservatively
 QFN_METAL_MTP_FROM_GB = 96
 QFN_METAL_CONTEXTS = [16384, 32768, 65536, 131072, 262144]
+# A streaming Mac's expert arena, set by the setup: the engine's own sizing reads macOS's free memory at the start, which
+# on a 32 GB M2 Max with apps closed gave 3.8 GB (IQ3_S: 7.7 tok/s) where 12 GB ran at 15 and 15 GB at 13-19 tok/s with
+# no swapping while it answered.  Metal's share of the memory, less what the process holds beside the arena (measured
+# on that Mac: the dense weights, K/V at 32K, the prompt buffers) and QFN_METAL_ARENA_SPARE_GB for macOS and its apps.
+QFN_METAL_HELD_GB = {"gsq-iq3_s": 7.0, "ud-q4_k_xl": 10.5}
+QFN_METAL_ARENA_SPARE_GB = 6.0
+
+
+def qfn_metal_arena_gb(quant: str, ram_gb: float) -> float | None:
+    """The streamed arena (GB, as SAGUARO_METAL_ARENA_GB reads it) for a Mac of ram_gb GiB; None: under 4 GB, the
+    engine's own sizing."""
+    gb = ram_gb * 1.073741824 * QFN_METAL_SHARE - QFN_METAL_HELD_GB[quant] - QFN_METAL_ARENA_SPARE_GB
+    if ram_gb >= 64:   # (Strata's rule from 64 GB: the whole footprint under 60% of the RAM - a bigger arena compressed
+        gb = min(gb, ram_gb * 1.073741824 * 0.6 - QFN_METAL_HELD_GB[quant])   #  itself and tripped the watchdog)
+    return round(gb, 1) if gb >= 4 else None
 
 
 def qfn_metal_streams(quant: str, ram_gb: float) -> bool:
@@ -8829,7 +8844,13 @@ def set_up_qfn_metal(a, prev: dict, pc: dict) -> Path | None:
     if stream:
         args += ["--suffix-draft", "0"]
     args += ["--max-context", str(ctx), "--mmap-experts", "--session-dir", str(var / "sessions")]
-    env = {"SAGUARO_METAL_STREAM": "1" if stream else "0", **(old.get("env") or {}), **parse_env(a.env)}
+    arena = qfn_metal_arena_gb(quant, ram) if stream else None
+    env = {"SAGUARO_METAL_STREAM": "1" if stream else "0",
+           **({"SAGUARO_METAL_ARENA_GB": str(arena)} if arena else {}),
+           **(old.get("env") or {}), **parse_env(a.env)}    # (a setup again keeps the env before - an arena set by hand too)
+    if arena:
+        ok(f"expert arena: {env.get('SAGUARO_METAL_ARENA_GB')} GB of the unified memory for the most-used experts "
+           f"(SAGUARO_METAL_ARENA_GB in the config's env; more is faster while macOS does not swap)")
     if int(platform_mac_major() or 26) < 26:           # (MetalPerformancePrimitives: macOS 26 - docs/METAL.md)
         for k, v in (("SAGUARO_METAL_PROMPT", "window"), ("SAGUARO_METAL_PROMPT_GEMM", "0"), ("COOP_K4", "0")):
             env.setdefault(k, v)
