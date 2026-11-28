@@ -1,42 +1,25 @@
-# MANAGER: FIX-FIRST round 12 (card, mortar, 2026-11-27 16:38-16:44 MST, commit f9ccea2eb = dev merged in, 57fac6ad8)
-Evidence: scratch/r12-merged-evidence.txt. Step 1 (merge dev) is DONE and verified. Two problems, fix BOTH, commit each:
-
-A. A MERGE REGRESSION - the load is no longer elastic in RAM (the release blocker's own promise):
-     --max-context 262144:  resident RAM mode: 67.90 GiB of experts in RAM, 30K read 38.92 s
-     --max-context 1048576: resident RAM mode: 30.77 GiB of experts in RAM, 30K read 46.66 s   (-37 GiB, +20 %)
-   Before the merge (db3373729) both were 68.00 GiB. A P124x rule from dev (the resident-budget margin / the
-   reserve floor / the swap-voids-the-credit release - see engines/qfn and docs P124x) sizes its RAM headroom from
-   --max-context (the reserved K/V), not from what is BACKED. Under elastic K/V the host copy starts at one 32768-cell
-   step and grows by giving RAM back from the experts when a conversation actually grows. Fix: every P124x margin
-   counts the BACKED / committed K/V (plus the one growth step it runs ahead), never the ceiling; growth past it takes
-   RAM from the experts through the give-back path. FIX-REPORT: the rule (file:line), before/after numbers at both
-   contexts from a unit test of the budget. P124x's mortar protections (no swap, no OOM) must still hold.
-
-B0. NEW (manager, 2026-11-27 ~16:52 MST, serialised HIP: AMD_SERIALIZE_KERNEL=3 + HIP_LAUNCH_BLOCKING=1 +
-    AMD_LOG_LEVEL=3, eager loading, the merged build): the LAST kernel launched before the 546K read stopped - its
-    launch never returned - is the prompt path's RoPE:
-      hipLaunchKernel ( 0x2a17678, {20480,1,1}, {32,1,1}, ... )  ShaderName : void
-      strata::prefill::(anonymous namespace)::rope_kernel<true>(float*, long, long, long, long, float, float, float, ...)
-    (the kernel before it, rms_rows_kernel, returned). So the reader of the unmapped page is the prompt RoPE reading
-    the RoPE / YaRN table rows (mrope.hpp's rope_tab_cs: t.cos + (p - t.min_pos) * 32 + pair). The log says "CUDA0's
-    YaRN RoPE table covers 557056 positions now (was 0)" - check that the rows the read's positions need are really
-    MAPPED at the moment rope_kernel runs (rope_map's backing vs the positions of THIS chunk; the YaRN table vs the
-    plain one; the <true> variant = which table; a grow that ran on another device/context; a later trim
-    (qsa_rope_yarn_trim) or a give that unmapped rows still needed; the 2 MiB granule rounding at the table's end).
-    Fix the backing so every row a kernel can read is mapped first. Then B1 only if this does not explain it.
-B. THE 546K STALL IS A GPU PAGE FAULT (dmesg on mortar, scratch/r12-dmesg.txt), 3 s into the read:
-     amdgpu: [gfxhub] page fault ... Process saguaro-qfn pid 2129188 ... in page starting at address 0x00007f9ebba01000
-     GCVM_L2_PROTECTION_FAULT_STATUS:0x0080113B  Faulty UTCL2 client ID: TCP (0x8)  MORE_FAULTS 0x1  MAPPING_ERROR 0x1  RW 0x0
-   A compute kernel READ an UNMAPPED page (4 KiB into a 2 MiB granule = one VMM chunk not mapped) and the wave retries
-   forever -> "host idle", the watchdog. DO THIS FIRST, in this order:
-   B1. SAGUARO_DEBUG_VA=1: one stderr line for EVERY VMM reserve / map / unmap / release and every pinned host register /
-       unregister (cuMemAddressReserve/hipMemAddressReserve, cuMemMap/hipMemMap, the K/V host pieces, the expert-cache
-       chunks, the device follow state, the rope/YaRN rows, the staging loan, the slot budget's chunks): the VA range
-       [base, base+size), what it is (owner + index), and the op. Off by default; cheap; commit it first.
-   B2. Ask the manager (FIX-REPORT line "MANAGER: RUN B2") to run the 546K card with SAGUARO_DEBUG_VA=1 +
-       AMD_SERIALIZE_KERNEL=3 + AMD_LOG_LEVEL=3: the fault address then falls in exactly one logged range, and the last
-       kernel launched before the dmesg time is the reader. Then fix the missing grow-before-use (or the unmap-while-used).
-   Old notes on the stall (superseded): host idle 78848 ms, the GPU rang 0, watchdog main::lambda #75; eager loading +
-   P124x's 1024 MiB ROCm reserve did not change it.
-Then steps 2-4 of the previous card still apply if needed (runtime reserve, kernels ready early, the host_res-in-loan
-writer). Build ONLY QFN (tools/qfn/build.sh <new dir under scratch/>, QFN_GGML_DIR=/data/llm/strata-main/third_party/llama.cpp). No GPU.
+# MANAGER: FIX-FIRST round 13 (card, mortar, 2026-11-27 21:59-22:16 MST, commit d1c28b199)
+PASS so far:
+- A (1dc74054a) WORKS: --max-context 262144 vs 1048576 now both 68.00 GiB of experts in RAM, 30K read 35.5 / 38.8 s.
+- The 546K read with HIP_ENABLE_DEFERRED_LOADING=0 + SAGUARO_DEBUG_VA=1 (scratch/r13-ram-evidence.txt): NO GPU page
+  fault this time (dmesg's last fault is 16:52) and the read ran 12 min to 491,520 of 546,065 tokens (90 %).
+FAIL - the read then STALLED for lack of RAM (no fault, no crash until the watchdog):
+  22:03:55  "KV streaming: the host copy backs 546148 cells now (8.00 GiB pinned for K/V in all)" - the host K/V grows to
+            the whole request at its admission (+8 GiB pinned within 1 s)
+  22:03:52  "resident RAM mode: 68.00 GiB of experts in RAM (page-locked)" - and it STAYS 68 GiB: no RAM give-back line
+            anywhere in the run
+  22:15:09  "memory: 88039 MiB resident, 736 MiB in swap, 2937 MiB RAM available" (the memory guard's floor is
+            2560 MiB) - progress stuck at 491,520 from 725 s on, then the watchdog.
+The elastic promise has a RAM side: when a conversation's host K/V (and its read's host buffers) grow, the experts
+pinned in RAM give the same amount back (unpin + drop the coldest experts' RAM copies, which then come from the file
+tier) BEFORE the growth pins, so RAM stays above the guard's floor and nothing swaps. A (the start sizes) is right;
+the give-back on growth is missing (or never fires on this rig: resident RAM mode, --resident-budget-gib).
+Fix (commit each):
+1. FIX-REPORT: the growth path of the host K/V (kv_host_growth / session_host_fit) and of the read's host buffers -
+   where it should ask the resident arena for RAM back (file:line), and why it did not here.
+2. Make it so: each growth asks the arena for (bytes it will pin + margin) first; the arena releases its coldest
+   experts' pinned RAM (they fall back to the file tier, like the GPU cache gives VRAM back); one log line per
+   give-back ("resident RAM gives N GiB back for the context: M GiB of experts left"). Refuse cleanly (no-RAM ERR) only
+   when the arena is at its floor. Never swap.
+3. A unit test of the RAM budget: 96 GB box, 68 GiB arena, a 546K conversation -> the arena shrinks by ~8 GiB + margin.
+Card after: load/speed, 40K, 546K with the guard on - the 546K must answer (needle "7319" found), no swap.
