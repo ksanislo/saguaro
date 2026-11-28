@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace strata::core;
@@ -14,6 +16,26 @@ void check(bool value, const char* description) {
     ++checks;
     if (!value) { std::fprintf(stderr, "FAIL: %s\n", description); std::exit(1); }
 }
+// PLAN-p124y2 (review MEDIUM-4): this module must COMPILE against the pre-fix header too, so the new block's
+// pre-fix red is a runtime failure, not a compile error: the retain-refusal checks use only the long-standing
+// API (retain/retained_bytes/take_reuse), and a direct external_kv() probe runs only where the cache has it -
+// through a DEPENDENT name, so a cache without it instantiates the empty half instead of failing to build.
+template<class C, class = void> struct has_external_kv : std::false_type {};
+template<class C>
+struct has_external_kv<C, std::void_t<decltype(C::external_kv(std::declval<const std::vector<ConversationKv>&>()))>>
+    : std::true_type {};
+template<class C>
+std::enable_if_t<has_external_kv<C>::value>
+external_kv_probes(const std::vector<ConversationKv>& alias_kv, const std::vector<ConversationKv>& view_kv,
+                   const std::vector<ConversationKv>& owned_kv) {
+    check(C::external_kv(alias_kv), "an adoption alias is detected as external");
+    check(C::external_kv(view_kv), "a file-mapping view is detected as external");
+    check(!C::external_kv(owned_kv), "owned K/V is not external");
+}
+template<class C>
+std::enable_if_t<!has_external_kv<C>::value>
+external_kv_probes(const std::vector<ConversationKv>&, const std::vector<ConversationKv>&,
+                   const std::vector<ConversationKv>&) {}
 SavedConversation image(std::initializer_list<int32_t> ids, bool cvec = true) {
     SavedConversation s;
     s.live.ids = ids;
@@ -700,6 +722,46 @@ int main() {
         check(c.put(std::move(pinned), 0, 50.0) && c.list().back().keep && !c.drop(c.list().back().serial),
               "a pinned shared prefix is not released");
         check(c.clear() == 4 && c.list().empty() && c.size_live() == 0, "clear empties the marks too");
+    }
+    {   // PLAN-p124y2: a read-only external K/V (a file-mapping view, or a park's adoption alias into its turn
+        // capture) must never enter the reuse pool that a later park continues into. The restore-site whole-image
+        // guard (900c6fd17) already refuses it, but the cache must not trust its caller: retain() refuses it locally,
+        // and a park then simply captures fresh - which is exactly the refused-adopt fallback this branch hunts.
+        auto owned_layer = [](size_t n) {
+            std::vector<ConversationKv> v(1);
+            v[0].k.resize(n, 1);
+            return v;
+        };
+        auto alias_layer = []() {
+            auto owner = std::make_shared<std::vector<uint8_t>>(4096, 9);
+            std::vector<ConversationKv> v(1);
+            v[0].k = ConversationBuffer::alias(owner->data(), owner->size(), owner);   // read-only, charged RAM
+            v[0].v = ConversationBuffer::alias(owner->data(), owner->size(), owner);
+            return v;
+        };
+        auto view_layer = []() {
+            auto owner = std::make_shared<std::vector<uint8_t>>(4096, 7);
+            std::vector<ConversationKv> v(1);
+            v[0].k = ConversationBuffer::view(owner->data(), owner->size(), owner);     // read-only, not charged
+            return v;
+        };
+        ConversationCache cache(1u << 20, 4);
+        const auto alias_kv = alias_layer(), view_kv = view_layer(), owned_kv = owned_layer(64);
+        external_kv_probes<ConversationCache>(alias_kv, view_kv, owned_kv);
+
+        cache.retain(alias_layer(), 16, {}, {1, 2, 3});
+        check(cache.retained_bytes() == 0 && cache.retained_tokens() == 0,
+              "PLAN-p124y2: an adopted (alias) K/V is never retained as the next park's reuse prefix");
+        cache.retain(view_layer(), 16, {}, {1, 2, 3});
+        check(cache.retained_bytes() == 0, "a file-mapped (view) K/V is never retained either");
+        std::vector<std::vector<ConversationKv>> stage;
+        stage.push_back(alias_layer());
+        cache.retain(owned_layer(64), 16, std::move(stage), {1, 2, 3});
+        check(cache.retained_bytes() == 0, "a stage image's aliased K/V refuses the whole reuse, not just its stage");
+        cache.retain(owned_layer(64), 16, {}, {1, 2, 3});
+        check(cache.retained_bytes() > 0 && cache.retained_tokens() == 16, "owned K/V is still retained as before");
+        const auto taken = cache.take_reuse();
+        check(taken.kv.size() == 1 && !taken.kv[0].k.external(), "the reused K/V handed to the park is owned");
     }
     std::printf("conversation_cache_test: %d checks passed\n", checks);
 }

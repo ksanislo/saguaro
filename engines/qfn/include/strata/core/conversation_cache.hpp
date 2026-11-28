@@ -268,13 +268,31 @@ public:
         return n;
     }
 
+    // True when any K/V part of these layers is a read-only external buffer: a session-file mapping's view, or an
+    // adopted park's alias into its turn capture (PLAN-p124a2). A retained K/V is the next park's reuse prefix: a
+    // later capture continues into it, so it must be uniquely owned, writable bytes. This is the invariant the whole-
+    // image guard at the restore site enforces (900c6fd17); making it local here means a partly-external K/V can never
+    // reach reuse_, whatever path hands it to the cache. Refusing is always safe: a park simply captures fresh.
+    static bool external_kv(const std::vector<ConversationKv>& kv) {
+        for (const auto& l : kv)
+            for (const ConversationBuffer* b : {&l.k, &l.v, &l.k_scale, &l.v_scale, &l.pooled})
+                if (b->external()) return true;
+        return false;
+    }
+
     // Retain only the restored K/V buffers, not duplicate running checkpoints.
     // This optimization never evicts a parked conversation to make itself fit.
     // `stage_kv`: with a layer split, the later stages' restored K/V (one per stage), retained with the first's.
     // `ids`: the conversation the K/V belongs to (take_reuse_for refuses it for any other; none: never reused).
+    // An external (read-only) K/V - a file-mapping view or an adoption alias - is refused outright: it is never a
+    // reuse prefix a later park can continue into, and dropping it (rather than storing it to be copied on the next
+    // capture) keeps the reused bytes honestly owned end to end.
     void retain(std::vector<ConversationKv>&& kv, int64_t tokens,
                 std::vector<std::vector<ConversationKv>>&& stage_kv = {}, std::vector<int32_t> ids = {}) {
         reuse_ = {};
+        if (external_kv(kv)) return;
+        for (const auto& k : stage_kv)
+            if (external_kv(k)) return;
         ConversationKvReuse candidate{std::move(kv), tokens, tokens, {}, std::move(ids)};
         for (auto& k : stage_kv) candidate.stages.push_back(ConversationKvReuse{std::move(k), tokens, tokens, {}, {}});
         if (enabled() && bytes_ <= budget_ && candidate.bytes() <= budget_ - bytes_) reuse_ = std::move(candidate);
