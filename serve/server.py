@@ -414,10 +414,10 @@ def priority_age_seconds() -> float:
 
 
 def priority_idle_seconds() -> float:
-    """SAGUARO_PRIORITY_IDLE_S (0): the idle rule (R122) - a low request starts, or resumes after a pause, only
+    """SAGUARO_PRIORITY_IDLE_S (5): the idle rule (R122) - a low request starts, or resumes after a pause, only
     when nothing normal or high runs or waits AND none finished in the last this many seconds (0 = no grace):
     a person's follow-up a few seconds after an answer finds the model where they left it."""
-    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 0.0)   # (30 until 1.2.4, 5 through 1.2.5: 0 with P125j - a prompt read steps aside at its next LAYER, so the grace is not what keeps a follow-up's wait short)
+    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 5.0)   # (30 until 1.2.4, 5 through 1.2.5; P125j's 0 is reverted (round 4): a low read steps aside at its next LAYER only on the SOLO read that keeps its rows - a batch slot's read is never cut (Service._sliced: keeps_stopped_read and not batch) and the engine arms the pause only where it captures it - so the grace is again what keeps a follow-up's wait short; set 0 by hand where the cut read works)
 
 
 class FairLock:

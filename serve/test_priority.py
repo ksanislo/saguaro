@@ -2119,8 +2119,10 @@ class ClosingTheOtherWrappersClosesTheirRun(unittest.TestCase):
 
 
 class IdleGraceDefault(unittest.TestCase):
-    def test_the_default_grace_is_zero(self):
+    def test_the_default_grace_is_five(self):
         from serve.server import priority_idle_seconds
         with unittest.mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SAGUARO_PRIORITY_IDLE_S", None)
-            self.assertEqual(priority_idle_seconds(), 0.0)   # (1.2.4: 30 -> 5; P125j: 0 - reads pause between layers)
+            # (1.2.4: 30 -> 5; P125j briefly 0 - the layer pause works only on the read that keeps its
+            #  rows, so the grace is back to 5 until that covers every lane; the card script sets 0 itself)
+            self.assertEqual(priority_idle_seconds(), 5.0)

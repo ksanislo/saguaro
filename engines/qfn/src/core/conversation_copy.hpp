@@ -1,6 +1,7 @@
 #pragma once
 
 #include "strata/core/conversation_cache.hpp"
+#include "strata/core/park_policy.hpp"
 #include "strata/core/progress.hpp"
 #include "strata/kernels/split_copy.hpp"
 
@@ -16,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace strata::core::conversation_detail {
@@ -296,6 +298,29 @@ inline cudaError_t order_after_queued() {
     e = cudaEventRecord(events[(size_t) dev], s);
     if (e != cudaSuccess) return e;
     return cudaStreamWaitEvent(nullptr, events[(size_t) dev], 0);
+}
+
+/// PLAN-p125k: the narrowed park/restore wait, as the `device_sync_override` hook's function (the
+/// SAGUARO_FAST_LANE slot save is its other user). The scope names the streams THIS conversation's queued
+/// compute rides on; on the device the wait runs on, the wait is that device's share of them
+/// (park::wait_streams) plus this thread's private copy stream - the bytes this conversation queued.
+/// A device sync is NOT taken and the capture lock is NOT held: neither is this wait about, and other
+/// conversations' queued work (their slots' windows, the expert tier's background fills on the legacy
+/// stream) is exactly what a park or a restore must not wait for. The conversation's copies still
+/// complete before every snapshot function returns, so nothing reuses a parked source cell before the
+/// copy read it, and nothing reads a restored cell before its bytes landed.
+inline cudaError_t narrow_sync(const std::vector<std::pair<int, cudaStream_t>>& scope) {
+    cudaStream_t s = nullptr;
+    cudaError_t e = private_stream(s);
+    if (e != cudaSuccess) return e;
+    e = cudaStreamSynchronize(s);
+    if (e != cudaSuccess) return e;
+    int dev = 0;
+    e = cudaGetDevice(&dev);
+    if (e != cudaSuccess) return e;
+    for (const cudaStream_t ps : park::wait_streams(scope, dev))
+        if (const cudaError_t w = cudaStreamSynchronize(ps); w != cudaSuccess) return w;
+    return cudaSuccess;
 }
 
 } // namespace strata::core::conversation_detail
