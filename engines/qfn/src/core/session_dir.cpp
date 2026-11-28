@@ -430,12 +430,18 @@ void SessionDir::turn_write(std::unique_lock<std::mutex>& lk) {
         j.track->written_seq = j.seq;
         j.track->saved_tokens = (int64_t) meta.live.ids.size();
         j.track->broken = false;
-        char b[360];
+        char note[176];
+        note[0] = '\0';
+        if (j.turn->spool != nullptr)   // P125r: a capture past its RAM budget streamed, the writer reads it back in pieces
+            std::snprintf(note, sizeof note, "; %llu MiB of it streamed to its folder through a %llu MiB writer buffer",
+                          (unsigned long long) (j.turn->spool_bytes >> 20),
+                          (unsigned long long) (j.turn->spool->cap_bytes >> 20));
+        char b[512];
         std::snprintf(b, sizeof b, "turn save (%s): %zu tokens, %llu MiB written, %llu MiB already in its file, %llu MiB "
-                      "hashed, %.0f ms in the background; the capture took the serve thread %.0f ms%s", j.label.c_str(),
+                      "hashed, %.0f ms in the background; the capture took the serve thread %.0f ms%s%s", j.label.c_str(),
                       meta.live.ids.size(), (unsigned long long) (ls.written_bytes >> 20),
                       (unsigned long long) (ls.reused_bytes >> 20), (unsigned long long) (ls.hashed_bytes >> 20), ms,
-                      j.capture_ms, delta ? "" : " (whole capture)");
+                      j.capture_ms, delta ? "" : " (whole capture)", note);
         say(b);
         if (ls.verify_bad)
             say("turn save VERIFY: " + std::to_string(ls.verify_bad) + " chunk(s) a delta would have left out differ from the file's");

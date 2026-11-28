@@ -132,6 +132,8 @@ public:
     void drop_queued();
     size_t files() const;
     uint64_t bytes() const;
+    // P125r: the folder itself - a turn capture past its RAM cap spools there (SessionLogSpool).
+    const std::string& dir() const { return o_.dir; }
 
     // Exposed for tests: does `newer` supersede `older` (the same conversation, further on)?
     static bool supersedes(const ConversationCheckpoint& newer_live, const std::vector<ConversationCheckpoint>& newer_chain,

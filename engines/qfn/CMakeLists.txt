@@ -207,6 +207,12 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   target_include_directories(turn_save_test PRIVATE include)
   target_link_libraries(turn_save_test PRIVATE Threads::Threads)
   add_test(NAME turn_save_test COMMAND turn_save_test)
+  # P125r: a capture past the writer's RAM cap streams to the folder's spool; the save reads it back in bounded pieces
+  add_executable(session_log_spool_test src/core/session_log_spool_test.cpp src/core/session_dir.cpp src/core/session_log.cpp
+                 src/core/conversation_file.cpp)
+  target_include_directories(session_log_spool_test PRIVATE include)
+  target_link_libraries(session_log_spool_test PRIVATE Threads::Threads)
+  add_test(NAME session_log_spool_test COMMAND session_log_spool_test)
 endif()
 
 if(STRATA_HIP_GFX906)

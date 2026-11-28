@@ -11164,6 +11164,11 @@ vs.d_skip_usage = gs.d_skip_usage;
         std::vector<TurnHold> turn_slot((size_t) std::max(o.batch, 0));
         static const bool turn_save_on = [] { const char* v = std::getenv("SAGUARO_TURN_SAVE"); return v == nullptr || std::atoi(v) != 0; }();
         static const bool turn_save_verify = [] { const char* v = std::getenv("SAGUARO_TURN_SAVE_VERIFY"); return v != nullptr && std::atoi(v) != 0; }();
+        // P125r: what a capture may hold of the K/V in RAM (MiB; 0: the whole second copy, as before). Past it the
+        // parts stream through a buffer of this size into a spool in the session folder, so saving a huge
+        // conversation on a box with little free RAM stops being what pushes it into swap.
+        static const size_t turn_spool_mib = [] { const char* v = std::getenv("SAGUARO_TURN_SAVE_SPOOL_MIB");
+            return (size_t) (v != nullptr ? std::atoll(v) : 256); }();
         auto turn_capture = [&](const ParkFrom& f, TurnHold& h, const std::string& label) -> bool {
             if (!sdir || !turn_save_on || f.ids.empty()) return false;
             const auto t0 = Clock::now();
@@ -11235,7 +11240,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 for (size_t k = 0; k < n_st; ++k)
                     keep.push_back(keep_of(stage_sources[k], use_mtp && !mtp_first && k + 1 == n_st));
                 auto turn = std::make_shared<strata::core::SessionLogTurn>();
-                if (!strata::core::session_log_capture(*turn, std::move(meta), sources, stage_sources, &keep, turn_save_verify, e)) {
+                if (!strata::core::session_log_capture(*turn, std::move(meta), sources, stage_sources, &keep, turn_save_verify,
+                                                       e, sdir->dir(), turn_spool_mib << 20)) {
                     std::fprintf(stderr, "saguaro serve: session dir: turn save skipped (%s)\n", e.c_str());
                     h.reset();
                     return false;
