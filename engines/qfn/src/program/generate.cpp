@@ -13481,8 +13481,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t vl_ctx = o.max_context;
             // 1.2.4-pre crash (mangonel, the fatal-signal stack): vl_split runs on VramLive's BEAT THREAD, and walking
             // bslot_ss's SessionStates there raced the serve thread that parks / restores / frees them (SIGSEGV in
-            // session_slot_backed, heap corruption beside it).  The serve thread publishes each slot's backed bytes
-            // (vl_publish_slots, once a second from batch_stat_line); the beat reads only these atomics.
+            // session_slot_backed, heap corruption beside it).  The serve thread publishes each slot's backed bytes at
+            // the head of batch_stat_line (below, the g_vl_slot_backed stores) - every batch window, ahead of that
+            // line's own one-second gate, so freshness does not wait for the print; the beat reads only these atomics.
             auto vl_split = [&](const VLCard& c, uint64_t& kv, uint64_t& pool, uint64_t& kvram) {
                 kv = c.eslot ? c.solo : c.solo + c.slotf;
                 if (c.eslot && c.slot < g_vl_slot_backed.size()) kv += g_vl_slot_backed[c.slot].load(std::memory_order_relaxed);
