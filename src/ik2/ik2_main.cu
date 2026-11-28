@@ -8715,6 +8715,10 @@ int main(int argc, char** argv) {
     if (tpN > 1) use_dev(0);
     if (g_stage) cudaFree(g_stage), g_stage = nullptr, g_stage_bytes = 0;
     {
+        // (the line counts the laid-out rows: on a VMM-backed start Vi.kv_cap is the commit, and the commit calls
+        //  round their bytes up to whole chunks (chunks_for(commit) * chunk_b), so a start step that is not a
+        //  multiple of a chunk - SAGUARO_IK2_KV_START=10000 -> 12288 rows - maps a little more than this prints;
+        //  exact at the default 32768, and the card test's 2 % rule covers the slack)
         size_t kv_vram = 0, kv_host = 0;
         for (const auto& Vi : M.V) {
             if (g_kv_q4) {
