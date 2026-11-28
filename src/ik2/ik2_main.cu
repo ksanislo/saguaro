@@ -2105,18 +2105,24 @@ void run_layer_attn(const Model& M, Layer& Ly, int l, int T, int pos0, const flo
     const float k_scale = c.qk_clip <= 28.0f ? 16.0f : 1.0f;
     const float v_scale = 32.0f;
     const float k_inv = 1.0f / k_scale, v_inv = 1.0f / v_scale;
+    // (the write epilog's ring: a VMM-backed elastic K / V holds Vi.kv_cap as the *committed* prefix of the
+    //  ceiling's range, not a layout to wrap in - a full visit writes the row of a position at that position, the
+    //  way its attention reads it (attn_kv_cap below), and a3's kv_grow has mapped that stretch before the write.
+    //  So the cap the kernels modulo by is 0 for a non-sliding visit here, as it always was for the reads; the
+    //  sliding ring and every plain layout keep Ly.kv_cap, where pos < kv_cap makes the wrap the identity)
+    const int write_kv_cap = (g_kv_vmm && !Ly.sliding) ? 0 : Ly.kv_cap;
     if (g_kv_q4) {
         k::prep_qkv_r_q4(q_p, Ly.q_clip, W.kconv, Ly.kc4, W.vconv, Ly.vc4, r_p, Ly.r_clip, T, c.H, c.KV, c.D, c.d_rel,
                          c.qk_clip, c.rel_clip, c.eps, Ly.sliding ? nullptr : pos_p, c.alpha, c.n_floor, pos0,
-                         Ly.kv_cap, g_s);
+                         write_kv_cap, g_s);
     } else if (g_kv_fp8) {
         k::prep_qkv_r_fp8(q_p, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, Ly.r_clip, T, c.H, c.KV, c.D, c.d_rel,
                           c.qk_clip, c.rel_clip, c.eps, Ly.sliding ? nullptr : pos_p, c.alpha, c.n_floor, pos0,
-                          Ly.kv_cap, k_scale, v_scale, g_s);
+                          write_kv_cap, k_scale, v_scale, g_s);
     } else {
         k::prep_qkv_r_f16(q_p, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, Ly.r_clip, T, c.H, c.KV, c.D, c.d_rel,
                           c.qk_clip, c.rel_clip, c.eps, Ly.sliding ? nullptr : pos_p, c.alpha, c.n_floor, pos0,
-                          Ly.kv_cap, g_s);
+                          write_kv_cap, g_s);
     }
 
     g_pf.lap(g_pf.ph[Ly.sliding][2]);
@@ -3421,6 +3427,10 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
         // without a window, its keys the whole context, is bound by their arithmetic)
         const bool mma = g_attn_mma == 1 || (g_attn_mma == 2 && !Ly.sliding);
         const int ring = Ly.sliding ? Ly.kv_cap : 0;
+        // (the write epilog's ring: as in forward()'s prompt path - a VMM-backed full visit writes its rows by
+        //  absolute position (ring 0), the same addressing its attention reads by; every other layout keeps
+        //  Ly.kv_cap, where the wrap is the identity)
+        const int wcap = g_kv_vmm ? ring : Ly.kv_cap;
         const int ns = Ly.sliding ? std::min(g_mma_split, std::max(1, (c.window + 63) / 64)) : g_mma_split;
         uint16_t* q16 = mma ? W.x16 : nullptr;
         // (a streamed visit: the kernel's blocks slot by slot from the ring, then their combine - the same partials)
@@ -3442,7 +3452,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
         };
         if (g_kv_q4) {
             k::prep_qkv_r_q4_at(q_p, Ly.q_clip, W.kconv, Ly.kc4, W.vconv, Ly.vc4, r_p, Ly.r_clip, c.H, c.KV, c.D, c.d_rel,
-                                c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, q16, g_s,
+                                c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, wcap, q16, g_s,
                                 Ly.sink16, W.xq, C, W.sink);
             if (mma)
                 k::attn_decode_mma_q4(q16, r_p, W.sink, Ly.kc4, Ly.vc4, ring, c.H, c.KV, W.pos, 0, ns, qk_scale,
@@ -3452,7 +3462,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
                                      qk_scale, Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, g_s);
         } else if (g_kv_fp8) {
             k::prep_qkv_r_fp8_at(q_p, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, Ly.r_clip, c.H, c.KV, c.D, c.d_rel,
-                                 c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap,
+                                 c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, wcap,
                                  k_scale, v_scale, q16, g_s, Ly.sink16, W.xq, C, W.sink);
             if (rung) {
                 ring_parts([&](uint8_t* kr, uint8_t* vr, int b0, int nbk) {
@@ -3473,7 +3483,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
                                       W.o, g_s);
         } else {
             k::prep_qkv_r_f16_at(q_p, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, Ly.r_clip, c.H, c.KV, c.D, c.d_rel,
-                                 c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, q16,
+                                 c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, wcap, q16,
                                  g_s, Ly.sink16, W.xq, C, W.sink);
             if (rung) {
                 ring_parts([&](uint8_t* kr, uint8_t* vr, int b0, int nbk) {
@@ -4537,6 +4547,8 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
         const int extent = Ly.sliding ? c.extent_swa : c.extent;
         const int window = Ly.sliding ? c.window : (1 << 30);
         const int ring = Ly.sliding ? Ly.kv_cap : 0;
+        // (the write epilog's ring, as in the token and prompt paths: a VMM-backed full visit writes absolute)
+        const int wcap = g_kv_vmm ? ring : Ly.kv_cap;
         const int ns = Ly.sliding ? std::min(g_mma_split, std::max(1, (c.window + 63) / 64)) : g_mma_split;
         uint16_t* q16 = W.x16;
         if (ex) {   // (each token through fast_token_launches' own clips and attention, its position from W.pos + t)
@@ -4552,7 +4564,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 if (g_kv_fp8) {
                     k::prep_qkv_r_fp8_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, r_ld, Ly.r_clip,
                                             T, c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding,
-                                            c.alpha, c.n_floor, Ly.kv_cap, k_scale, v_scale, W.x16, g_s, Ly.sink16, W.xq,
+                                            c.alpha, c.n_floor, wcap, k_scale, v_scale, W.x16, g_s, Ly.sink16, W.xq,
                                             C, W.sink);
                     toks = k::attn_decode_mma_toks_fp8(W.x16, HD, r_p, r_ld, W.sink, Ly.kc8, Ly.vc8, ring, c.H, c.KV,
                                                        W.pos, T, ns, qk_scale / k_scale, 1.0f / v_scale, Ly.rel_proj,
@@ -4560,7 +4572,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 } else {
                     k::prep_qkv_r_f16_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, r_ld, Ly.r_clip, T,
                                             c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding,
-                                            c.alpha, c.n_floor, Ly.kv_cap, W.x16, g_s, Ly.sink16, W.xq, C, W.sink);
+                                            c.alpha, c.n_floor, wcap, W.x16, g_s, Ly.sink16, W.xq, C, W.sink);
                     toks = k::attn_decode_mma_toks_f16(W.x16, HD, r_p, r_ld, W.sink, Ly.kc, Ly.vc, ring, c.H, c.KV, W.pos,
                                                        T, ns, qk_scale, Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o,
                                                        gate_p, gate_ld, W.x16, g_s);
@@ -4576,7 +4588,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 if (g_kv_q4) {
                     k::prep_qkv_r_q4_at(qt, Ly.q_clip, W.kconv + (size_t) t * KD, Ly.kc4, W.vconv + (size_t) t * KD,
                                         Ly.vc4, rt, Ly.r_clip, c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, pt,
-                                        !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, q16t, g_s, Ly.sink16,
+                                        !Ly.sliding, c.alpha, c.n_floor, wcap, q16t, g_s, Ly.sink16,
                                         W.xq + (size_t) t * C, C, sk);
                     if (mma)
                         k::attn_decode_mma_q4(q16t, rt, sk, Ly.kc4, Ly.vc4, ring, c.H, c.KV, pt, 0, ns, qk_scale,
@@ -4588,7 +4600,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 } else                 if (g_kv_fp8) {
                     k::prep_qkv_r_fp8_at(qt, Ly.q_clip, W.kconv + (size_t) t * KD, Ly.kc8, W.vconv + (size_t) t * KD,
                                          Ly.vc8, rt, Ly.r_clip, c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps,
-                                         pt, !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, k_scale, v_scale, q16t, g_s,
+                                         pt, !Ly.sliding, c.alpha, c.n_floor, wcap, k_scale, v_scale, q16t, g_s,
                                          Ly.sink16, W.xq + (size_t) t * C, C, sk);
                     if (mma)
                         k::attn_decode_mma_fp8(q16t, rt, sk, Ly.kc8, Ly.vc8, ring, c.H, c.KV, pt, 0, ns,
@@ -4601,7 +4613,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 } else {
                     k::prep_qkv_r_f16_at(qt, Ly.q_clip, W.kconv + (size_t) t * KD, Ly.kc, W.vconv + (size_t) t * KD,
                                          Ly.vc, rt, Ly.r_clip, c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, pt,
-                                         !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, q16t, g_s, Ly.sink16,
+                                         !Ly.sliding, c.alpha, c.n_floor, wcap, q16t, g_s, Ly.sink16,
                                          W.xq + (size_t) t * C, C, sk);
                     if (mma)
                         k::attn_decode_mma_f16(q16t, rt, sk, Ly.kc, Ly.vc, ring, c.H, c.KV, pt, 0, ns, qk_scale,
@@ -4616,20 +4628,20 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
         } else if (g_kv_q4) {
             k::prep_qkv_r_q4_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc4, W.vconv, Ly.vc4, r_p, r_ld, Ly.r_clip, T, c.H,
                                    c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha,
-                                   c.n_floor, Ly.kv_cap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                                   c.n_floor, wcap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
             k::attn_block_q4(q16, r_p, r_ld, W.sink, Ly.kc4, Ly.vc4, ring, c.H, c.KV, W.pos, T, ns, qk_scale,
                              Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, gate_p, gate_ld, W.x16, g_s);
         } else if (g_kv_fp8) {
             k::prep_qkv_r_fp8_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, r_ld, Ly.r_clip, T, c.H,
                                     c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha,
-                                    c.n_floor, Ly.kv_cap, k_scale, v_scale, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                                    c.n_floor, wcap, k_scale, v_scale, q16, g_s, Ly.sink16, W.xq, C, W.sink);
             k::attn_block_fp8(q16, r_p, r_ld, W.sink, Ly.kc8, Ly.vc8, ring, c.H, c.KV, W.pos, T, ns, qk_scale / k_scale,
                               1.0f / v_scale, Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, gate_p, gate_ld, W.x16,
                               g_s);
         } else {
             k::prep_qkv_r_f16_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, r_ld, Ly.r_clip, T, c.H,
                                     c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha,
-                                    c.n_floor, Ly.kv_cap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                                    c.n_floor, wcap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
             k::attn_block_f16(q16, r_p, r_ld, W.sink, Ly.kc, Ly.vc, ring, c.H, c.KV, W.pos, T, ns, qk_scale,
                               Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, gate_p, gate_ld, W.x16, g_s);
         }
@@ -8598,11 +8610,15 @@ int main(int argc, char** argv) {
                 }
             }
         } else if (g_kv_vmm && !Ly.sliding) {   // (a2: the global visit's K / V as the ceiling's address range,
-                                                //  chunks of VRAM behind the committed positions - fresh pages map
-                                                //  zeroed, which is exactly the DEPTH test's semantics; the kernels
-                                                //  index [0, pos) by absolute position with no wrap on full visits,
-                                                //  so they see the commit at first and the grown rows as a2 / a3
-                                                //  land pages under the same stable base)
+                                                //  chunks of VRAM behind the committed positions - the DEPTH test's
+                                                //  semantics: the freshly committed span is memset at the commit
+                                                //  (kv_grow), so an unwritten row reads as zeros without trusting
+                                                //  the VMM API to hand out zeroed pages.  Here Vi.kv_cap is the
+                                                //  commit, not a ring: a full visit writes and reads [0, pos) by
+                                                //  absolute position (kv_cap 0 in the prep epilogs, as the reads
+                                                //  always passed), so the kernels see the commit at first and the
+                                                //  grown rows as a2 / a3 land pages under the same stable base;
+                                                //  only the DEPTH memset below sizes itself by the commit)
             const size_t row_b = KD * (g_kv_fp8 ? 1 : 2);
             if (g_kv_rpc == 0) {
                 const size_t gran = ik2::vmm::granule(Ly.dev);

@@ -20,8 +20,10 @@
 # PASS: the 262144 start keeps its experts in VRAM - no "offload: 0 of" line, and the count in VRAM is within 2 % of
 # the 32768 row's (the tools/mem_vs_ctx.py rule), with the elastic NOTE or a preloaded "tier:" line as the witness;
 # the K / V the two starts lay out reads the same (the "kv cache:" GiB, within 2 % - the ceiling must cost ~0
-# until used); the 20K reads complete; and the 60K read answers too (where the start says it grows: a VMM-backed
-# elastic card - elsewhere the growth is only reported).
+# until used); the 20K reads complete; and the 60K read not just answers but answers right: its first word is the
+# reference's first word, "alpha" (tokens alone are no verdict - a write epilog that lands rows in the wrong place
+# still emits tokens).  Where the start says it grows: a VMM-backed elastic card; elsewhere the growth is only
+# reported.
 #
 # Everything it writes lands under its --out folder (default scratch/ik2-kv-start-card); the install's own config,
 # log and sessions are never touched (the newest saguaro-ik2 config is only read).  It waits until the port is free
@@ -86,9 +88,9 @@ json.dump({"model": "m", "temperature": 0, "max_tokens": int(mx),
 PYEOF
 }
 
-ask() {   # $1 file: prints "HTTP <code> <completion_tokens> <seconds>"; never dies
+ask() {   # $1 file: prints "HTTP <code> <completion_tokens> <seconds> <first word, lowercased>"; never dies
     "$PY" - "$1" "$PORT" <<'PYEOF'
-import json, sys, time, urllib.error, urllib.request
+import json, re, sys, time, urllib.error, urllib.request
 body = json.load(open(sys.argv[1], encoding="utf-8"))
 req = urllib.request.Request(f"http://127.0.0.1:{sys.argv[2]}/v1/chat/completions",
                              data=json.dumps(body, ensure_ascii=False).encode(),
@@ -98,7 +100,9 @@ try:
     with urllib.request.urlopen(req, timeout=3600) as r:
         out = json.loads(r.read())
     u = out.get("usage") or {}
-    print(f"HTTP {r.status} {u.get('completion_tokens', '?')} {time.time() - t0:.1f}s")
+    txt = ((out.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    m = re.search(r"[A-Za-z]+", txt)
+    print(f"HTTP {r.status} {u.get('completion_tokens', '?')} {time.time() - t0:.1f}s {m.group(0).lower() if m else '-'}")
 except urllib.error.HTTPError as e:
     print(f"HTTP {e.code} - {time.time() - t0:.1f}s {e.read().decode()[:200]}")
 PYEOF
@@ -212,13 +216,18 @@ if grow != "-":
     parts = grow.split()
     code = parts[1] if len(parts) > 1 else "-"
     toks = parts[2] if len(parts) > 2 else "-"
+    word = parts[4] if len(parts) > 4 else "-"
     if code != "200" or toks in ("-", "0"):
         note = (" - this start says it grows (NOTE context: ... commits the chunks it writes), so a conversation "
                 "past the committed start step must answer" if grows else
                 " - this start does not advertise the growable cache, so a refused read is the a1 fallback: check "
                 "the NOTE context: line (no virtual memory API here) and run tools/mem_vs_ctx.py for the rest")
         sys.exit(f"RESULT: FAIL - the growth read past the committed start step answered '{grow}'{note}")
-w = "and the read past the committed start step grew the cache and answered" if grows else "and both reads ran"
+    if word != "alpha":
+        sys.exit(f"RESULT: FAIL - the growth read past the committed start step emitted tokens but answered "
+                 f"'{word}', not the reference's first word 'alpha': the rows written past the commit are not the "
+                 "rows attention reads (a wrapped or unmapped write epilog - tokens alone are no verdict)")
+w = "and the read past the committed start step grew the cache and answered 'alpha'" if grows else "and both reads ran"
 print(f"RESULT: PASS - the {b} experts in VRAM follow the small context's {s} (the 2 % rule), the global cache "
       f"lays out {kb} GiB at both ceilings, {w}")
 PYEOF
