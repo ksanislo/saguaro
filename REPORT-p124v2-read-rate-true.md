@@ -49,7 +49,7 @@ over the read's own elapsed span.**
   entry (absent fields stay None: an older engine behaves exactly as before P124v2).
 - `serve/qfn_engine.py` — re-extracted with `tools/saguaro/extract_qfn_engine.py`, never
   hand-edited.
-- `serve/server.py` `_note_hb` (4582) — a beat's figure becomes
+- `serve/server.py` `_note_hb` (4621) — a beat's figure becomes
   `done + min(chunk, new−done) × pass_i/pass_n` **only when `stage != "stage"` and
   `pos0 − reused == done`**: done stands exactly at the reporting card's unit start, so
   the share is this read's own; a split read's cross-card figure already holds the other
@@ -68,8 +68,8 @@ over the read's own elapsed span.**
   read. Committed `SplitReadFollowsEngineFigure` (serve/test_read_rate_true) replays a
   two-card split with a faithful `ReadProgress` replica and gates the counted tokens at
   or below the engine's own cumulative figure at every sample.)*
-- `serve/server.py` `_own_read_rate` (4508) + `_read_span_s` (4495) + `read_leg_ms`
-  (3159, summed by `_read_close` 4476, zeroed on read restart 4679) — the denominator is
+- `serve/server.py` `_own_read_rate` (4517) + `_read_span_s` (4501) + `read_leg_ms`
+  (3159, summed by `_read_close` 4474, zeroed on read restart 4767) — the denominator is
   the read's **own elapsed span**: closed legs' wall time + the open leg's, from
   `engine_t0`, with the engine's `stage_ms` staging subtracted, and the engine's own
   `read_ms − stage_ms` pair as the floor (a slower wall clock can lower but never raise
@@ -89,7 +89,7 @@ changes are not compiled here — see open questions):
 - `serve.test_read_rate` — **34 green** (P124v's window/staleness/peak suite intact:
   the wall-span floor by the engine's own pair keeps every old pairing assertion true).
 - `serve.test_read_heartbeat` — **17 green** after pinning the new line: the
-  `EngineSideContract` (serve/test_read_heartbeat.py:382) now asserts the two-part printf
+  `EngineSideContract` (serve/test_read_heartbeat.py:421) now asserts the two-part printf
   with the trailing `" pos0=%lld chunk=%lld…"` literal for solo and slot; the driver and
   live-view assertions unchanged.
 - `py_compile` clean on every touched Python file.
