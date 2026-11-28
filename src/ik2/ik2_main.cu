@@ -7166,11 +7166,14 @@ void decode_greedy(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, in
     const SampleCfg sc;
     std::vector<int> next;
     // (a3: the positions this run writes get their chunks committed first - these are the --drafting auto trials
-    //  run before READY, whose prompts (SAGUARO_IK2_DRAFT_IDS) may reach past the committed start step on an
-    //  elastic card; VRAM short, the trial simply stops where the commit reaches (out: the tokens it made).
-    //  The drafter's own context rows end at the commit (a3): a trial past it runs undrafted)
+    //  run before READY; their prompt pass runs before this hook, so trial() commits the request's whole span
+    //  there too, and what is committed here is the part the run can still reach, clamped to ctx.  VRAM short
+    //  (it should not be, trial pre-committed): out stays empty and the trial drops that request from the
+    //  measurement.  The drafter's own context rows end at the commit (a3): a trial past it runs undrafted)
     std::string gerr;
-    if (!kv_grow(P + gen, gerr)) return;
+    // (the run stops at ctx, so nothing past it is ever written: commit up to the ceiling only - an oversized
+    //  SAGUARO_IK2_DRAFT_TOKENS must not count chunks the ceiling's range never holds)
+    if (!kv_grow(std::min(P + gen, ctx), gerr)) return;
     if (drafter && P + gen > ik2::draft::context_rows(g_kv_commit)) drafter = nullptr;
     out.push_back(anchor);
     while ((int) out.size() < gen && P < ctx) {
@@ -10277,10 +10280,22 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
                 const double tm0 = now();
                 auto trial = [&](int mode, int gen_t, double& secs) {
-                    int made = 0;
+                    int made = 0, done = 0;
                     secs = 0;
                     for (const auto& ids : reqs) {
                         reset();
+                        // (a3 fix: the prompt pass below writes rows [0, ids.size()) before decode_greedy's hook
+                        //  ever runs - commit the positions this trial writes (its prompt plus its generation,
+                        //  clamped to the ceiling like the run itself) before the first forward, or an elastic
+                        //  card writes rows with nothing committed under them.  VRAM short: the measurement
+                        //  stops where it stands - an unfinished request counts no tokens and no seconds)
+                        std::string terr;
+                        if (!kv_grow(std::min((int) ids.size() + gen_t, ctx), terr)) {
+                            std::printf("NOTE saguaro ik2: the drafting measure stops at the request whose rows "
+                                        "the K / V could not commit (%s); the tok/s figure is from the %d of %zu "
+                                        "it ran\n", terr.c_str(), done, reqs.size());
+                            break;
+                        }
                         int first = 0;
                         for (size_t p0 = 0; p0 < ids.size(); p0 += chunk) {
                             const int n = (int) std::min<size_t>(chunk, ids.size() - p0);
@@ -10307,7 +10322,8 @@ int main(int argc, char** argv) {
                         decode_greedy(M, mode >= 2 ? drafter : nullptr, first, (int) ids.size(), gen_t, ctx, ctl, lk1, out,
                                       nullptr);
                         secs += now() - t0;
-                        made += (int) out.size() - 1;
+                        if (out.empty()) break;   // (its rows could not be committed: no tokens, no negative count)
+                        made += (int) out.size() - 1, ++done;
                     }
                     return made / std::max(1e-9, secs);
                 };
