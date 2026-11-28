@@ -5436,8 +5436,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             if (bat) {
                 for (const PromptJob::Seg& sg : job->segs)
                     if (sg.job->on_layer_pass)
-                        sg.job->on_layer_pass(l - LB, LE - LB, pass_staged, LB, job->pos0 + sg.off);
-            } else if (layer_cb) layer_cb(l - LB, LE - LB, pass_staged, LB, p0);
+                        sg.job->on_layer_pass(l - LB, LE - LB, pass_staged, LB, job->pos0 + sg.off, sg.n);
+            } else if (layer_cb) layer_cb(l - LB, LE - LB, pass_staged, LB, p0, T);
         }
         if (!ple_land()) return false;   // a stage that ends before layer 1: the rows land anyway, the next gather starts
         if (issuer.joinable()) {

@@ -383,10 +383,14 @@ class EngineSideContract(unittest.TestCase):
         cpp = (ROOT / "engines" / "qfn" / "src" / "program" / "generate.cpp").read_text(encoding="utf-8")
         # P124v: the beat carries the read's own staging time (stage_ms=) beside its read clock (ms=), and the
         # gate is a steady ~4 lines a second (230 ms), not the old ~1.
-        self.assertIn('"RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f '
-                      'stage_ms=%.0f\\n"', cpp)
-        self.assertIn('"RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f '
-                      'stage_ms=%.0f slot=%d\\n"', cpp)
+        # P124v2: and the unit in flight's position and length (pos0=, chunk=), so the server can count its
+        # pass=<i>/<n> share of tokens that done= (whole units only) leaves out.
+        self.assertIn('"RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld '
+                      'ms=%.0f stage_ms=%.0f"', cpp)
+        self.assertIn('" pos0=%lld chunk=%lld\\n"', cpp)
+        self.assertIn('"RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld '
+                      'ms=%.0f stage_ms=%.0f"', cpp)
+        self.assertIn('" pos0=%lld chunk=%lld slot=%d\\n"', cpp)
         self.assertIn("at most one line per ~0.23 s", cpp)
         self.assertIn("stage_ms=%.1f", cpp)          # PP / RDONE / BRP / BRA carry it too (the finished figures)
 
