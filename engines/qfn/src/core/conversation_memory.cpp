@@ -1,3 +1,4 @@
+#include "strata/platform/mac_memory.hpp"
 #include "strata/core/conversation_memory.hpp"
 
 #include <algorithm>
@@ -279,6 +280,13 @@ std::optional<uint64_t> host_swap_used_bytes() {
     std::ifstream meminfo("/proc/meminfo");
     if (!meminfo) return {};
     return conversation_swap_used(meminfo);
+#elif defined(__APPLE__)
+    // macOS keeps its swap files long after the pressure that filled them has passed, so the swap in use says
+    // nothing about now on its own: it counts only while the kernel says memory is under pressure (warning or
+    // critical), 0 at the normal level - the same "the host is out of RAM now" the Linux reading stands for
+    uint64_t used = 0;
+    if (!strata::platform::mac_swap_used(used)) return {};
+    return strata::platform::mac_memory_pressure() >= 2 ? used : 0;
 #else
     return {};
 #endif
@@ -318,6 +326,11 @@ std::optional<HostMemoryReading> sample_host_memory() {
     return combine(std::min<uint64_t>(status.ullAvailPhys, status.ullAvailPageFile), status.ullTotalPhys, CgroupScan{}, memory_limit_bytes());
 #elif defined(__linux__)
     return sample_host_memory(MemoryProbePaths{}, memory_limit_bytes());
+#elif defined(__APPLE__)
+    // free + speculative + inactive + purgeable pages (MemAvailable's sense), of hw.memsize; no cgroups on macOS
+    strata::platform::MacHostMemory m;
+    if (!strata::platform::mac_host_memory(m)) return {};
+    return combine(m.available, m.total, CgroupScan{}, memory_limit_bytes());
 #else
     return {};
 #endif

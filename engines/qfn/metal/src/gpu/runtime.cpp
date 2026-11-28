@@ -373,6 +373,15 @@ Error mem_get_info(size_t* free_b, size_t* total_b) {
     *free_b = (size_t) (used < budget ? budget - used : 0);
     return kSuccess;
 }
+uint64_t allocated_bytes() { return rt().dev->currentAllocatedSize(); }
+uint64_t purged_bytes() {
+    Runtime& r = rt();
+    std::lock_guard<std::mutex> lk(r.mu);
+    uint64_t n = 0;
+    for (const auto& [gpu, a] : r.by_gpu)
+        if (a.purged) n += a.bytes;
+    return n;
+}
 Error device_integrated(int* v, int) { *v = 1; return kSuccess; }
 Error device_sm_count(int* v, int) { *v = 0; return fail(kErrorUnsupported); }   // Apple reports no core count
 Error device_clock_khz(int* v, int) { *v = 0; return fail(kErrorUnsupported); }

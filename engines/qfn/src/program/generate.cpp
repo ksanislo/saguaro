@@ -1,3 +1,9 @@
+#include "strata/platform/mac_memory.hpp"
+#if defined(STRATA_GPU_METAL)
+namespace strata::metal_engine {
+bool window_vram_parts(uint64_t& weights, uint64_t& kv, uint64_t& pool, uint64_t& prompt);
+}
+#endif
 #include "strata/core/capture_lock.hpp"
 #include "strata/core/logit_bias.hpp"
 // src/program/generate.cpp - P2.S6: `strata generate`.
@@ -408,6 +414,25 @@ void unpin_blobs(std::vector<void*>& v) {
     for (void* p : v) (void) cudaHostUnregister(p);
     (void) cudaGetLastError();
     v.clear();
+}
+
+// The Monitor's VRAM line on Metal: the decode window holds the weights, the K/V, the expert arena and the prompt's
+// buffers itself (the host code's device copies were given back), so its figures replace the host's - the expert
+// arena is the pool, as the VRAM expert cache is on CUDA, and `act` stays what is left (scratch, logits, the context).
+// Elsewhere a no-op; `prompt` 0.
+static void metal_vram_parts(uint64_t& weights, uint64_t& kv, uint64_t& pool, uint64_t& prompt) {
+    prompt = 0;
+#if defined(STRATA_GPU_METAL)
+    uint64_t w = 0, k = 0, a = 0, pr = 0;
+    if (strata::metal_engine::window_vram_parts(w, k, a, pr)) {
+        weights = w;
+        kv = k;
+        pool += a;
+        prompt = pr;
+    }
+#else
+    (void) weights; (void) kv; (void) pool;
+#endif
 }
 
 // SAGUARO_RSS_TRACE=1: the process's mapped file pages (the arena) at a startup step - who reads the arena back
@@ -1708,6 +1733,15 @@ MemSample mem_sample() {
     m.rss_mib = kb("/proc/self/status", "VmRSS:") >> 10;
     m.commit_mib = kb("/proc/self/status", "VmSwap:") >> 10;
     m.avail_mib = kb("/proc/meminfo", "MemAvailable:") >> 10;
+#if defined(__APPLE__)
+    // no /proc: the task's VM info (resident, and its compressed/swapped pages as "swap"), rusage, host VM counters
+    if (strata::platform::MacProcessMemory pm; strata::platform::mac_process_memory(pm)) {
+        m.faults = pm.major_faults;
+        m.rss_mib = pm.resident >> 20;
+        m.commit_mib = pm.compressed >> 20;
+    }
+    if (strata::platform::MacHostMemory hm; strata::platform::mac_host_memory(hm)) m.avail_mib = hm.available >> 20;
+#endif
 #endif
     return m;
 }
@@ -1750,6 +1784,11 @@ static uint64_t file_tier_activity() {
     // thread waiting on one page at a time), which at >> 6 is 3 a second and never counted as busy
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) total += pmc.PageFaultCount >> 3;
     return total;
+#elif defined(__APPLE__)
+    // major faults (the mapped model) and block reads (the Metal expert stream's preads that reach the SSD)
+    strata::platform::MacProcessMemory pm;
+    if (!strata::platform::mac_process_memory(pm)) return 0;
+    return pm.major_faults + pm.reads;
 #else
     return 0;
 #endif
@@ -13265,7 +13304,21 @@ vs.d_skip_usage = gs.d_skip_usage;
                     const strata::core::OnDevice on(dev);
                     if (cudaMemGetInfo(&vf, &vt) != cudaSuccess) (void) cudaGetLastError();
                 }
-                const uint64_t used = vt > vf ? (uint64_t) (vt - vf) : 0, known = weights + kv + pool + drafter;
+                uint64_t prompt = 0;
+                metal_vram_parts(weights, kv, pool, prompt);
+                char extra[48] = "";
+                if (prompt) std::snprintf(extra, sizeof extra, " prompt=%llu", (unsigned long long) prompt);
+                uint64_t used = vt > vf ? (uint64_t) (vt - vf) : 0;
+                const uint64_t known = weights + kv + pool + drafter + prompt;
+#if defined(STRATA_GPU_METAL)
+                // the free figure is the working set less what is allocated, floored at 0: the real allocation (it
+                // may pass the working set, which is a recommendation) - and the total widened to hold it
+                // (less what was given back: a purged buffer still counts in the allocated size, holding nothing)
+                used = strata::gpu::allocated_bytes();
+                used -= std::min(used, strata::gpu::purged_bytes());
+                if (used > vt) vt = (size_t) used;
+                vf = vt - (size_t) used;
+#endif
                 // PLAN-context-panel, output only: the K/V budget fields the Monitor's Context panel aggregates -
                 // kv_room: what this card holds for chat state (the sessions' carve), kv_ram_room: the pinned host
                 // RAM streamed K/V can take (the whole copies reserved, 0 without streaming; the engine's figure,
@@ -13273,14 +13326,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                 // the engine parked in RAM outside its slots.  The re-printed lines below carry the same fields.
                 std::printf("VRAM dev=%d pci=%s total=%llu free=%llu weights=%llu kv=%llu kv_ram=%llu act=%llu drafter=%llu "
                             "window=0 pool=%llu tail=0 borrow=0 vision=0 slots=%lld ctx=%lld layers=%lld-%lld "
-                            "kv_room=%llu kv_ram_room=%llu parked=%llu parked_n=%zu park_budget=%llu\n",
+                            "kv_room=%llu kv_ram_room=%llu parked=%llu parked_n=%zu park_budget=%llu%s\n",
                             dev, bus, (unsigned long long) vt, (unsigned long long) vf, (unsigned long long) weights,
                             (unsigned long long) kv, (unsigned long long) kv_ram,
                             (unsigned long long) (used > known ? used - known : 0), (unsigned long long) drafter,
                             (unsigned long long) pool, (long long) slots, (long long) o.max_context,
                             (long long) l0, (long long) l1, (unsigned long long) kv, (unsigned long long) ram_room,
                             (unsigned long long) conversations.parked_bytes_live(), conversations.size_live(),
-                            (unsigned long long) conversations.budget_live());
+                            (unsigned long long) conversations.budget_live(), extra);
             };
             // the MTP draft layer's bytes (and a --batch slot's drafters) on the card the drafter lives on
             auto mtp_on = [&](int dev) {
@@ -13479,6 +13532,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                 for (const VLCard& c : vl) {
                     uint64_t kv = 0, pool = 0, kvram = 0;
                     vl_split(c, kv, pool, kvram);
+                    uint64_t mw = c.w, mprompt = 0;   // (Metal: the window's figures move the line too - the arena fills
+                    metal_vram_parts(mw, kv, pool, mprompt);   //  at the first request, after the start's line)
+                    pool += mprompt;
                     char b[192];
                     std::snprintf(b, sizeof b, "%d:%llu:%llu:%llu:%llu:%llu:%zu:%llu", c.dev, (unsigned long long) kv,
                                   (unsigned long long) pool, (unsigned long long) kvram,
@@ -13493,21 +13549,32 @@ vs.d_skip_usage = gs.d_skip_usage;
                     const strata::core::OnDevice on(c.dev);
                     size_t vf = 0, vt = 0;
                     if (cudaMemGetInfo(&vf, &vt) != cudaSuccess) { (void) cudaGetLastError(); return; }
-                    const uint64_t used = vt > vf ? (uint64_t) (vt - vf) : 0, known = c.w + kv + pool + c.dft;
+                    uint64_t w = c.w, prompt = 0;
+                    metal_vram_parts(w, kv, pool, prompt);
+                    char extra[48] = "";
+                    if (prompt) std::snprintf(extra, sizeof extra, " prompt=%llu", (unsigned long long) prompt);
+                    uint64_t used = vt > vf ? (uint64_t) (vt - vf) : 0;
+                    const uint64_t known = w + kv + pool + c.dft + prompt;
+#if defined(STRATA_GPU_METAL)
+                    used = strata::gpu::allocated_bytes();   // (as in the start's line)
+                    used -= std::min(used, strata::gpu::purged_bytes());
+                    if (used > vt) vt = (size_t) used;
+                    vf = vt - (size_t) used;
+#endif
                     // PLAN-context-panel: kv_room is what the card's sessions can hold for chat state (the whole
                     // carve, backed or still to be), kv_ram_room the pinned host RAM streamed K/V can take, and
                     // parked the conversations parked in RAM outside the slots - all output only, the same fields
                     // as the start-up lines.
                     std::printf("VRAM dev=%d pci=%s total=%llu free=%llu weights=%llu kv=%llu kv_ram=%llu act=%llu drafter=%llu "
                                 "window=0 pool=%llu tail=0 borrow=0 vision=0 slots=%lld ctx=%lld layers=%lld-%lld "
-                                "kv_room=%llu kv_ram_room=%llu parked=%llu parked_n=%zu park_budget=%llu\n",
+                                "kv_room=%llu kv_ram_room=%llu parked=%llu parked_n=%zu park_budget=%llu%s\n",
                                 c.dev, c.pci, (unsigned long long) vt, (unsigned long long) vf,
-                                (unsigned long long) c.w, (unsigned long long) kv, (unsigned long long) kvram,
+                                (unsigned long long) w, (unsigned long long) kv, (unsigned long long) kvram,
                                 (unsigned long long) (used > known ? used - known : 0), (unsigned long long) c.dft,
                                 (unsigned long long) pool, (long long) (c.xc != nullptr ? c.xc->slots() : c.sl),
                                 (long long) vl_ctx, (long long) c.l0, (long long) c.l1,
                                 (unsigned long long) (c.solo + c.slotf), (unsigned long long) vl_ram_room,
-                                (unsigned long long) vl_parked, vl_parked_n, (unsigned long long) vl_budget);
+                                (unsigned long long) vl_parked, vl_parked_n, (unsigned long long) vl_budget, extra);
                     std::fflush(stdout);
                 });
             });
@@ -20347,7 +20414,14 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::vector<uint64_t> restore_free;
                 std::vector<uint8_t> restore_ready;
                 int tight = -1;
+#if defined(STRATA_GPU_METAL)
+                // Metal: the restore is a memcpy into the decode window's own buffers - no copy stream, nothing
+                // allocated on the GPU (and its free figure is the working set's, full of the expert arena by design)
+                bool sampled = false;
+                restore_devs.clear();
+#else
                 bool sampled = true;
+#endif
                 for (const int rd : restore_devs) {
                     const strata::core::OnDevice on(rd);
                     int cur = 0;

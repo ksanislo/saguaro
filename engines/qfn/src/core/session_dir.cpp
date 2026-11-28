@@ -539,7 +539,8 @@ void SessionDir::preload_loop() {
         SavedConversation image;
         std::string err;
         const auto t0 = std::chrono::steady_clock::now();
-        const bool ok = read_file(path, image, err);
+        bool transient = false;
+        const bool ok = read_file(path, image, err, &transient);
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         lk.lock();
         for (size_t i = 0; i < entries_.size(); ++i) {
@@ -553,6 +554,11 @@ void SessionDir::preload_loop() {
                 say(b);
                 ready_.push_back({path, std::move(image)});
                 state_locked();
+            } else if (transient) {   // kept: no RAM to preload it now (and no retrying in a loop: preloading stops)
+                entries_[i].state = State::idle;
+                say("preload stopped: " + err + " (the file is kept)");
+                cv_.notify_all();
+                return;
             } else {
                 say("preload failed: " + err);
                 drop_entry_locked(i, "unreadable");
@@ -683,7 +689,8 @@ std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& i
         SavedConversation image;
         std::string err;
         const auto t0 = std::chrono::steady_clock::now();
-        const bool ok = read_file(path, image, err);
+        bool transient = false;
+        const bool ok = read_file(path, image, err, &transient);
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         lk.lock();
         fetching_ = false;
@@ -692,6 +699,9 @@ std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& i
             if (ok) {
                 entries_[i].state = State::idle;
                 touch_locked(entries_[i]);
+            } else if (transient) {   // kept for a later turn: the RAM was short, not the file
+                entries_[i].state = State::idle;
+                say("read deferred: " + err + " (the file is kept)");
             } else {
                 say("read failed: " + err);
                 drop_entry_locked(i, "unreadable");
@@ -715,9 +725,10 @@ std::optional<SavedConversation> SessionDir::fetch(const std::vector<int32_t>& i
     }
 }
 
-bool SessionDir::read_file(const std::string& path, SavedConversation& image, std::string& error) const {
+bool SessionDir::read_file(const std::string& path, SavedConversation& image, std::string& error, bool* transient) const {
     size_t bytes = 0;
     SessionStatus st;
+    if (transient) *transient = false;
     const bool log = fs::path(path).extension() == kSessionLogExt;
     auto read = [&](const SessionFileIdentity& id) {
         // (v1/v2: K/V as views into the mapping, no RAM copy; an appending file's chunks are read into owned buffers)
@@ -725,7 +736,14 @@ bool SessionDir::read_file(const std::string& path, SavedConversation& image, st
                    : session_file_map(path, id, image, bytes, error, o_.limits, &st);
     };
     if (read(o_.id)) return true;
-    if (o_.id_yarn.config == 0 || !read(o_.id_yarn)) return false;
+    if (st.error == SessionError::memory) {   // the RAM admission refused it: the file is fine, try again later
+        if (transient) *transient = true;
+        return false;
+    }
+    if (o_.id_yarn.config == 0 || !read(o_.id_yarn)) {
+        if (transient && st.error == SessionError::memory) *transient = true;
+        return false;
+    }
     // a YaRN conversation's file: the level rides on every state it restores
     image.live.rope_level = 1;
     for (auto& p : image.live.stage_parts) p.rope_level = 1;

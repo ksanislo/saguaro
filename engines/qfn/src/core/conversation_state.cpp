@@ -152,10 +152,26 @@ bool conversation_session_sizes(const ModelGeometry& g, const SessionState& ss, 
     return true;
 }
 
+#if defined(STRATA_GPU_METAL)
+}  // namespace strata::core
+namespace strata::metal_engine {
+// the Metal decode window's own payload layout (window.cpp): no per-layer block positions, and its own row sizes
+bool window_checkpoint_check(const strata::core::ConversationCheckpoint& c, std::string& error);
+// the byte counts that checkpoint's arrays have: gdn, ple, tails, dead, block_pos (false: the window is not up)
+bool window_checkpoint_sizes(std::array<uint64_t, 5>& sizes);
+}  // namespace strata::metal_engine
+namespace strata::core {
+#endif
+
 bool conversation_checkpoint_validate(const ConversationCheckpoint& c, const SessionState& ss,
                                       const ModelGeometry& g, std::string& error) {
     ConversationStateSizes z;
     if (!checkpoint_targets(ss, g, c.ids.size(), z, error)) return false;
+#if defined(STRATA_GPU_METAL)
+    // the running state is the window's (conversation_checkpoint_save below), not the session buffers' layout
+    if (!image_keys(c.imgs, c.ids.size())) return fail(error, "invalid checkpoint running-state payload");
+    return strata::metal_engine::window_checkpoint_check(c, error);
+#endif
     const size_t layers = owned_qsa(ss);
     if (c.gdn.size() != z.gdn || c.ple.size() != (ss.ple_hist ? z.ple : 0) ||
         c.tails.size() != layers * z.tail || c.dead.size() != layers * z.dead ||
@@ -512,6 +528,10 @@ bool conversation_session_read_limits(SessionReadLimits& limits, const SessionSt
     l.geometry = geometry_key(g);
     l.layer_range = std::make_pair(ss.layer_lo, ss.layer_hi);
     l.max_state_bytes = {z.gdn, ss.ple_hist ? z.ple : 0, tails, dead, block_pos};
+#if defined(STRATA_GPU_METAL)
+    // a Metal checkpoint is the decode window's running state (conversation_checkpoint_save), not the session's
+    if (std::array<uint64_t, 5> w{}; strata::metal_engine::window_checkpoint_sizes(w)) l.max_state_bytes = w;
+#endif
     l.max_kv_bytes.assign(layers + (draft ? 1 : 0), {});
     for (size_t j = 0; j < layers; ++j) {
         const auto& st = owned(ss, j);
