@@ -13,6 +13,7 @@ and two reads at once must sum.  A stalled read's rate must FALL, not freeze at 
 from __future__ import annotations
 
 import queue
+import re
 import sys
 import threading
 import unittest
@@ -353,6 +354,139 @@ class MangonelTrueReadout(Base):
         # and the read closes on the engine's exact figures: 27,254 counted, nothing invented
         self.assertTrue(eng.step(it)["start"])
         self.assertEqual(self.svc._read_counted(stat), self.NEW)
+
+
+class CardTrueReadout(Base):
+    """P124v2 review round 4 (the manager's card run, saguaro/rc124-cand2): replay of the recorded
+    /metrics timeline serve/testdata/card-rc2-read-rate-timeline.txt - a fresh 27,299-token read on
+    the card's Q4 QFN config, polled 4x a second: the client got its answer in 17.8 s (7 tokens)
+    and the engine's own summary (the last prefill_tok_s_mean, 1,582.9 over 27,292 read) says the
+    TRUE read is ~1,580 tok/s; the Monitor at the time showed mean ~2,393 (+51 %), MAX 9,881 (6x),
+    first non-zero at 0.78 s and two zero samples during the read.
+
+    The replay uses the file's own fields, as the review asked: the time column, the prompt_read
+    jumps (whole 4,608-token cuts at 6.86, 8.89, 10.66, 12.68, 14.71, 16.48 s) and the
+    prefill_tok_s_mean column, which gives each cut's engine ms (value / mean: 6,480, 8,387,
+    10,317, 12,257, 14,199, 16,070 ms) - synthesized into RHB beats at the engine's ~4/s cadence
+    (done = whole cuts done, pos0/chunk = the cut in flight, pass = its fraction by the engine's
+    own run clock) and cut-end BRP steps whose new_read lags the share the beats already booked
+    (the cut's whole count 13,824 lands below the booked 13,900), closing with the BRA that carries
+    the read's last mean.  That fall below the booked share used to fire _note_read's restart
+    branch (a retry/slice signal): read_pos, the interval, engine_t0 and the pair all reset
+    mid-read and the readout became (tokens since the false restart) / (the ~0.47 s since it) -
+    4,608 / 0.466 = 9,881 at 10.66 s.  The fixed readout is cumulative tokens read / time since
+    THIS read started: never blank or 0 after the read's first RHB, never over 1.25 x 1,580 on
+    this read, closing within 10 % of 1,580 (the client's figure), the read never re-based
+    (read_pos never steps down, the open interval is never re-opened), and the peak it feeds
+    (the same readout, windows >= 5 s) stays under 1.25 x 1,580."""
+
+    FIXTURE = ROOT / "serve" / "testdata" / "card-rc2-read-rate-timeline.txt"
+    TOTAL = 27299                 # prompt_total on the timeline
+    TARGET = 1580.0               # the client's figure (27,299 read in 17.8 s; engine 1,582.9)
+    BEAT_MS = 230                 # the engine's recorded RHB cadence
+    PASSES = 60                   # layer passes per cut (the pass=i/n field; any fixed count works)
+
+    def rows(self):
+        out = []
+        for ln in self.FIXTURE.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*([\d.]+)\s+(\S+)\s+(\S+)\s+\{", ln)
+            if not m:
+                continue                                  # (the header and the client's usage line)
+            rest = ln[ln.index("{"):]                     # (the /metrics JSON is cut at line end: search, parse)
+            pr = re.search(r'"prompt_read": (\d+|null)', rest)
+            pm = re.search(r'"prefill_tok_s_mean": ([0-9.]+|null)', rest)
+            out.append((float(m.group(1)), m.group(3),
+                        pr.group(1) if pr else "null", pm.group(1) if pm else "null"))
+        return out
+
+    def events(self, rows):
+        """(engine ms, line) in order: the read's RHB beats and the prompt_read jumps as cut-end
+        BRP steps (a jump's engine ms = value / the prefill_tok_s_mean on the sample that first saw
+        it), closing with a BRA carrying the read's last mean."""
+        arrival = next(t for t, reading, p, m in rows if reading == "1")   # the first reading sample: the request at the engine
+        cuts, prev, mean_last = [], None, None
+        for t, reading, p, m in rows:
+            if m != "null":
+                mean_last = float(m)
+            if p != "null" and reading == "1" and int(p) != prev and m != "null":
+                prev = int(p)
+                cuts.append((1000.0 * int(p) / float(m), int(p)))         # (engine ms at the cut end, its whole count)
+        self.assertTrue(cuts, "no prompt_read jumps in the timeline")
+        self.assertIsNotNone(mean_last, "no prefill_tok_s_mean in the timeline")
+        rd_ms = 1000.0 * cuts[-1][1] / mean_last                          # the read's own end: 27,292 / 1,582.9
+        evs = []
+        lo_ms, lo_val = 0.0, 0
+        for ms_e, v in cuts:
+            k = int(lo_ms // self.BEAT_MS) + 1
+            while k * self.BEAT_MS <= ms_e:
+                ms = k * self.BEAT_MS
+                p = max(1, min(self.PASSES, int((ms - lo_ms) / (ms_e - lo_ms) * self.PASSES)))
+                evs.append((ms, f"RHB rid=0 stage=read done={lo_val} new={self.TOTAL} reused=0 "
+                                f"pass={p}/{self.PASSES} ms={ms} stage_ms=0 pos0={lo_val} "
+                                f"chunk={v - lo_val} slot=7"))
+                k += 1
+            evs.append((ms_e, f"BRP 7 {v} {self.TOTAL} {ms_e:.0f} {v / (ms_e / 1000.0):.1f} "
+                              f"new_read={v} read_ms={ms_e:.0f} stage_ms=0"))
+            lo_ms, lo_val = ms_e, v
+        evs.append((rd_ms, f"BRA 7 1 prompt={self.TOTAL} reused=0 read_ms={rd_ms:.1f} stage_ms=0"))
+        return arrival, evs
+
+    def test_the_card_read_readout_is_cumulative_never_the_interval_spike(self):
+        rows = self.rows()
+        self.assertTrue(rows, "the card timeline fixture is unreadable")
+        arrival, evs = self.events(rows)
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        self.tick(arrival)                                    # the request arrives at the engine: the read's own start
+        it = eng.wait(7)
+        base_t = self.t[0]
+        shown, shown_t, ei, prev_pos, open_id = [], [], 0, 0, None
+        for t_row, reading, p, m in rows:
+            if reading != "1":
+                continue
+            due = (t_row - arrival) * 1000.0                  # engine ms visible by this poll
+            while ei < len(evs) and evs[ei][0] <= due:
+                self.t[0] = base_t + evs[ei][0] / 1000.0
+                eng.feed(7, evs[ei][1])
+                if not evs[ei][1].startswith("BRA"):
+                    self.assertIsNone(eng.step(it))
+                self.assertGreaterEqual(stat.read_pos, prev_pos,
+                                        f"t={t_row}: the read counter went back ({prev_pos} -> {stat.read_pos})")
+                prev_pos = stat.read_pos
+                if open_id is None:
+                    open_id = id(stat.read_cur)
+                else:
+                    self.assertEqual(id(stat.read_cur), open_id,
+                                     f"t={t_row}: the open read interval was re-opened - the readout would "
+                                     f"be an interval rate from the re-baselined start")
+                ei += 1
+            self.t[0] = base_t + t_row
+            shown.append(self.live())                         # (the Monitor polls /metrics 4x a second)
+            shown_t.append(t_row)
+        self.assertTrue(shown)
+        first = next((i for i, v in enumerate(shown) if v), None)
+        self.assertIsNotNone(first, "the readout never showed a rate during the read")
+        self.assertLessEqual(shown_t[first], 0.78,            # the card: first non-zero at 0.78 s, two zeros
+                             f"first non-zero at {shown_t[first]} s")
+        for i, v in enumerate(shown):                         # ... and never blank or 0 after it
+            if shown_t[i] >= shown_t[first]:
+                self.assertTrue(v, f"t={shown_t[i]}: blank/zero while the read runs")
+        vals = [v for v in shown if v]
+        self.assertLessEqual(max(vals), 1.25 * self.TARGET,  # the card: 9,881 = 6.3x the true read
+                             f"the readout peaks at {max(vals)} tok/s")
+        self.assertTrue(shown[-1], "the readout went blank at the read's end")
+        self.assertLess(abs(shown[-1] - self.TARGET), 0.10 * self.TARGET,
+                        f"the read closes at {shown[-1]} tok/s, not within 10 % of {self.TARGET}")
+        pk = self.svc.totals.get("peak_prefill")              # the Monitor's peak: the same readout, windows >= 5 s
+        self.assertIsNotNone(pk, "the readout never made a peak")
+        self.assertLessEqual(pk["tok_s"], 1.25 * self.TARGET, f"peak_prefill {pk['tok_s']} tok/s")
+        self.assertLessEqual(pk["tokens"], self.TOTAL)
+        while ei < len(evs):                                  # close the read on the engine's BRA
+            eng.feed(7, evs[ei][1])
+            ei += 1
+        self.assertTrue(eng.step(it)["start"])
+        self.assertEqual(self.svc._read_counted(stat), self.TOTAL)
 
 
 class PeaksTellTheTruth(Base):

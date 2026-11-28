@@ -1,0 +1,73 @@
+read finished in 17.8 s, usage {'prompt_tokens': 27299, 'completion_tokens': 7, 'total_tokens': 27306, 'prompt_tokens_details': {'cached_tokens': 0}}
+  t(s)  shown prefill_tok_s   reading  other
+  0.02                  None     None  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": null, "chats": [
+  0.28                   0.0        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  0.53                   0.0        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  0.78                1915.3        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  1.04                3107.6        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  1.29                3107.6        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  1.54                3107.6        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  1.80                3918.6        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  2.05                3265.0        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  2.30                2626.3        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  2.56                2464.1        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  2.81                2185.2        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  3.06                1963.9        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  3.31                1873.4        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  3.57                1873.4        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  3.82                1709.1        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  4.07                1574.2        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  4.33                1479.0        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  4.58                1541.3        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  4.83                1559.3        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  5.09                1546.2        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  5.34                1562.9        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  5.59                1866.7        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  5.85                1945.0        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  6.10                1977.1        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  6.35                2022.8        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  6.61                2041.3        1  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": null, "phase": "reading the pro
+  6.86                2568.5        1  {"prompt_read": 4608, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 711.1, "phase": "reading the p
+  7.11                2257.1        1  {"prompt_read": 4608, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 711.1, "phase": "reading the p
+  7.37                2280.5        1  {"prompt_read": 4608, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 711.1, "phase": "reading the p
+  7.62                2301.2        1  {"prompt_read": 4608, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 711.1, "phase": "reading the p
+  7.87                2303.7        1  {"prompt_read": 4608, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 711.1, "phase": "reading the p
+  8.13                2314.0        1  {"prompt_read": 4608, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 711.1, "phase": "reading the p
+  8.38                2326.2        1  {"prompt_read": 4608, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 711.1, "phase": "reading the p
+  8.63                2371.7        1  {"prompt_read": 4608, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 711.1, "phase": "reading the p
+  8.89                2458.1        1  {"prompt_read": 9216, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1098.9, "phase": "reading the 
+  9.14                2468.5        1  {"prompt_read": 9216, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1098.9, "phase": "reading the 
+  9.39                2484.4        1  {"prompt_read": 9216, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1098.9, "phase": "reading the 
+  9.64                2486.7        1  {"prompt_read": 9216, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1098.9, "phase": "reading the 
+  9.90                2499.8        1  {"prompt_read": 9216, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1098.9, "phase": "reading the 
+ 10.15                2499.8        1  {"prompt_read": 9216, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1098.9, "phase": "reading the 
+ 10.40                2515.6        1  {"prompt_read": 9216, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1098.9, "phase": "reading the 
+ 10.66                9881.0        1  {"prompt_read": 13824, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1339.9, "phase": "reading the
+ 10.91                2459.4        1  {"prompt_read": 13824, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1339.9, "phase": "reading the
+ 11.16                2466.1        1  {"prompt_read": 13824, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1339.9, "phase": "reading the
+ 11.42                2435.2        1  {"prompt_read": 13824, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1339.9, "phase": "reading the
+ 11.67                2450.2        1  {"prompt_read": 13824, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1339.9, "phase": "reading the
+ 11.92                2434.7        1  {"prompt_read": 13824, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1339.9, "phase": "reading the
+ 12.18                2433.7        1  {"prompt_read": 13824, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1339.9, "phase": "reading the
+ 12.43                2417.9        1  {"prompt_read": 13824, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1339.9, "phase": "reading the
+ 12.68                2337.2        1  {"prompt_read": 18432, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1503.8, "phase": "reading the
+ 12.94                2308.2        1  {"prompt_read": 18432, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1503.8, "phase": "reading the
+ 13.19                2300.2        1  {"prompt_read": 18432, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1503.8, "phase": "reading the
+ 13.44                2265.4        1  {"prompt_read": 18432, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1503.8, "phase": "reading the
+ 13.70                2258.1        1  {"prompt_read": 18432, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1503.8, "phase": "reading the
+ 13.95                2226.2        1  {"prompt_read": 18432, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1503.8, "phase": "reading the
+ 14.20                2226.2        1  {"prompt_read": 18432, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1503.8, "phase": "reading the
+ 14.46                2226.2        1  {"prompt_read": 18432, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1503.8, "phase": "reading the
+ 14.71                2150.9        1  {"prompt_read": 23040, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1622.7, "phase": "reading the
+ 14.96                2150.9        1  {"prompt_read": 23040, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1622.7, "phase": "reading the
+ 15.21                2108.2        1  {"prompt_read": 23040, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1622.7, "phase": "reading the
+ 15.47                2233.2        1  {"prompt_read": 23040, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1622.7, "phase": "reading the
+ 15.72                2274.0        1  {"prompt_read": 23040, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1622.7, "phase": "reading the
+ 15.97                2274.0        1  {"prompt_read": 23040, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1622.7, "phase": "reading the
+ 16.23                2230.9        1  {"prompt_read": 23040, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1622.7, "phase": "reading the
+ 16.48                2280.6        1  {"prompt_read": 27292, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1698.4, "phase": "reading the
+ 16.73                2280.6        1  {"prompt_read": 27292, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1698.4, "phase": "reading the
+ 16.98                2280.6        1  {"prompt_read": 27292, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1698.4, "phase": "reading the
+ 17.24                2280.6        1  {"prompt_read": 27292, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1698.4, "phase": "reading the
+ 17.49                2280.6        1  {"prompt_read": 27292, "prompt_total": 27299, "prompt_reused": null, "prefill_tok_s_mean": 1698.4, "phase": "reading the
+ 17.74                   0.0     None  {"prompt_read": null, "prompt_total": null, "prompt_reused": null, "prefill_tok_s_mean": 1582.9, "phase": "answering", "
