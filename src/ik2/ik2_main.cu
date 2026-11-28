@@ -10085,8 +10085,11 @@ int main(int argc, char** argv) {
         }
         // the rows [0, n) of the visits without a window, to or from host memory.  Coming back (save: false) it may
         // write past the committed start step of an elastic K / V - a conversation kept before, or read from the
-        // folder after a restart - so its chunks are committed first (a3); false: VRAM short, nothing was copied
-        auto full_rows = [&](Conv& cv, int n, bool save) -> bool {
+        // folder after a restart - so its chunks are committed first (a3).  0: done (copied, or nothing to commit);
+        // 1: VRAM short, the stretch would not commit and nothing was copied - the one failure the growable
+        //  cache can cause, which the caller fails the request on; the older reasons to give up on a kept
+        //  conversation live in unpark and still cost only the from-scratch re-read
+        auto full_rows = [&](Conv& cv, int n, bool save) -> int {
             if (save) cv.fk.assign(M.V.size(), {}), cv.fv.assign(M.V.size(), {});
             else {
                 lend_back(M, n + 1);   // (KV lending: the experts lent below n given back before the rows land)
@@ -10094,7 +10097,7 @@ int main(int argc, char** argv) {
                 if (!kv_grow(n, gerr)) {
                     say("a kept conversation of " + std::to_string(n) + " positions does not fit in the committed "
                         "context: " + gerr);
-                    return false;
+                    return 1;
                 }
             }
             for (size_t l = 0; l < M.V.size(); ++l) {
@@ -10111,7 +10114,7 @@ int main(int argc, char** argv) {
                 CU(cudaMemcpyAsync(save ? (void*) cv.fv[l].data() : (void*) dv, save ? (void*) dv : (void*) cv.fv[l].data(), b, dir, g_s));
             }
             for (auto& D : g_dev) CU(cudaStreamSynchronize(D.s));
-            return true;
+            return 0;
         };
         auto reset = [&]() {
             for (auto& sn : snaps) sn.pos = -1;
@@ -10188,15 +10191,19 @@ int main(int argc, char** argv) {
             trim_parked();
         };
         // a kept conversation into the cache: the whole of it (it leaves the kept ones), or its start up to a
-        // snapshot at `upto` (it stays kept: the request goes another way from there)
-        auto unpark = [&](int j, int upto) -> bool {
+        // snapshot at `upto` (it stays kept: the request goes another way from there).  0: in the cache;
+        // -1: the old reasons (a folder file that would not read, no snapshot at `upto`) - as before the
+        // growable cache these cost only the re-read, the request going on from the start; 1: its rows needed a
+        // stretch of the elastic K / V that could not be committed - the one failure the growth can cause,
+        // which fails the request
+        auto unpark = [&](int j, int upto) -> int {
             const double tp = now();
             if (!parked[j].loaded) {
                 Conv cv;
                 if (!conv_read(parked[j].file, cv, false)) {
                     say("a saved conversation could not be read: " + parked[j].file);
                     parked.erase(parked.begin() + j);
-                    return false;
+                    return -1;
                 }
                 cv.used = parked[j].used;
                 parked[j] = std::move(cv);
@@ -10207,9 +10214,9 @@ int main(int argc, char** argv) {
             int at = -1;
             for (int i = 0; i < (int) cv.snaps.size(); ++i)
                 if (cv.snaps[i].pos == n) at = i;
-            if (at < 0) return false;
-            if (!full_rows(cv, n, false)) return false;   // (a3: its rows land past the committed start step only
-                                                          //  if that stretch of the K / V could be committed)
+            if (at < 0) return -1;
+            const int fr = full_rows(cv, n, false);       // (a3: its rows land past the committed start step only
+            if (fr) return fr;                            //  if that stretch of the K / V could be committed)
             snaps.assign(n_snaps, Snap{});
             snap_next = 0;
             if (whole) {   // (its snapshots: the latest ones that fit)
@@ -10233,7 +10240,7 @@ int main(int argc, char** argv) {
                 std::to_string((int) ((now() - tp) * 1e3)) + " ms)");
             if (whole) parked.erase(parked.begin() + j);
             else cv.used = ++conv_clock;
-            return true;
+            return 0;
         };
         auto parse_ints = [](const std::string& t) {
             std::vector<int> v;
@@ -10966,7 +10973,8 @@ int main(int argc, char** argv) {
                     int j = -1;   // (setting the other aside may have moved it)
                     for (int q = 0; q < (int) parked.size(); ++q)
                         if (parked[q].hist == key) j = q;
-                    if (j >= 0 && !unpark(j, fork ? r_best : -1)) {
+                    const int ur = j >= 0 ? unpark(j, fork ? r_best : -1) : 0;
+                    if (ur == 1) {
                         // (a3: its rows needed a chunk the K / V could not commit - the request fails cleanly, the
                         //  engine and the kept conversation untouched (the cache holds nothing, the next request
                         //  reads from the start))
@@ -10980,6 +10988,10 @@ int main(int argc, char** argv) {
                         g_wd_busy = false;
                         continue;
                     }
+                    // (ur < 0: the older reasons - the folder file would not read, or no snapshot at the join.
+                    //  As before the growable cache those cost only the re-read: the cache holds nothing and the
+                    //  request goes on from the start - they are no OOM, and on a card with no VMM-backed K / V
+                    //  they never were; only the grow failure above can be one)
                 } else if (r_best < (int) hist.size() && later_turn(act_pts, r_best)) {
                     Snap cp;   // back past a later turn: the conversation as it is stays kept, this one goes on from the snapshot
                     for (const auto& sn : snaps)
