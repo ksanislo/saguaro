@@ -113,6 +113,7 @@ bool window_vram_parts(uint64_t& weights, uint64_t& kv, uint64_t& pool, uint64_t
 #include "strata/program/draft_kv_plan.hpp"
 #include "strata/program/message_boundary.hpp"
 #include "strata/program/read_progress.hpp"
+#include "strata/program/tier_stats.hpp"
 #include "strata/program/slot_grid.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/draft_source.hpp"
@@ -13302,9 +13303,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             // the Monitor's "Where the experts live" layout (parity with the maya engines' Qwen path, which names
             // itself the same way): engine_kind=qfn picks TIER_SETS.qfn (serve/web/monitor.js), and tierShares()
             // (serve/web/server.js) reads experts / vram_slots / vram_gb / ram_slots / ram_gb from here and
-            // vram_used / ram_used / vram_gb / ram_gb / disk_gb from the STAT lines.  QFN has no SSD tier: every
-            // expert lives in RAM (resident or mapped) and the ones VRAM's caches do not hold are computed by the
-            // CPU from there, so the STAT lines report disk=0 / disk_gb=0.
+            // vram_used / ram_used / vram_gb / ram_gb / disk_gb from the STAT lines.  P125s: with a resident
+            // complement (--resident-budget-gib) or --mmap-experts the STAT lines report the experts it holds as
+            // the RAM tier and the rest of the files as the SSD tier; without one every expert lives in RAM (the
+            // resident arena) and those lines keep disk / disk_gb at 0.
             {
                 const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
                 std::printf("INFO engine_kind=qfn experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\n",
@@ -13902,12 +13904,14 @@ vs.d_skip_usage = gs.d_skip_usage;
         int64_t bstat_hits0 = drive.d.cache_hits, bstat_toks0 = 0, bstat_off0 = 0, bstat_acc0 = 0;
         int64_t bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
         int64_t bstat_promo0 = promo_now();
+        int64_t bstat_files0 = src.file_reads();   // P125s: the file tier's reads, for the STAT line's disk=
         Clock::time_point bstat_t1 = Clock::now();
         const auto bstat_reset = [&] {
             bstat_t1 = Clock::now();
             bstat_hits0 = drive.d.cache_hits;
             bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             bstat_promo0 = promo_now();
+            bstat_files0 = src.file_reads();
             bstat_toks0 = bstat_toks; bstat_off0 = bstat_off; bstat_acc0 = bstat_acc;
         };
         const auto batch_stat_line = [&](int active_slots) {
@@ -13923,10 +13927,14 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t look = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused - bstat_look0;
             const double n = (double) std::max<int64_t>(1, bstat_toks - bstat_toks0);
             // PLAN-qfn-per-request-read-stats (parity 14): what the page's qwen tier layout reads beside the hit
-            // share - ram_fetch: the routed selections a token found outside the VRAM caches, the CPU lane then
-            // computes from RAM (QFN has no SSD tier to read from: disk / disk_gb are 0 by design), and the
-            // residency the bar draws (tierShares() in serve/web/server.js): experts in the VRAM caches vs the
-            // rest held in RAM, the caches' slots and bytes as they stand NOW (the adaptive tier moves them).
+            // share - ram_fetch: the routed selections a token found outside the VRAM caches, and the residency
+            // the bar draws (tierShares() in serve/web/server.js): the experts in the VRAM caches, in the RAM
+            // tier and on the file tier, with the caches' slots and bytes as they stand NOW (the adaptive tier
+            // moves them).  P125s: the RAM tier is what the resident copy (the --resident-budget-gib complement)
+            // actually holds and the SSD tier is the rest of the files - a rig with 11 GiB of RAM and 72 GiB of
+            // experts says so; without a copy the tier outside the caches is RAM as before (the mmap's page
+            // cache, or the resident arena).  disk= counts this window's file-tier reads per token, the way the
+            // DS4 engine reports its storage reads.
             int64_t v_used = xcache.resident(), v_slots = (int64_t) xcache.slots();
             double v_bytes = (double) xcache.bytes();
             for (const auto& st : stages) {
@@ -13941,17 +13949,28 @@ vs.d_skip_usage = gs.d_skip_usage;
                     v_bytes += remote_experts[(size_t) r].gib() * 1073741824.0;
                 }
             const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
-            const double ram_bytes = (double) (o.mmap_experts ? src.resident_bytes()
-                                                              : strata::kernels::cpu::expert_layout().total);
-            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "
-                        "vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=0.0 "
+            // P125s: the experts the resident copy holds NOW (count and bytes from ONE locked pass, after
+            // relief's trims and the adaptive tier's exchanges, so the two cannot straddle a trim);
+            // 0 without one, which is plain mmap or arena mode.
+            int64_t comp_used = 0;
+            uint64_t comp_bytes = 0;
+            src.resident_expert_stats(comp_used, comp_bytes);
+            // the file tier's bytes where there is one (the mapped source), the arena's where there is not
+            const double all_bytes = (double) (comp_used > 0 || o.mmap_experts
+                                                   ? src.expert_bytes()
+                                                   : strata::kernels::cpu::expert_layout().total);
+            const strata::program::StatTiers tiers =
+                strata::program::stat_tiers(all_experts, all_bytes, v_used, v_bytes,
+                                            comp_used, (double) comp_bytes, o.mmap_experts);
+            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=%.3f promo=%.3f "
+                        "vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=%.1f "
                         "draft_acc=%lld draft_off=%lld active=%d\n",
                         n / std::max(1e-9, el), 1000.0 * el / n, (double) h / (double) std::max<int64_t>(1, look),
                         (double) std::max<int64_t>(0, look - h) / n,
+                        (double) std::max<int64_t>(0, src.file_reads() - bstat_files0) / n,
                         (double) std::max<int64_t>(0, promo_now() - bstat_promo0) / n,
                         (long long) v_used, (long long) v_slots,
-                        (long long) std::max<int64_t>(0, all_experts - v_used),
-                        ram_bytes / 1073741824.0, v_bytes / 1073741824.0,
+                        (long long) tiers.ram_used, tiers.ram_gb, v_bytes / 1073741824.0, tiers.disk_gb,
                         (long long) (bstat_acc - bstat_acc0), (long long) (bstat_off - bstat_off0), active_slots);
             std::fflush(stdout);
             bstat_reset();
@@ -22779,6 +22798,9 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                 };
                 const Clock::time_point pl_t0 = Clock::now();
+                // P125s: this reply's STAT measurement starts fresh here, as the serial loop's does at its own start:
+                // without it the first line after an idle gap would divide the reply's few tokens by the whole gap.
+                if (o.batch == 0) bstat_reset();
                 for (int st = 0; st < 2; ++st)
                     for (int par = 0; par < 2; ++par) g_pl_diag.v[st][par] = PV[st][par];
                 strata::core::diag_pipeline_fn().store(&pl_diag_print);
@@ -23018,6 +23040,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                     dec_T += A.T;
                     const bool nf = nonfinite_hit(V1(A), "decode");   // #879: none of its tokens goes out
                     bool eos = false;
+                    const int64_t pl_prod0 = produced_n;   // the tokens this window emits: the solo STAT line's denominator
                     for (int i = 0; !nf && i <= a && produced_n < max_new && !eos; ++i) {
                         std::printf("T %d\n", (int) outp[(size_t) i]);
                         strata::core::progress_beat();
@@ -23026,6 +23049,15 @@ vs.d_skip_usage = gs.d_skip_usage;
                         eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outp[(size_t) i]) != o.eos_ids.end();
                     }
                     std::fflush(stdout);
+                    // P125s: the pipelined solo loop is a solo decode path too - the Monitor's "where the experts
+                    // live" card must fill in beside a --pipeline-windows reply as it does beside the serial one.
+                    // Same counters, same once-a-second cadence, same function (the serial loop's call below).
+                    if (o.batch == 0) {
+                        bstat_toks += produced_n - pl_prod0;
+                        bstat_off += A.T - 1;   // (the window's rows are drafts: pipelined replies have no merged one)
+                        bstat_acc += a;
+                        batch_stat_line(1);   // one active slot (this request)
+                    }
                     if (nf) finish = "nonfinite";
                     else if (eos) finish = "stop";
                     else if (stop_req.load()) finish = "cancel";

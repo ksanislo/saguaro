@@ -2,6 +2,7 @@
 #include "strata/core/foresight_swap.hpp"
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/program/tier_stats.hpp"
 
 #if defined(STRATA_NATIVE_EXPERTS)
 #include "strata/kernels/cpu/native_expert.hpp"
@@ -276,6 +277,58 @@ void test_complement_plan() {
     require(!make_cache_complement_plan(2, 3, {3, 5}, {{2, 0}}, {}, offsets, bytes, error),
             "out-of-range pair accepted");
     require(!make_cache_complement_plan(2, 3, {0, 5}, {}, {}, offsets, bytes, error), "zero-size layer accepted");
+}
+
+// P125s: the STAT line's field math.  The RAM tier is what the compact copy HOLDS (its live offsets, after
+// relief's trims), the SSD tier the rest of the files - a --resident-budget-gib rig's panel must say experts
+// live on the SSD; with no copy the tier outside the VRAM caches stays RAM (the mmap page cache, the arena).
+void test_resident_tier_fields() {
+    using strata::core::detail::count_cache_complement;
+    using strata::core::detail::kNoCacheComplement;
+    using strata::program::stat_tiers;
+    constexpr double GiB = 1073741824.0;
+
+    // two layers of three experts: a layer-0 blob is 5 bytes and a layer-1 blob 3 (variable native sizes).
+    // (0,0) and (0,2) sit in the GPU cache (no RAM place); the copy holds (0,1) and (1,1), (1,2).
+    const std::vector<uint64_t> layer_bytes{5, 3};
+    std::vector<uint64_t> offsets{kNoCacheComplement, 0, kNoCacheComplement, kNoCacheComplement, 5, 8};
+    int64_t count = -1;
+    uint64_t bytes = 0;
+    count_cache_complement(offsets, 3, layer_bytes, count, bytes);
+    require(count == 3 && bytes == 11, "the copy's count/bytes wrong");
+    // a slot relief trims (1,1)'s place: the figures follow the offsets, not the arena's size
+    offsets[4] = kNoCacheComplement;
+    count_cache_complement(offsets, 3, layer_bytes, count, bytes);
+    require(count == 2 && bytes == 8, "a trimmed place was still counted");
+    // an empty table, and one with no place at all, count as nothing (plain mmap, the arena)
+    count_cache_complement({}, 3, layer_bytes, count, bytes);
+    require(count == 0 && bytes == 0, "an empty copy counted");
+    offsets.assign(6, kNoCacheComplement);
+    count_cache_complement(offsets, 3, layer_bytes, count, bytes);
+    require(count == 0 && bytes == 0, "a file-only copy counted");
+
+    // Paul's P40 rig, at one expert = 1 MiB (24576 experts = 24 GiB): 4096 experts (4 GiB) in the VRAM
+    // caches, the 11 GiB complement hot, and the remaining 9216 experts only on the SSD.
+    const strata::program::StatTiers resident =
+        stat_tiers(24576, 24.0 * GiB, 4096, 4.0 * GiB, 11264, 11.0 * GiB, true);
+    require(resident.ram_used == 11264 && resident.ram_gb == 11.0, "the RAM tier is not the complement");
+    require(resident.disk_used == 9216 && resident.disk_gb == 9.0, "the SSD tier is not the rest of the files");
+
+    // the mmap mode with no copy: the page cache is the RAM tier (what it holds is the whole file tier),
+    // nothing reads an SSD tier; the resident arena the same shape, over its own bytes
+    const strata::program::StatTiers mmapped = stat_tiers(24576, 24.0 * GiB, 4096, 4.0 * GiB, 0, 0.0, true);
+    require(mmapped.ram_used == 20480 && mmapped.ram_gb == 20.0 && mmapped.disk_used == 0 && mmapped.disk_gb == 0.0,
+            "plain mmap lost its page-cache tier");
+    const strata::program::StatTiers arena = stat_tiers(24576, 24.0 * GiB, 4096, 4.0 * GiB, 0, 0.0, false);
+    require(arena.ram_used == 20480 && arena.ram_gb == 24.0 && arena.disk_used == 0 && arena.disk_gb == 0.0,
+            "the arena lost its resident tier");
+
+    // the helper caches can report more VRAM bytes than the pack has: the file tier clamps at 0, never negative
+    const strata::program::StatTiers over =
+        stat_tiers(24576, 24.0 * GiB, 20480, 30.0 * GiB, 11264, 11.0 * GiB, true);
+    require(over.ram_used == 11264 && over.ram_gb == 11.0, "a clamped reading moved the RAM tier");
+    require(over.disk_used == 0 && over.disk_gb == 0.0, "a clamped reading drew a negative SSD tier");
+    std::cout << "resident tiers: count/bytes vs the file tier: PASS\n";
 }
 
 void test_resident_lend_region() {
@@ -1032,6 +1085,7 @@ void test_replace_resident(bool pin) {
 int main(int argc, char** argv) {
     try {
         test_complement_plan();
+        test_resident_tier_fields();
         test_resident_lend_region();
         test_split_lend_regions();
         test_vram_giveback();

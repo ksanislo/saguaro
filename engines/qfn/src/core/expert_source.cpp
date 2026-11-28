@@ -243,6 +243,23 @@ const uint8_t* cache_complement_blob_or_fallback(
     return mapped_fallback;
 }
 
+void count_cache_complement(const std::vector<uint64_t>& offsets, int64_t n_expert,
+                            const std::vector<uint64_t>& layer_blob_bytes, int64_t& count, uint64_t& bytes) {
+    count = 0;
+    bytes = 0;
+    if (n_expert <= 0) return;
+    for (size_t i = 0; i < offsets.size(); ++i) {
+        // a live slot reads as an offset, a trimmed one as kNoCacheComplement; the atomic view is the race
+        // against relief's phase-1 flips and the exchange commits (the same one relieve_ram's snapshot takes)
+        const uint64_t at = std::atomic_ref<const uint64_t>(offsets[i]).load(std::memory_order_acquire);
+        if (at == kNoCacheComplement) continue;
+        const size_t layer = i / (size_t) n_expert;
+        if (layer >= layer_blob_bytes.size()) continue;   // (a table past its geometry is not counted)
+        ++count;
+        bytes += layer_blob_bytes[layer];
+    }
+}
+
 int64_t choose_resident_keep_from(const std::vector<uint64_t>& slot_bytes, uint64_t base_bytes, uint64_t budget,
                                   int64_t lend_from) {
     if (base_bytes > budget) return -1;
@@ -4305,6 +4322,19 @@ bool FileExpertSource::has_resident(int64_t layer, int64_t expert) const {
     if (!complement_ready_ || layer < 0 || expert < 0 || layer >= n_layers_ || expert >= n_expert_) return false;
     const size_t index = (size_t) layer * (size_t) n_expert_ + (size_t) expert;
     return resident_blob(index) != nullptr;
+}
+
+// P125s: what the compact copy holds, for the STAT line's RAM / file split.  Under complement_mu_, like
+// relief's snapshot: the offsets vector is reallocated by install_resident and flipped entry by entry by
+// the exchanges and the relief, none of which the once-a-second reading has to match exactly - but a
+// non-atomic read of a word being rewritten is not a figure either.  Count and bytes come from ONE pass
+// under the lock, so a relief's trim cannot land between the two figures of one line.
+void FileExpertSource::resident_expert_stats(int64_t& count, uint64_t& bytes) const {
+    count = 0;
+    bytes = 0;
+    if (!complement_ready_) return;
+    std::lock_guard<std::mutex> lk(complement_mu_);
+    detail::count_cache_complement(complement_offsets_, n_expert_, layer_blob_bytes_, count, bytes);
 }
 
 bool FileExpertSource::reserve_exchanges(int64_t n, std::string& err, int64_t bounce) {

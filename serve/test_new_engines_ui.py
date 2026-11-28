@@ -462,8 +462,10 @@ console.log(JSON.stringify({{shares: sv.tierShares(n, eng), set: mon.tierSet(eng
         STAT line (promo= from T6a), Speculation named by its INFO mtp=, and the Context card's QFN lines
         (contextFacts from engine.context_ram / engine.slot_memory / context.turn_saves)."""
         self.assertIn("mtp_max=%d mtp=%d lookup=%d vram_free_mib=%lld", QFN_SRC)    # (T6a: INFO says mtp=)
-        self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "',
+        self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=%.3f promo=%.3f "',
                       QFN_SRC)                                                      # (T6a: STAT says promo=)
+        self.assertIn("vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=%.1f ",
+                      QFN_SRC)                                                      # (P125s: disk= / disk_gb= are read now)
         eng = info_of("INFO engine_kind=qfn experts=13824 vram_slots=16384 vram_gb=50.8 ram_slots=0 ram_gb=63.4")
         stat = {k: float(v) for k, v in info_of(
             "STAT tok_s=21.40 ms_tok=46.73 vram_hit=0.9512 ram_fetch=0.487 disk=0.000 promo=0.031 vram_used=4096 "
