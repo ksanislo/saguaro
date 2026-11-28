@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <functional>
 #include <string>
+#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -66,12 +67,24 @@ public:
         std::thread([fn] {
             for (;;) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
-                fn();
+                running().fetch_add(1);                  // (counted BEFORE the flag is read: stop() cannot miss a tick)
+                if (!stopping().load()) fn();
+                running().fetch_sub(1);
+                if (stopping().load()) return;
             }
         }).detach();
     }
+    /// 1.2.4-pre (Paul's P40, the fatal-signal stack at exit): the beat's fn reads the caches, the expert arena and
+    /// the slot pools, which the engine's teardown frees - a detached beat ticking after that was a use-after-free.
+    /// Call before the teardown: no fn runs once this returns (it waits up to 3 s for one in flight).
+    static void stop() {
+        stopping().store(true);
+        for (int i = 0; i < 300 && running().load() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
 private:
+    static std::atomic<bool>& stopping() { static std::atomic<bool> f{false}; return f; }
+    static std::atomic<int>& running() { static std::atomic<int> n{0}; return n; }
     std::vector<std::string> last_;
     std::vector<char> dirty_;
     std::chrono::steady_clock::time_point next_{}, next_all_{};

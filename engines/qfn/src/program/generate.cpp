@@ -24114,6 +24114,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 helper_bytes_before = bytes;
             }
         }
+        // 1.2.4-pre: the VramLive beat reads the caches / arena / slot pools the teardown below frees - stop it first.
+        strata::program::VramLive::stop();
         if (sdir) {   // --session-dir: the active conversation too, then everything queued, before the engine ends
             // P125d: a GiB conversation parked into swapped-out RAM copies at well under 1 MiB/s (#2049/#2065/#1971) -
             // the whole exit save gets --session-dir-exit-s (10 s).  Past it the rest is skipped: what is on disk
