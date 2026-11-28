@@ -203,3 +203,63 @@ rests on) are open questions the review accepted, not findings - unchanged, rest
 - `py_compile`: serve/server.py, serve/qfn_engine.py, engines/qfn/serve/server.py,
   serve/test_priority.py - OK; `bash -n tools/card_tests/layer_pause.sh` - clean.
 - No card test run: no card on this box and the manager's step 3 says "No GPU runs".
+
+---
+
+# FIX-REPORT - P125k manager card round 3 (FIX-FIRST of REVIEW-RESULT.md at 28c2111c3, 2026-11-27 15:45 PST)
+
+The card: re-merge P125j, fix the REPORT's :257 "byte-identical" nit, build QFN only + run the
+named tests. No GPU runs. Finding -> what was done:
+
+## 1 - "git merge saguaro/q1-p125j-layer-pause again (bring in P125j's later rounds)" - MERGE RAN, NOTHING NEW EXISTS TO BRING IN (320dc3a5f)
+
+`git merge saguaro/q1-p125j-layer-pause` at HEAD: **"Already up to date"** - no conflict, nothing
+to resolve, no merge commit (nothing moved). The verification behind that, each in this repo only:
+
+- refs/heads/saguaro/q1-p125j-layer-pause = d8e25fd95 = its round-4 FIX-FIRST tip, the exact commit
+  70f67efde already merged in ("p125j tip already in HEAD" by `merge-base --is-ancestor`).
+- That branch's worktree is clean at the same commit - no uncommitted round-5/6 work sitting there.
+- `git reflog show saguaro/q1-p125j-layer-pause` ends at d8e25fd95: the branch never had a commit
+  after it, so there is no amended-away round-5/6 work in this object store (a `git fsck` sweep for
+  dangling commits found no P125j message beyond round 4 either).
+- No remote carries the branch: `git ls-remote` on saguaro/origin/fork has no `*p125*` ref, and this
+  repo holds no remote-tracking p125j ref.
+
+So the round-6-passed P125j the card cites is not in this repo's refs - exactly what the merge round
+predicted above ("If the RC carries a newer P125j tip, re-merging the updated ref is a round of its
+own"). Both behaviours the round-1 merge kept (P125k's scoped narrow waits + P125j's drop_read_pause
+and pause plumbing, hunk-by-hunk in dc436f2f0 §1) stand unchanged at this HEAD; the manager's card
+itself is committed here (320dc3a5f) so the instruction rides the branch.
+
+## 2 - the REPORT's "byte-identical" claim at conversation_state.cpp:257 - FIXED (f3d89c6c7)
+
+REPORT-p125k-park-sync.md, three overstatements rewritten, wording only, no code change:
+
+- §2 gate bullet: gated-out shapes do keep the whole-device sync for the ARMED waits, but not
+  byte-identical overall - the restore tail `copy_done` (conversation_state.cpp:257) and the
+  copy-stream residency refresh are ungated (the §5 "every caller" contract) and ride those shapes
+  too: their restores now end on their own copies instead of the old device sync - they wait less,
+  never under-wait, and the device-wide pre-sync ahead of the copies still drains everything.
+- §2 first bullet: `persist_slot`'s `light` path is not byte-identical either - the hoisted
+  `ConvSyncScope` waits the scoped streams PLUS this thread's private copy stream
+  (`park::wait_streams` always includes it), so the FAST_LANE slot save gained a narrow sync of its
+  own thread's queued copies; it still never device-syncs.
+- §5 multi-GPU/pipelined bullet: same correction - the gate keeps those armed waits whole-device;
+  the restore-tail change still rides them.
+
+## 3 - build + tests (manager step 3; no GPU)
+
+- `QFN_GGML_DIR=../strata-main/third_party/llama.cpp tools/qfn/build.sh scratch/build-p125k-merge2`:
+  a new dir, sm_75, CUDA 13.1 nvcc, QFN-only (strata + strata_kq + strata_kq_tab). The first ninja
+  pass was interrupted by the launcher's foreground timeout at [140/179]; the identical ninja
+  command (build.sh's own line, same dir/targets/flags) was resumed detached and finished:
+  **QFN BUILD OK f3d89c6c7 -> scratch/build-p125k-merge2**, `saguaro-qfn` linked, `ninja -n` for the
+  three targets reports *no work to do* at tip. The build log's warnings are the pre-existing set
+  (unused `w`/`f`/`hcd`/`n_kv`, misleading-indentation) - no new class. Logs:
+  scratch/build-p125k-merge2.{cmake,build,nohup}.log.
+- `park_policy_test` (the plan's module, P125k's 65 checks): as a scratch/build-p125k-merge2 target
+  and standalone (`g++ -std=c++20 -I engines/qfn/include`) - **65 checks passed** each, one at a time.
+- `layer_pause_test` (the unit test P125j added): same build's target and standalone -
+  **ok: 43 checks, 0 bad** each, one at a time.
+- `serve/qfn_engine.py` untouched (no server-side change this round, so no extraction was due);
+  no GPU was touched.
