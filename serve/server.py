@@ -1704,7 +1704,8 @@ class StrataEngine:
             # (glm, before a restored read: this many of the prompt's tokens are not read again. The reuse base rides
             # the PP lines for these engines ("no RESUME base needed", the solo reader), so the line is only taken -
             # routed to its own request when one is live: it says that read began - and never left for the shared
-            # queue, which in multi mode nothing reads)
+            # queue, which in multi mode nothing reads. The request's own loop reads the figure from it into
+            # engine.reused: the continued low read's line carries it (P124b, the StrataEngine driver's side))
             f = line.split()
             if len(f) >= 3 and f[1].isdigit():
                 with self._routes_lock:
@@ -1852,6 +1853,25 @@ class StrataEngine:
             self._tls.last = v
         else:
             self._last = v
+
+    @property
+    def reused(self):
+        """The RESUME line of the read in flight: the base that read continues from, the engine's own figure - the
+        figure Service._sliced's continue line of a resumed low read carries (P124b, where only the QFN driver set
+        it: a line-protocol engine that says RESUME - GLM, DS4 with its kept read - reaches it here too).  None
+        until the line arrives: an engine that reports no figure over the pipe keeps the numberless wording, and
+        generate()/_generate_multi reset it, so no stale figure crosses into the next call.  Multi: this thread's
+        request's own (its RESUME was routed to it)."""
+        if self.multi:
+            return getattr(self._tls, "reused", None)
+        return getattr(self, "_reused", None)
+
+    @reused.setter
+    def reused(self, v):
+        if self.multi:
+            self._tls.reused = v
+        else:
+            self._reused = v
 
     def _parse_done(self, line):
         f = line.split()
@@ -2040,6 +2060,7 @@ class StrataEngine:
             return
         self.progress = None
         self.prefill_tok_s_mean = None
+        self.reused = None                            # (P124b: this call's own RESUME figure - none carried over)
         if getattr(self, "_tls", None) is not None:   # (this request's own prompt progress: Service._progress)
             self._tls.own_pp = None
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
@@ -2116,6 +2137,9 @@ class StrataEngine:
                     self._parse_stat(line)
                 elif line.startswith("NOTE "):                # what happens to the kept conversations
                     print("[saguaro] " + line[5:].strip(), flush=True)
+                elif line.startswith("RESUME "):              # (GLM/DS4, before the read: the base this read goes on
+                    f = line.split()                          #  from - its own figure, the continue line's; a figure
+                    self.reused = int(f[1]) if len(f) >= 2 and f[1].isdigit() else None   #  that cannot parse is none)
                 elif line.startswith("DONE"):
                     self._parse_done(line)
                     self._ik2_done(ik2_stats)
@@ -2264,6 +2288,7 @@ class StrataEngine:
         self._tls.pp = None                 # this request's last prompt-progress report (fair reads)
         self.progress = None
         self.prefill_tok_s_mean = None
+        self.reused = None                  # (P124b: this request's own RESUME figure, reset per call)
         self._tls.own_pp = None
         keys = self.gen_keys(sampling or {}) + f" rid={rid}"
         head = f"GENI {int(max_new)}{keys} {embeddings}" if embeddings else f"GEN {int(max_new)}{keys}"
@@ -2349,6 +2374,9 @@ class StrataEngine:
                     if cancel.is_set():
                         return
                     yield None
+                elif line.startswith("RESUME "):        # (this request's RESUME, _route brought it here:
+                    self.reused = int(f[2]) if len(f) >= 3 and f[2].isdigit() else None   #  <rid> <reused> - its
+                    #  read's own figure, the continue line's (P124b); f[1] is the rid _route routed on)
                 elif line.startswith("DONE "):
                     self._parse_done("DONE " + line.split(None, 2)[2])
                     done = True

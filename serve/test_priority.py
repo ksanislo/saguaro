@@ -991,6 +991,34 @@ class TheMultiCutNamesOneRequest(unittest.TestCase):
         self.assertEqual(err, [])
         self.assertEqual(got, [None])
         self.assertEqual(eng.proc.stdin.sent[-1], "STOP 1")     # its rid alone: never an engine-wide STOP
+class TheResumeLine(Env):
+    """P124k round 3: the RESUME figure a line-protocol engine says before its read (GLM's prep_prompt, DS4's kept
+    prompt read) must reach the attribute the continue line reads - not only the QFN driver set engine.reused, so
+    a DS4 read kept at 32,768 logged its numberless line beside the figure its own engine had printed.  The real
+    StrataEngine driver, against the fake engines that speak those lines."""
+
+    def test_the_solo_driver_keeps_its_resume_figure(self):
+        from serve.server import StrataEngine
+        eng = StrataEngine(str(ROOT / "serve/fake_solo_parity_engine.py"), [])
+        try:
+            self.assertIsNone(eng.reused)                    # (nothing heard yet: the numberless wording stands)
+            [t for t in eng.generate(list(range(30)), 3, {}, threading.Event()) if t is not None]
+            self.assertEqual(eng.reused, 4)                  # (the fake's RESUME 4: that read's own base)
+            [t for t in eng.generate(list(range(2)), 3, {}, threading.Event()) if t is not None]
+            self.assertEqual(eng.reused, 1)                  # (per call: this read's figure, not the last call's)
+        finally:
+            eng.close()
+
+    def test_the_multi_driver_keeps_its_own_resume_figure(self):
+        from serve.server import StrataEngine
+        eng = StrataEngine(str(ROOT / "serve/fake_multi_engine.py"), ["3"],
+                           env=dict(os.environ, FAKE_PARITY_LINES="1"))
+        try:
+            self.assertIsNone(eng.reused)                    # (no RESUME heard yet for this thread's request)
+            [t for t in eng.generate(list(range(20)), 5, {}, threading.Event()) if t is not None]
+            self.assertEqual(eng.reused, 0)                  # (RESUME <rid> 0: routed to its request, parsed)
+        finally:
+            eng.close()
 
 
 class AcrossThePause(Env):
