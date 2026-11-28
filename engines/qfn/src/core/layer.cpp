@@ -1008,12 +1008,12 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
 #endif
 // P124e: Linux lets a pin succeed while ANY RAM is left, so the reactive relief below (on a refused pin) came too
 // late: a 546K conversation pinned +8 GiB, the 68 GiB expert tier kept all of it and the box swapped.  Before a grow
-// pins `bytes`, the RAM it leaves must stay above SAGUARO_HOST_GROW_RESERVE_MIB (default 4096: the 2560 MiB guard
-// floor + the read's own buffers); the expert RAM tier gives the shortfall back first.
+// pins `bytes`, the RAM it leaves must stay above SAGUARO_HOST_GROW_RESERVE_MIB (default 10240: the 2560 MiB guard
+// floor + the read's own buffers + the kernel's page cache, measured on mortar); the expert RAM tier gives the shortfall back first.
 void host_make_room(uint64_t bytes) {
     static const uint64_t reserve = [] {
         const char* v = std::getenv("SAGUARO_HOST_GROW_RESERVE_MIB");
-        const long long m = v != nullptr ? std::atoll(v) : 4096;
+        const long long m = v != nullptr ? std::atoll(v) : 10240;
         return (uint64_t) std::max<long long>(0, m) << 20;
     }();
     const auto av = available_host_bytes();

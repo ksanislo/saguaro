@@ -9314,6 +9314,30 @@ int main(int argc, char** argv) {
             src.set_extra_drop_files(std::move(drop));
         }
         const std::vector<std::pair<int32_t, int32_t>>& rank_all = profile_all.empty() ? profile : profile_all;
+#if defined(__linux__)
+        // P124e: with the K/V host copy elastic, a GPU-registered page cannot be given back (relieve_ram skips the
+        // registered prefix), so a complement registered WHOLE leaves a growing conversation no RAM but swap (mortar:
+        // the 546K read stalled at 90 %).  Register only the hottest share and leave the K/V one conversation can reach
+        // at --max-context (~15.4 KiB a cell, measured) as a releasable, page-locked tail.  Defaults only: a value the
+        // operator set wins.
+        if (o.serve && o.resident_pin && o.resident_budget > 0) {
+            const char* he = std::getenv("SAGUARO_KV_HOST_ELASTIC");
+            if (he == nullptr || std::atoi(he) != 0) {
+                const double gib = (double) o.resident_budget / 1073741824.0;
+                const double kv_gib = (double) o.max_context * 15.4 * 1024.0 / 1073741824.0;
+                const double cap = std::max(gib * 0.5, gib - kv_gib - 2.0);
+                char v[32];
+                std::snprintf(v, sizeof v, "%.1f", cap);
+                setenv("SAGUARO_PIN_GUARD", "2", 0);
+                setenv("SAGUARO_PARTIAL_PIN", "1", 0);
+                setenv("SAGUARO_PARTIAL_PIN_GIB", v, 0);
+                std::fprintf(stderr, "saguaro generate: elastic K/V host copy: the expert RAM tier registers its hottest %s "
+                                     "of %.1f GiB for the GPU; the rest can give way to a conversation that grows to "
+                                     "--max-context %lld (SAGUARO_PARTIAL_PIN_GIB sets it)\n",
+                             std::getenv("SAGUARO_PARTIAL_PIN_GIB"), gib, (long long) o.max_context);
+            }
+        }
+#endif
         bool resident_ok = src.pin_cache_complement(xcache, err, o.resident_pin, stage_pairs, lend_from,
                                                     o.resident_headroom, o.resident_budget, &rank_all);
         std::string whole_err;
