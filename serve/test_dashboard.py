@@ -520,6 +520,11 @@ QFN_INFO = ("INFO logit_bias=1 context=1048576 kv=q8_0 kv_resident=65536 kv_byte
 QFN_KIND = "INFO engine_kind=qfn experts=13824 vram_slots=16384 vram_gb=50.8 ram_slots=0 ram_gb=63.4"
 QFN_STAT = ("STAT tok_s=21.40 ms_tok=46.73 vram_hit=0.9512 ram_fetch=0.487 disk=0.000 promo=0.031 vram_used=4096 "
             "vram_slots=5120 ram_used=9728 ram_gb=71.2 vram_gb=2.4 disk_gb=0.0 draft_acc=37 draft_off=58 active=1")
+# P125s: the same line from a --resident-budget-gib rig: the RAM tier is the complement's experts and bytes,
+# disk= counts this window's file-tier reads per token and disk_gb the experts only the SSD holds
+QFN_STAT_SSD = ("STAT tok_s=14.20 ms_tok=70.42 vram_hit=0.6112 ram_fetch=1.204 disk=1.876 promo=0.002 "
+                "vram_used=4096 vram_slots=5120 ram_used=2048 ram_gb=11.0 vram_gb=2.4 disk_gb=70.2 "
+                "draft_acc=12 draft_off=36 active=1")
 QFN_HMEM = "HMEM 3221225472 6442450944 2 1073741824 2147483648"
 QFN_KMEM = "KMEM 1 0 4294967296 1073741824 536870912"
 QFN_SESS = ('INFO sess_json={"files":2,"bytes":73400320,"max_bytes":1073741824,"max_files":16,"max_age_days":14,'
@@ -556,7 +561,12 @@ class QfnStatsToMonitor(unittest.TestCase):
         """The fixtures above are the formats generate.cpp prints (T6a's mtp= and promo= included) and the driver
         still passes its special lines through into engine.info / the session folder's state."""
         self.assertIn("mtp_max=%d mtp=%d lookup=%d vram_free_mib=%lld", QFN_CPP)
-        self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "', QFN_CPP)
+        # P125s: disk= and disk_gb= are read fields now (a --resident-budget-gib rig's file tier), never the old
+        # constants - the printf prints them from its computed tiers
+        self.assertIn('"STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=%.3f promo=%.3f "', QFN_CPP)
+        self.assertIn("vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=%.1f ", QFN_CPP)
+        self.assertNotIn("disk=0.000 promo=%.3f", QFN_CPP)
+        self.assertNotIn("disk_gb=0.0 \"", QFN_CPP)
         self.assertIn('"INFO engine_kind=qfn experts=%lld vram_slots=%lld vram_gb=%.1f ram_slots=%lld ram_gb=%.1f\\n"',
                       QFN_CPP)
         for src in (QFN_DRIVER, QFN_GEN):
@@ -1075,6 +1085,20 @@ console.log(JSON.stringify({glm: sv.tierShares(n, {experts: 2000}), none: sv.tie
         self.assertEqual((got["ds4"]["total"], got["ds4"]["disk"], got["ds4"]["diskGb"]), (440, 300, 75.5))
         self.assertIsNone(got["none"]["diskGb"])                                   # (an engine that reports no bytes: the count alone)
         self.assertEqual((got["full"]["disk"], got["full"]["diskGb"]), (0, 0))
+
+    def test_a_qfn_stat_line_with_disk_draws_a_nonzero_ssd_share(self):
+        # P125s: a --resident-budget-gib rig's STAT line (the complement's ram_used/ram_gb, the file tier's disk
+        # and disk_gb) through the QFN driver and into tierShares: the bar shows an SSD share, not RAM-everything
+        drv = QfnStatsToMonitor("test_the_lines_are_the_formats_the_engine_prints")
+        n = drv.driver([QFN_KIND, QFN_STAT_SSD]).stat
+        self.assertEqual((n["disk"], n["ram_used"], n["ram_gb"], n["disk_gb"]), (1.876, 2048.0, 11.0, 70.2))
+        fields = json.dumps({k: n[k] for k in ("vram_used", "ram_used", "vram_gb", "ram_gb", "disk_gb")})
+        eng = json.dumps({"engine_kind": "qfn", "engine": "0.1.49.2", "experts": 13824})   # (QFN_KIND's experts)
+        got = self.node(f"console.log(JSON.stringify(sv.tierShares({fields}, {eng})));\n")
+        self.assertEqual((got["vu"], got["ru"], got["total"]), (4096, 2048, 13824))
+        self.assertEqual(got["disk"], 13824 - 4096 - 2048)                        # (the experts only the SSD holds)
+        self.assertGreater(got["disk"], 0)
+        self.assertEqual((got["vramGb"], got["ramGb"], got["diskGb"]), (2.4, 11.0, 70.2))
 
     def test_context_slider_reaches_each_models_own_top(self):
         # the Models page's Context size: Settings > Model's stops over each model's range (its trained context, up to

@@ -142,6 +142,13 @@ const uint8_t* cache_complement_blob_or_fallback(
     size_t index, const std::vector<uint64_t>& offsets, const uint8_t* complement_host,
     const uint8_t* mapped_fallback);
 
+/// P125s: the experts the compact copy holds NOW, and their bytes: the entries of `offsets` that are not
+/// kNoCacheComplement, each counted at its own layer's blob size.  Slot relief trims entries to
+/// kNoCacheComplement and the adaptive tier moves them between `in` and `out`, so this is what the copy
+/// actually holds when it is asked - the STAT line's split of the RAM tier from the file tier.
+void count_cache_complement(const std::vector<uint64_t>& offsets, int64_t n_expert,
+                            const std::vector<uint64_t>& layer_blob_bytes, int64_t& count, uint64_t& bytes);
+
 /// The resident RAM mode: which GPU-cache slots' experts are kept in RAM too.  The prompt path lends the cache's
 /// LAST slots (from `lend_from` on; a short prompt lends only the last few), and a lent slot's expert is streamed
 /// from RAM during the prompt and copied back into its slot after it.  `base_bytes` (every expert no slot holds)
@@ -770,6 +777,11 @@ public:
     int64_t blobs() const { return blobs_; }
     uint64_t pinned_bytes() const { return complement_pinned_ ? complement_pin_limit_ : 0; }
     uint64_t resident_bytes() const { return complement_bytes_; }
+    /// P125s: how many experts the compact copy holds, and their bytes - the count_cache_complement of its live
+    /// offsets, so a slot relief's trims and the adaptive tier's moves are in the figures (unlike
+    /// `resident_bytes()`, the arena's size).  Both 0 with no copy (plain mmap, or the resident arena).
+    int64_t resident_experts() const;
+    uint64_t resident_expert_bytes() const;
     bool complement_pinned() const { return complement_pinned_; }
     bool complement_ready() const { return complement_ready_; }
     uint64_t locked_bytes() const { return complement_locked_; }

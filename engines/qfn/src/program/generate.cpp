@@ -107,6 +107,7 @@
 #include "strata/program/draft_kv_plan.hpp"
 #include "strata/program/message_boundary.hpp"
 #include "strata/program/read_progress.hpp"
+#include "strata/program/tier_stats.hpp"
 #include "strata/program/slot_grid.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/draft_source.hpp"
@@ -13810,12 +13811,14 @@ vs.d_skip_usage = gs.d_skip_usage;
         int64_t bstat_hits0 = drive.d.cache_hits, bstat_toks0 = 0, bstat_off0 = 0, bstat_acc0 = 0;
         int64_t bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
         int64_t bstat_promo0 = promo_now();
+        int64_t bstat_files0 = src.file_reads();   // P125s: the file tier's reads, for the STAT line's disk=
         Clock::time_point bstat_t1 = Clock::now();
         const auto bstat_reset = [&] {
             bstat_t1 = Clock::now();
             bstat_hits0 = drive.d.cache_hits;
             bstat_look0 = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
             bstat_promo0 = promo_now();
+            bstat_files0 = src.file_reads();
             bstat_toks0 = bstat_toks; bstat_off0 = bstat_off; bstat_acc0 = bstat_acc;
         };
         const auto batch_stat_line = [&](int active_slots) {
@@ -13826,10 +13829,14 @@ vs.d_skip_usage = gs.d_skip_usage;
             const int64_t look = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused - bstat_look0;
             const double n = (double) std::max<int64_t>(1, bstat_toks - bstat_toks0);
             // PLAN-qfn-per-request-read-stats (parity 14): what the page's qwen tier layout reads beside the hit
-            // share - ram_fetch: the routed selections a token found outside the VRAM caches, the CPU lane then
-            // computes from RAM (QFN has no SSD tier to read from: disk / disk_gb are 0 by design), and the
-            // residency the bar draws (tierShares() in serve/web/server.js): experts in the VRAM caches vs the
-            // rest held in RAM, the caches' slots and bytes as they stand NOW (the adaptive tier moves them).
+            // share - ram_fetch: the routed selections a token found outside the VRAM caches, and the residency
+            // the bar draws (tierShares() in serve/web/server.js): the experts in the VRAM caches, in the RAM
+            // tier and on the file tier, with the caches' slots and bytes as they stand NOW (the adaptive tier
+            // moves them).  P125s: the RAM tier is what the resident copy (the --resident-budget-gib complement)
+            // actually holds and the SSD tier is the rest of the files - a rig with 11 GiB of RAM and 72 GiB of
+            // experts says so; without a copy the tier outside the caches is RAM as before (the mmap's page
+            // cache, or the resident arena).  disk= counts this window's file-tier reads per token, the way the
+            // DS4 engine reports its storage reads.
             int64_t v_used = xcache.resident(), v_slots = (int64_t) xcache.slots();
             double v_bytes = (double) xcache.bytes();
             for (const auto& st : stages) {
@@ -13844,17 +13851,26 @@ vs.d_skip_usage = gs.d_skip_usage;
                     v_bytes += remote_experts[(size_t) r].gib() * 1073741824.0;
                 }
             const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
-            const double ram_bytes = (double) (o.mmap_experts ? src.resident_bytes()
-                                                              : strata::kernels::cpu::expert_layout().total);
-            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=0.000 promo=%.3f "
-                        "vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=0.0 "
+            // P125s: the experts the resident copy holds NOW (count and bytes, after relief's trims and the
+            // adaptive tier's exchanges); 0 without one, which is plain mmap or arena mode.
+            const int64_t comp_used = src.resident_experts();
+            const uint64_t comp_bytes = src.resident_expert_bytes();
+            // the file tier's bytes where there is one (the mapped source), the arena's where there is not
+            const double all_bytes = (double) (comp_used > 0 || o.mmap_experts
+                                                   ? src.expert_bytes()
+                                                   : strata::kernels::cpu::expert_layout().total);
+            const strata::program::StatTiers tiers =
+                strata::program::stat_tiers(all_experts, all_bytes, v_used, v_bytes,
+                                            comp_used, (double) comp_bytes, o.mmap_experts);
+            std::printf("STAT tok_s=%.2f ms_tok=%.2f vram_hit=%.4f ram_fetch=%.3f disk=%.3f promo=%.3f "
+                        "vram_used=%lld vram_slots=%lld ram_used=%lld ram_gb=%.1f vram_gb=%.1f disk_gb=%.1f "
                         "draft_acc=%lld draft_off=%lld active=%d\n",
                         n / std::max(1e-9, el), 1000.0 * el / n, (double) h / (double) std::max<int64_t>(1, look),
                         (double) std::max<int64_t>(0, look - h) / n,
+                        (double) std::max<int64_t>(0, src.file_reads() - bstat_files0) / n,
                         (double) std::max<int64_t>(0, promo_now() - bstat_promo0) / n,
                         (long long) v_used, (long long) v_slots,
-                        (long long) std::max<int64_t>(0, all_experts - v_used),
-                        ram_bytes / 1073741824.0, v_bytes / 1073741824.0,
+                        (long long) tiers.ram_used, tiers.ram_gb, v_bytes / 1073741824.0, tiers.disk_gb,
                         (long long) (bstat_acc - bstat_acc0), (long long) (bstat_off - bstat_off0), active_slots);
             std::fflush(stdout);
             bstat_reset();
