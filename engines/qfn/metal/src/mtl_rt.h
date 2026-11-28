@@ -92,6 +92,10 @@ public:
     Pipeline pipeline(int lib, const std::string& fn, const Constants& c = {});
 
     Buffer alloc(size_t bytes);                  // shared storage, zeroed
+    // shared storage, NOT written here: its pages take memory only as they are first written (the K/V of a long
+    // context grows with the conversation, as the CUDA engine's elastic pools do).  For buffers nothing reads before
+    // writing; the contents are whatever the OS hands out (fresh zero pages in practice)
+    Buffer alloc_lazy(size_t bytes);
     Buffer wrap(void* page_aligned, size_t bytes);  // no-copy wrap (page-aligned, size multiple of page)
     // the same, also when bytes > maxBufferLength: then overlapping chunks, each holding any range of up to
     // max_span bytes that starts in it (max_span = the largest tensor bound at one offset)

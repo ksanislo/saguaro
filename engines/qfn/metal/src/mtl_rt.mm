@@ -1,4 +1,5 @@
 // metal/src/mtl_rt.mm - see mtl_rt.h.  Built with ARC (-fobjc-arc).
+#include <sys/mman.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -187,6 +188,21 @@ Buffer Context::alloc(size_t bytes) {
     r.handle = (__bridge_retained void*)b;
     r.ptr = [b contents];
     r.bytes = bytes;
+    return r;
+}
+
+Buffer Context::alloc_lazy(size_t bytes) {
+    // newBufferWithLength commits every page at creation; anonymous mmap memory wrapped without a copy is backed by
+    // the VM page by page as it is first touched (as the expert arena is), and reads as zero until then
+    const size_t pg = 16384, sz = (bytes + pg - 1) / pg * pg;
+    void* p = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (p == MAP_FAILED) {
+        std::fprintf(stderr, "mtl: lazy alloc %zu failed\n", bytes);
+        std::exit(4);
+    }
+    Buffer r = wrap(p, sz);   // (the window keeps these for its lifetime: no deallocator, never unmapped)
+    r.bytes = bytes;
+    allocated_ -= sz - bytes;
     return r;
 }
 
