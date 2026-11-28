@@ -578,6 +578,21 @@ bool kv_grow(int n, std::string& err) {
         cudaGetLastError();
         return false;
     }
+    // (zero the freshly committed span: cuMemCreate / hipMemCreate promise no more than cudaMalloc does about
+    //  what a new page reads as, and the load's DEPTH memset stops at the start step - while SAGUARO_IK2_DEPTH
+    //  reads the unwritten rows up to N as zeros and attention's tiles may touch a row the visit has not
+    //  written yet.  Drivers hand out zeroed pages today; this does not bet the answers on it.  One memset a
+    //  chunk on g_s, beside the commit - never per token; the span is below the ceiling's chunk count, so
+    //  inside every range's mapped bytes)
+    const size_t zero_hi = std::min(bytes, (size_t) g_kv_n_chunks * g_kv_chunk_b);
+    int prev_dev = 0;
+    cudaGetDevice(&prev_dev);
+    for (auto& r : g_kvvma) {
+        if (r.k.dev != prev_dev) cudaSetDevice(r.k.dev);   // (the elastic start is one GPU's; belt and braces)
+        CU(cudaMemsetAsync(r.k.ptr() + old, 0, zero_hi - old, g_s));
+        CU(cudaMemsetAsync(r.v.ptr() + old, 0, zero_hi - old, g_s));
+    }
+    cudaSetDevice(prev_dev);
     g_kv_chunks = need;
     return true;
 }

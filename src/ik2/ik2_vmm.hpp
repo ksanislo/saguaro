@@ -3,8 +3,11 @@
 // load, granule-sized pieces of VRAM stand behind the committed positions, and a request commits more of the range
 // (in position order, between its passes - never inside a kernel) before it writes past what is committed.  The
 // base pointer never moves, so the kernels' row addressing and the recorded CUDA graphs stay valid.
-// CUDA: the driver's virtual memory API through the runtime's entry points (src/mm3/mm3_vmm.hpp's pattern, the
-// fresh physical pages map zeroed - the DEPTH test's semantics).  AMD is first-class too: hipMemAddressReserve /
+// CUDA: the driver's virtual memory API through the runtime's entry points (src/mm3/mm3_vmm.hpp's pattern).
+// Nothing here bets on what a fresh physical page reads as - cuMemCreate / hipMemCreate document no zeroing
+// (cudaMalloc explicitly does not initialize) - the engine memsets each freshly committed span at the commit
+// (ik2_main.cu's kv_grow), which is what makes an unwritten row read as zero, as the DEPTH test needs.
+// AMD is first-class too: hipMemAddressReserve /
 // hipMemCreate / hipMemMap / hipMemSetAccess where this ROCm ships them (SAGUARO_IK2_HIP_VMM, checked at configure
 // time); where the HIP build has no piece of it, open() says so and the engine keeps the plain allocation it makes
 // today (one stderr line at the load).
