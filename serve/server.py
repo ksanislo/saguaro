@@ -414,10 +414,10 @@ def priority_age_seconds() -> float:
 
 
 def priority_idle_seconds() -> float:
-    """SAGUARO_PRIORITY_IDLE_S (5): the idle rule (R122) - a low request starts, or resumes after a pause, only
+    """SAGUARO_PRIORITY_IDLE_S (0): the idle rule (R122) - a low request starts, or resumes after a pause, only
     when nothing normal or high runs or waits AND none finished in the last this many seconds (0 = no grace):
     a person's follow-up a few seconds after an answer finds the model where they left it."""
-    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 5.0)   # (30 until 1.2.4: parks are fast now; 0 once a read can pause between layers)
+    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 0.0)   # (30 until 1.2.4, 5 through 1.2.5: 0 with P125j - a prompt read steps aside at its next LAYER, so the grace is not what keeps a follow-up's wait short)
 
 
 class FairLock:
@@ -6149,9 +6149,19 @@ class Service:
             hold[0] = False
             if preempt:
                 stat.paused_for_priority = True
+                if produced:
+                    where = f"answer paused at {len(produced)} tokens"
+                else:
+                    where = f"prompt read paused at {pos[0]:,} of {pos[1]:,} prompt tokens"
+                    # P125j: a QFN solo read cut BETWEEN two layers of a chunk says where on its DONE
+                    # (paused_layer/paused_chunk/paused_at) - name it: the chunk's lower layers were read,
+                    # and the next call of this prompt goes on at that layer, not at the chunk's end.
+                    lp = fresh if fresh is not last0 and isinstance(fresh, dict) else None
+                    if lp is not None and isinstance(lp.get("paused_layer"), int):
+                        where += (f", inside chunk {lp.get('paused_chunk', -1)} at layer {lp['paused_layer']}"
+                                  f" (the chunk from token {lp.get('paused_at', -1):,})")
                 print(f"[saguaro] priority: a {PRIORITY_NAMES[prio]} "
-                      f"{f'answer paused at {len(produced)} tokens' if produced else f'prompt read paused at {pos[0]:,} of {pos[1]:,} prompt tokens'}"
-                      f" for a {preempt}-priority request ({waiting} waiting)", flush=True)
+                      f"{where} for a {preempt}-priority request ({waiting} waiting)", flush=True)
             else:
                 print(f"[saguaro] fair slice: {len(produced)} tokens written, the engine goes to the next request "
                       f"({waiting} waiting); this one continues after it", flush=True)
