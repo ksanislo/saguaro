@@ -1,0 +1,10 @@
+load_backend: loaded CUDA backend
+PLE on: 78 layers, 288 experts, key pack/full/ple.gguf (rows read direct)
+expert arena: 78 layers x 288 blobs x 6291456 B = 1343.719 GiB
+WARNING - Windows' commit limit caps the RAM tier at 118.2 GiB
+model loaded 124.62 GiB at 980 MiB/s (128 s)
+CUDA0 VRAM before the expert pool: 18.94 GiB free, pool 6.00; state/KV (32768 ctx) 0.66
+CUDA1 VRAM before the expert pool: 22.10 GiB free, pool 5.20; state/KV (32768 ctx) 0.66
+expert cache 1400 slots, 8.42 GiB of VRAM; policy is least-recent-pick
+saguaro: expert cache warm in 4.1 s
+session is up (engine 0.1.10)

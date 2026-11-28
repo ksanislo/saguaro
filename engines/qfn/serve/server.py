@@ -638,6 +638,16 @@ def cpu_isa_words() -> tuple:
     return f"{model or 'this CPU'} ({have})", missing
 
 
+def start_log_tail_lines(log: str | None, offset: int, n: int = 20) -> list:
+    """P125m phase 2: the same last n lines start_log_tail shows, as a list - for the crash page, which draws the
+    engine's own lines one per row beside its exit code ("" dropped, each line trimmed to 500 characters)."""
+    tail = start_log_tail(log, offset, n)
+    head = "\nthe engine log's last lines:\n"
+    if not tail or not tail.startswith(head):
+        return []
+    return [x.strip()[:500] for x in tail[len(head):].splitlines() if x.strip()]
+
+
 def start_exit_note(rc: int | None, exe=None) -> str:
     """The sentence the start error carries about how the engine process ended (the engine log is silent when the
     system ends it): "" without a status, else a line, with the CPU's AVX flags after an illegal instruction."""
@@ -1285,8 +1295,13 @@ class StrataEngine:
             lines = [x for x in tail.split("\n")[2:] if x.strip()]
             if tail and lines and all(logctx.unstamp(x.strip()).startswith("[strata]") for x in lines):
                 tail += "\n  (those are the launcher's own lines: the engine itself wrote nothing)"
-            raise EngineDied(why + (f" (see {log})" if log else "") + note +
+            err = EngineDied(why + (f" (see {log})" if log else "") + note +
                              start_failure_hint(log, log_start) + tail)
+            # P125m phase 2: the crash page draws the exit code and the engine's last lines as their own fields,
+            # not only inside the message text (the shared server reads these off the exception in main()).
+            err.exit_code = self.proc.returncode
+            err.lines = start_log_tail_lines(log, log_start)
+            raise err
         self.known_ctx = self.max_context   # survives a failed restart: requests keep their limit and restart it
         # (from PR #41, midhatn) a locally built engine can sit next to another release's BUILD.json: engines that
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones

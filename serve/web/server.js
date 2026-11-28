@@ -99,6 +99,49 @@ export function watchStarting(onState, onReady) {
   tick();
 }
 
+// ------------------------------------------------------------------ switching models without blanking the app (P125m)
+// A switch ends the process and Saguaro starts again with the other model; the port never stops answering (issue #20).
+// A page that already shows the app keeps it: the chats stay readable, sending waits, and a bar says "loading
+// <model> NN%".  web/models.js sets S.switching at once when this page asked for the switch (watchRestart reloads
+// the page when the new model is up); a switch asked over the API - POST /models/load - is noticed when a poll
+// fails and /health answers with the starting service.  The watch reloads on the first 200 after the gap: every
+// label, default and API id follows the model that runs now, which is how "the app returns to normal".
+export function switchingView(sw) {
+  sw = sw || {};                                   // (S.switching is null before a switch: a default {} is not)
+  const failed = sw.status === "failed";
+  const pct = sw.pct == null || failed ? null : Math.max(0, Math.min(100, Math.round(+sw.pct || 0)));
+  const name = sw.label || (sw.model ? modelLabel(sw, {compact: true}) : "") || "the next model";
+  return {
+    failed, name, pct,
+    step: failed ? (sw.error || "the model did not start") : (sw.step || sw.line || ""),
+    text: failed ? `${name} did not start` : `loading ${name}${pct != null ? ` ${pct}%` : ""}`,
+  };
+}
+
+let switchOn = false;
+export async function watchSwitch() {              // /health of the starting service, once a second, until it is back
+  if (switchOn) return;
+  switchOn = true;
+  for (;;) {
+    await new Promise((ok) => setTimeout(ok, 1000));
+    if (document.hidden) continue;                 // (asks nothing in the dark, as the polls; seen again, it goes on)
+    const h = await startingHealth();              // (null: the gap between the two starts, or a blip: wait on)
+    if (h && h.ready !== undefined) { location.reload(); return; }   // (the new model is up: the app returns to normal)
+    if (h) { S.switching = h; emit(); }
+  }
+}
+
+export async function probeSwitch() {
+  // a booted page whose server stopped answering: a switch when the starting service answers /health, anything
+  // else keeps today's "server not reachable" (a stopped server stays a stopped server)
+  const h = await startingHealth();
+  if (!h || h.ready !== undefined) return false;
+  S.switching = h;
+  emit();
+  watchSwitch();
+  return true;
+}
+
 // ------------------------------------------------------------------ the live metrics (the Monitor, the status, the meter)
 let fails = 0, keyWarned = false, mcpTick = 0, timer = null, polling = false;
 export const reqAll = {on: false};       // the request table: the last 12, or every one the server keeps
@@ -171,6 +214,10 @@ export async function loadNow() {
 export async function poll() {
   clearTimeout(timer);
   if (document.hidden || polling) return;                       // (hidden: nothing asked; one poll at a time)
+  if (S.switching) {                                            // (a switch: the starting service answers nothing
+    timer = setTimeout(poll, 3000);                             //  but /health; watchSwitch asks it, quietly)
+    return;
+  }
   polling = true;
   try {
     const swap = swapAt();
@@ -204,7 +251,10 @@ export async function poll() {
         throw new Error(`HTTP ${r.status}`);
       }
     } catch (e) {
-      if (++fails >= 3) S.conn = "down";
+      if (++fails >= 3) {
+        S.conn = "down";
+        probeSwitch();                             // (a switch keeps the port answering /health: P125m - the app
+      }                                            //  stays on screen with the bar instead of waiting on "down")
     }
     emit();
     if ((S.view === "monitor" || S.settings === "tools") && ++mcpTick % 10 === 0) loadMcp();   // (they change rarely: every 10 s)

@@ -1,0 +1,11 @@
+[strata] 2026-11-27 09:12:01 engine started: saguaro-qfn --serve --native pack/full --spec 3 --ple-gguf pack/full/ple.gguf
+saguaro generate: reading the model's geometry from pack/full: qwen4exp 78 layers, 512 experts (8 a token)
+saguaro generate: native pack: 512 experts (largest blob 118.32 MB), token embedding F16
+saguaro generate: PLE table /home/u/saguaro/ple-ram.bin (--ple-io ram) in 6.2 s
+saguaro generate: expert arena: 78 layers x 512 blobs x 67108864 B = 2491.182 GiB
+saguaro generate: CUDA0 context ready, 1.94 GiB free before expert arena registration
+saguaro generate: PCIe probe: 11.8 GB/s host->device (best of 3 runs); the canonical pack reads at this rate
+saguaro generate: expert arena read through the file cache (3 min 12 s)
+saguaro generate: expert arena checksum 5a17c0de9b8f1a23 (2491.18 GiB)
+saguaro generate: expert cache 1400 slots, 8.42 GiB of VRAM; policy is least-recent-pick
+saguaro generate: session is up (engine 0.1.10)
