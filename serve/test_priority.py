@@ -1039,6 +1039,166 @@ class ReadsPreempt(Env):
         self.assertFalse(cls.can_pause)                # read, so only a solo read may be cut by a STOP
 
 
+# a saguaro-ds4-shaped fake LINE engine for the quiet-reader race (P124z, the card's rc2 shape): a long
+# prompt's read says its FIRST PP line and then NOTHING for FAKE_READ_QUIET seconds - what DS4_READER does
+# while a running answer holds the cards (src/ds4/ds4_main.cpp:2149: the reader's pieces wait between the
+# answer's rounds, and it emits no line of ours while it waits) - then reads on chunk by chunk.
+# READY ... stop [multi=n] [keepread] (P124u: the keepread word is the truth): with it a STOP'd read KEEPS
+# what it read at the chunk boundary and the next GEN of the same prompt says RESUME <from> (P124k's line)
+# and goes on there; without it a stopped read is dropped.  Every answer is "ok" (three tokens, im_end).
+# argv: <program> --serve <parallel> [keepread];  QUIT ends.
+QUIET_READ_ENGINE = r'''#!/usr/bin/env python3
+import os, sys, threading, time
+par = int(sys.argv[2])
+keep = len(sys.argv) > 3 and sys.argv[3] == "keepread"
+QUIET = float(os.environ.get("FAKE_READ_QUIET", "3"))
+lock = threading.Lock()
+busy, kept, stops, bases = {}, {}, set(), []
+
+
+def out(s):
+    sys.stdout.write(s + "\n")
+    sys.stdout.flush()
+
+
+def reader():
+    for line in sys.stdin:
+        f = line.split()
+        if not f:
+            continue
+        if f[0] == "QUIT":
+            os._exit(0)
+        if f[0] == "STOP":
+            with lock:
+                stops.add(int(f[1]) if len(f) > 1 else 0)
+            continue
+        if f[0] in ("GEN", "GENI"):
+            keys = dict(x.split("=", 1) for x in f[2:-1] if "=" in x)
+            rid = int(keys["rid"]) if "rid" in keys else 0
+            ids = [int(x) for x in f[-1].split(",")]
+            with lock:
+                if par and len(busy) >= par:
+                    out(f"ERR {rid} all {par} conversation states are busy")
+                    continue
+                busy[rid] = True
+                start = kept.pop(len(ids), 0) if keep else 0
+                stops.discard(rid)
+                base = next((b for b in bases if ids[:len(b)] == b), None)   # the live conversation it shares
+                if base is None:
+                    bases.append(list(ids))
+                    base = ids
+            threading.Thread(target=run, args=(rid, ids, start, base, int(f[1])), daemon=True).start()
+
+
+def run(rid, ids, start, base, max_new):
+    tag = f"{rid} " if rid else ""
+    total = len(ids)
+    out(f"RESUME {tag}{start}")
+    pos, step = start, max(1, total // 8)
+    while pos < total:
+        with lock:
+            if rid in stops:
+                stops.discard(rid)
+                if keep:
+                    kept[total] = pos
+                busy.pop(rid, None)
+                out(f"DONE {tag}0 {total} 10.0 0.0 cancel 0 0 {pos if keep else 0} 0 0")
+                return
+        pos = min(total, pos + step)
+        out(f"PP {tag}{pos} {total} 10.0 1000.0 {start}")
+        # the LONG prompt's reader goes quiet right after its first chunk (its first call only: a
+        # continued read speaks every chunk); short prompts answer between their chunks as always
+        time.sleep(QUIET if (total > 200 and start == 0 and total == len(base) and pos == step) else 0.02)
+    script = [111, 107, 257]                            # "ok" + im_end, continued past what it wrote
+    for t in script[len(ids) - len(base):][:max_new]:
+        out("T " + tag + str(t))
+        time.sleep(0.02)
+    out(f"DONE {tag}{len(script) - (len(ids) - len(base))} {total} 10.0 30.0 stop 0 0 {total} 0 0")
+    with lock:
+        busy.pop(rid, None)
+
+
+out("INFO engine=fake engine_kind=deepseek model=FakeQuietLine ctx=32768")
+words = "stop" + (f" multi={par}" if par else "") + (" keepread" if keep else "")
+out("READY 32768 " + words)
+reader()
+'''
+
+
+class QuietReadsPreempt(Env):
+    """P124z (the card's rc2 failure, mangonel 11-27): a fresh LOW prompt read beside a short NORMAL
+    request at a cut, on a line engine whose reader goes QUIET between its chunks - saguaro-ds4 with
+    DS4_READER on hands its cards to the running answer and says nothing of the read while it waits.
+    The read's preemption decides on the request loop's ticks (serve/server.py:6021), and the loop
+    slept in the engine-line wait: a 10 s keep-alive poll (serve/server.py:2161 solo, :2392 multi).
+    When the normal request fits a free place and is gone inside one silence (rc2: ~2.5 s running,
+    the next line 6 s later), the low read NEVER looked at the FIFO while it ran - and the card's DS4
+    logged no priority line at all (ref/rc2-ds4-engine.txt).  These tests drive the real pipe driver
+    against the fake line engine above; they fail without the loop waking on its own while a read is
+    unfinished, and must stay green WITH it (the keep both behaviours: the drop-read engine below is
+    still never cut)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tok = ByteTokenizer()
+
+    def race(self, par: int, keep: bool = True, second: int = PRIORITY_NORMAL):
+        path = Path(tempfile.mkdtemp()) / "saguaro-quiet-line.py"
+        path.write_text(QUIET_READ_ENGINE)
+        path.chmod(0o755)
+        engine = StrataEngine(str(path), [str(par)] + (["keepread"] if keep else []))
+        try:
+            svc = Service(engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+            if engine.multi:
+                svc.fifo.set_capacity(engine.multi)
+            out, log = {}, io.StringIO()
+            with contextlib.redirect_stdout(log):
+                a = threading.Thread(target=ask, args=(svc, LONG, 4096, out, PRIORITY_LOW))
+                a.start()
+                end = time.monotonic() + 5
+                while time.monotonic() < end:                 # the read has begun: its first PP line is in
+                    pr = engine.progress
+                    if pr and pr[1] > 200:
+                        break
+                    time.sleep(0.005)
+                b = threading.Thread(target=ask, args=(svc, SHORT, 4096, out, second))
+                b.start()
+                b.join(30)
+                a.join(60)
+            return out, log.getvalue()
+        finally:
+            engine.close()
+
+    def test_a_quiet_low_read_steps_aside_for_a_request_on_a_free_place(self):
+        # saguaro-ds4 --parallel (READY ... stop multi=2 keepread): the normal one runs on the second
+        # place, entirely inside the reader's silence - the rc2 card's shape, where no cut ever fired
+        out, log = self.race(2)
+        self.assertEqual(out[SHORT][0], "ok")
+        self.assertEqual(out[LONG][0], "ok")
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt tokens for a normal-priority request", log)
+        m = re.search(r"the low prompt read continued: ([\d,]+) of ([\d,]+) tokens reused", log)
+        self.assertIsNotNone(m)                               # the engine's own RESUME figure (P124b)
+        self.assertGreater(int(m.group(1).replace(",", "")), 0)   # the kept read really was continued
+
+    def test_a_quiet_low_solo_read_steps_aside_for_a_waiting_normal(self):
+        # the same engine SOLO (READY ... stop keepread, like saguaro-ik2 solo got in P125l): the normal
+        # one WAITS in the FIFO while the read holds the only place - every tick must see it
+        out, log = self.race(0)
+        self.assertEqual(out[SHORT][0], "ok")
+        self.assertEqual(out[LONG][0], "ok")
+        self.assertIn("priority: a low prompt read paused", log)
+        self.assertIn("prompt tokens for a normal-priority request", log)
+
+    def test_a_quiet_low_read_runs_on_when_a_stopped_read_would_be_lost(self):
+        # keep both behaviours: without the keepread word the engine DROPS a stopped read, so the quiet
+        # low read must run to its end beside the normal one (serve/server.py:6021-6024) - never cut
+        out, log = self.race(0, keep=False)
+        self.assertEqual(out[SHORT][0], "ok")
+        self.assertEqual(out[LONG][0], "ok")
+        self.assertNotIn("prompt read paused", log)
+
+
 # a line engine that only says who it is (its INFO engine_kind=) and what its READY offers (its words after the
 # ctx), answers nothing, and ends on QUIT: the driver's own start-up parsing, for which engines it reports
 # keeps_stopped_read
