@@ -54,6 +54,7 @@ VRAM_FLOOR_MIB=${VRAM_FLOOR_MIB:-512}     # kVramSafeMib (Linux): the engine's o
 SWAP_GROW_MIB=${SWAP_GROW_MIB:-256}       # SAGUARO_PARK_SWAP_MIB: growth past this is a storm
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT_DIR" || exit 1
+. "$(dirname "${BASH_SOURCE[0]}")/health.sh"   # readiness: ready / loading / failed (PLAN-p124t2: stop at a failed load)
 DIR=$OUT
 SERVE_LOG="$DIR/serve.log"
 ELOG="$DIR/engine.log"               # the engine's own stderr, kept inside the out folder (never the install's log)
@@ -113,11 +114,14 @@ echo $! > "$DIR/serve.pid"
 trap cleanup EXIT
 echo "server pid $(cat "$DIR/serve.pid") on :$PORT, log $SERVE_LOG (loading the model ...)"
 for _ in $(seq 1 240); do
-    curl -fs -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
+    case "$(health_status "$PORT")" in
+        ready) break ;;
+        failed) fail "the model failed to load - /health says so (its error is in the log tail below)" ;;
+    esac
     kill -0 "$(cat "$DIR/serve.pid")" 2>/dev/null || fail "the server died while loading; see $SERVE_LOG"
     sleep 5
 done
-curl -fs -m 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 || fail "no /health after 20 min"
+[ "$(health_status "$PORT")" = ready ] || fail "no /health after 20 min"
 MODEL=$("$PYTHON" - "$PORT" <<'PY'
 import json, sys, urllib.request
 print(json.load(urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/v1/models"))["data"][0]["id"])
