@@ -1,92 +1,119 @@
-# REVIEW-RESULT — P125k park-sync, round 4 (local agent, read-only) — 2026-11-27
+# REVIEW-RESULT — P125k park-sync, round 5 (local agent, read-only) — 2026-11-27
 
-VERDICT: FIX-FIRST. The P125k narrowing itself is sound - gated shape, wait-set, order guarantees, locks, generated
-file, HIP mapping and the plan's test all verified below - but the diff ships the merged P125j at its round-4
-FIX-FIRST state: the round-5/6 fixes this file's round-3 instruction named do not exist in any ref this repo can
-reach, and the layer-pause default flip rides the diff (pause ON, grace 5 -> 0) into the shape where the pause
-never fires.
+VERDICT: MERGE-WITH-NITS. The P125k narrowing re-verifies sound, and the round-4 BLOCKER (the merged P125j at its
+FIX-FIRST state) is resolved the way that review's second way out prescribed - the pause is armed only at the read
+that captures it, and the idle grace is back at 5 - re-verified below from the sources, not from the commits' words.
+What remains is four NITs, none blocking: two carried (the ungated restore tail owes one gated-out card run; the
+light path's extra own-copy-stream sync waits more, never less) and two new low ones (a legacy-stream wait in the
+no-copy-stream refresh fallback; one stale header line in the card script). The manager's card run (P125k's waits
+falling to copy-ms during 2-3 busy conversations, plus P125j's layer_pause.sh) is still the gate that closes this
+diff - nothing here ran on a GPU.
 
-## BLOCKER
+## Round-4 BLOCKER - resolved
 
-1. **P125j ships unfixed, and cannot be re-merged** (manager note said its round-6 review passed - not from here):
-   `saguaro/q1-p125j-layer-pause` tip is d8e25fd95, its OWN round-4 FIX-FIRST review commit, already in HEAD via
-   merge 70f67efde; no remote branch carries p125j (`git branch -r` shows fork/* only) and no dangling commit mentions
-   it (`git fsck`). The 01aa548cb account is accurate - and the round-4 findings therefore stand in the diff:
-   * `serve/server.py:5846-5847` - read preemption requires `keeps_stopped_read and not batch` (and
-     `serve/server.py:9600-9602`: "the preemption never cuts a batch read"), so under `--batch` the layer pause
-     never fires; the read runs to its end beside a waiting person.
-   * `serve/server.py:417-420` - `SAGUARO_PRIORITY_IDLE_S` default is 0.0 (was 5.0; serve/test_priority.py:1606-1610
-     asserts 0.0): the follow-up grace is removed exactly in the config nothing compensates for. docs/SETTINGS.md:238
-     tells operators to set it back to 5 with `SAGUARO_LAYER_PAUSE=0`, but the DEFAULT ships 0 with the pause ON
-     (`docs/SETTINGS.md:2104`) and inert on the batch lane - the round-4 gate was "0 only with a working pause".
-   * Engine side: the pause capture is inline-only - generate.cpp:20915 (`sp.paused_chunk()`) sits in
-     `read_windows` (generate.cpp:20775); the pipelined reader `read_windows_pl` (generate.cpp:20679) captures
-     nothing, so a STOP-caused pause there surfaces as the read error "layer paused"
-     (engines/qfn/src/prefill/prefill.cpp:5543) instead of a cut read that keeps its rows.
-   To merge: land the real P125j fix round, or revert the grace default to 5 (and arm the pause only where it is
-   captured) until one exists. P125k itself does not depend on P125j and could ship without it.
+* **Armed only where captured.** `Prefill::stop_between_layers` (prefill.hpp:351) has exactly one writer in the
+  tree: read_part's run lambda (generate.cpp:20920-20924), which arms around its own `sp.run` and reads
+  `paused_chunk()`/rows right after (20926-20931); the `PauseArm` guard (20920-20923) disarms on every way out,
+  an exception included. The global serve-loop arm is gone (generate.cpp:12836-12843 is the comment that says
+  why). The batch slot's reader has its own Prefill and lambda (generate.cpp:17144, never armed), the pipelined
+  reader thread calls `sp.run` directly (generate.cpp:21176, the armed lambda is the inline/piecewise path at
+  21361/21365), and `lp_on` (prefill.cpp:2978-2979) needs the hook - so `err "layer paused"` (prefill.cpp:5543)
+  can now only come from the reader that keeps its rows. No hook data race: the reader-thread rounds never
+  overlap a `run` lambda call, so the `std::function` member is written only while nobody else reads it.
+* **"layer paused" cannot end the run with ERR.** Both `!sp_ok` error branches (generate.cpp:21949, :21956)
+  require `!stop_req.load()`, and `stop_req` is set only by the stdin STOP (12799) and cleared only at the NEXT
+  request's start (19107) - so a pause always routes to `cancelled` + the keep chain, never to a spurious
+  `ERR layer paused` exit.
+* **The keep pairs record with rows.** The pause keep (generate.cpp:23165-23207) requires
+  `sp.pause_rows_bytes() > 0`; `give_pause` refuses rows-less records (prefill.cpp:1966-1974) and the adopt caps
+  a diverging branch at the pause (20370-20395); `take_pause_rows` clears record+rows together (prefill.cpp:1953-
+  1956); every reset/rewrite site pairs `drop_read_pause()` (generate.cpp:10553 and the ten call sites: file
+  LOAD, head-alias x2, nan-flush, slot copy-in, borrow, incoming, cvec change, read-done, #1620 keep,
+  checkpoint landing). A rowless park-write stays unreachable, so the "never written to the session dir"
+  invariant (park gate generate.cpp:11220, `!parked_paused`) holds.
+* **Grace back at 5.** serve/server.py:420 (`_env_seconds("SAGUARO_PRIORITY_IDLE_S", 5.0)`), the
+  IdleGraceDefault assert at 5.0 (serve/test_priority.py:1612), and docs/SETTINGS.md:238 + the Request-priority
+  paragraph (:247-253) + the `SAGUARO_LAYER_PAUSE` row (:2104) all say the same thing: the cut works only on the
+  SOLO read that keeps its rows, the batch lane is never cut (`keeps_stopped_read and not batch`,
+  serve/server.py:5845-5847), and the batch-lane cut + slot-reader capture stand named as P125j's owed fix
+  round. With the default at 5 the batch/piped shapes behave exactly as pre-P125j; `SAGUARO_LAYER_PAUSE=0`
+  keeps the whole feature inert (`lp_on` false, prefill.cpp:2978-2979 + `layer_pause_wanted()` prefill.cpp:1946).
 
-## P125k (the plan's subject) - verified sound
+## P125k (the plan's subject) - re-verified sound
 
-* The decision is pure and tested: `park::wait_streams` (park_policy.hpp:216) keeps only the current device's share
-  of the scope; `conversation_detail::narrow_sync` (conversation_copy.hpp:312) waits that set plus this thread's
-  private copy stream - no `cudaDeviceSynchronize`, no capture lock (correct: only device syncs invalidate captures,
-  capture_lock.hpp:1-3, and `device_sync()` skips the lock whenever the override is set, capture_lock.hpp:48-52).
-  No lock nesting: the narrowed path takes nothing but the handle pool's short `std::mutex` inside
-  `private_stream` (conversation_copy.hpp:83-104, never held across a sync). `ConvSyncScope`
-  (generate.cpp:15913-15923) is RAII on a thread_local override - exception/`return 1` paths clear it; the six
-  armed sites are sequential, not nested (generate.cpp:20128 park, 20243 borrow, 20302 incoming restore,
-  19411 context restore, 23224 cut, 23575 turn save; gate `park_own_ok` generate.cpp:15929).
-* Event/land-before-reuse order (manager note) holds on every replaced wait:
-  * source cells: the pre-copy sync covers the conversation's producers - `main_stream`, `ver`/`ver_b`,
-    `mtp.stream()` (add_main_streams, generate.cpp:15935-15946); verifier side streams fork/join THROUGH their
-    waited stream (verify.cpp:1198-1205, fork :1474/:1486, joins :1544-1549), so waiting it waits them; a slot
-    without its own drafter writes the MAIN draft pool on the shared drafter, which is in the set
-    (park_draft, generate.cpp:10761-10763); `mtp.kv_restore` syncs its own stream directly (mtp.cpp:1407-1415),
-    unaffected; the queued PLE pipeline is self-contained inside the run (upload + event on `m.cs` before its
-    readers, prefill.cpp:3316-3346).
-  * restored bytes: every restore copy rides the private stream (conversation_state.cpp:60-67), the residency
-    refresh launches on the SAME stream, stream-ordered after the pool copies
-    (conversation_snapshot.cpp:338-355, 421, 446), and is waited by `copy_done`
-    (conversation_state.cpp:257)/`narrow_sync`'s copy-stream leg/`copy_stream_done` - or, on the paths that keep
-    their device syncs (slot copy/admission, generate.cpp:13708-13726), by those; the no-copy-stream fallback
-    (#2409) launches legacy and waits there immediately (conversation_snapshot.cpp:349-353). Never less drained
-    than before at any site.
-* stdout: no P125k output changes - the park/restore `sync N ms` still comes from SyncRec ->
-  `snapshot_split().sync_ms` (conversation_state.cpp:28-32, and `copy_done` records into it), formats at
-  generate.cpp:11522/:23542 untouched; P125j's DONE suffix parses as optional key=value (qfn_engine.py:1220-1226),
-  old fixtures unaffected.
-* Generated file: ran `tools/saguaro/extract_qfn_engine.py` - serve/qfn_engine.py regenerates BYTE-IDENTICAL
-  (git status clean after).
-* HIP: every new call is shimmed - cudaStream_t strata_hip.h:33, cudaGetLastError :82, cudaGetDevice :84,
-  cudaStreamSynchronize :134; the event pair the order relies on was already mapped (cudaStreamWaitEvent :136,
-  cudaEventRecord :144). No new unshimmed symbol in the diff.
-* No secrets; no absolute paths in code - the only ones in added lines are prose build commands in the reports
-  (see NIT 3) and `PYTHON=${PYTHON:-/opt/llm/saguaro/.venv/bin/python}` in tools/card_tests/layer_pause.sh,
-  matching the existing convention (lost_read.sh, mortar_pressure.sh).
+* **The decision and the wait.** `park::wait_streams` (park_policy.hpp:216) filters the scope to the device the
+  wait runs on; `conversation_detail::narrow_sync` (conversation_copy.hpp:312-325) waits this thread's private
+  copy stream plus that device's share - no `cudaDeviceSynchronize`, and the exclusive capture lock is never
+  taken (override check precedes it in `device_sync()`, capture_lock.hpp:48-52, and `sync()` waits the copy
+  stream first, conversation_state.cpp:36-41). No lock nesting anywhere on the narrowed path: the only lock it
+  touches is the handle pool's short `std::mutex` inside `private_stream` (conversation_copy.hpp:83-104), never
+  held across a sync. The override and its arg are `thread_local` (capture_lock.hpp:39-46): slot/pipelined
+  reader threads never see a scope.
+* **Event/land-before-reuse (manager note) holds at every replaced wait.** Source cells: the gated scope
+  (main_stream + ver/ver_b + mtp.stream(), generate.cpp:15939-15950) is this conversation's whole producer set -
+  the main Prefill's compute stream IS the scoped `main_stream` (generate.cpp:4500 `main_cs` -> `sp.init`
+  :9741 -> prefill.cpp:1542), so the layer-pause resume's H2D (prefill.cpp:3227-3237) and every K/V write ride
+  a waited stream; the verifier side streams fork/join through `ver`/`ver_b`, the shared drafter (a slot's
+  batched draft prefill into the main draft pool) is `mtp.stream()`. Restored cells: every restore copy rides
+  the private stream and lands per copy (`copy` -> `copy_nonblocking` with `queued=false`,
+  conversation_state.cpp:60-67 / conversation_copy.hpp:126-139), the residency refresh queues on that same
+  stream behind the pool copies (conversation_snapshot.cpp:339-352, 421, 446), and `copy_done`
+  (conversation_state.cpp:47-58, :257) waits it - so bytes land before the restore returns in every shape,
+  gated or not. Park copies land before the park returns the same way, so a source cell cannot be reused
+  (anything queued after the return) before its copy read it.
+* **The arming sites** are RAII on the sequential serve thread - context restore generate.cpp:19416, the
+  switch's park :20133, the borrow :20248, the incoming restore :20307, the cut's drain+restore :23237, the
+  turn save :23588 - never nested, and nothing needing a whole-device drain runs inside one: `copy_from_slot`
+  sits outside the park scope (closed :20165 vs opened :20177) and the slot/admission device syncs stand
+  (:14490-:14563). The gate `park_own_ok` (:15933) excludes layer split, pipe, concurrent doorbell serving and
+  a read running beside - every shape whose writers this stream list cannot bound; those keep the whole-device
+  sync. The FAST_LANE light save reuses the same machinery (:15962).
+* **stdout**: no format moved. The park/restore `split: ... sync N ms` still comes from SyncRec ->
+  `snapshot_split().sync_ms` (conversation_state.cpp:28-32, `copy_done` records into it); the new engine lines
+  (prefill.cpp:5537, generate.cpp:23200) are single `fprintf(stderr)+fflush`; the DONE suffix rides as optional
+  `key=value` fields parsed in both engine parsers (engines/qfn/serve/server.py:1666,
+  serve/qfn_engine.py:1222) - old lines parse unchanged and unknown keys stay ignored; the server's pause line
+  keeps its exact pre-P125j wording unless a fresh DONE carries `paused_layer` (serve/server.py:5974-5988,
+  `fresh is not last0` guards against a stale dict).
+* **Generated file**: ran `tools/saguaro/extract_qfn_engine.py` - serve/qfn_engine.py regenerates
+  BYTE-IDENTICAL, tree clean after. The qfn_engine diff is only the three parse keys, mirroring its source.
+* **HIP (manager note)**: every CUDA call the diff adds is shimmed - `cudaMemcpy` :107, `cudaMemcpyAsync` :108,
+  `cudaStreamSynchronize` :134, `cudaGetLastError` :82, `cudaGetDevice` :84, and the event pair the stream-side
+  ordering leans on (`cudaStreamWaitEvent` :136, `cudaEventRecord` :144 -> `hipStreamWaitEvent`/`hipEventRecord`)
+  in engines/qfn/include/strata/platform/hip_compat/strata_hip.h. No unshimmed symbol in the diff.
+* **Paths/secrets**: none in the diff's code; the only absolute path added is the overridable
+  `PYTHON=${PYTHON:-/opt/llm/saguaro/.venv/bin/python}` in tools/card_tests/layer_pause.sh:32, matching the
+  existing card-script convention (lost_read.sh, mortar_pressure.sh). The round-4 NIT 3 build-path prose is
+  normalized (REPORT-p125k-park-sync.md:128 now `../maya/third_party/llama.cpp`, the nvcc line descriptive;
+  FIX-REPORT.md:109 names the venv descriptively).
 
 ## NITs
 
-1. Two P125k changes are UNGATED and so are not byte-identical for the gated-out shapes: the restore tail
-   `copy_done` (conversation_state.cpp:257) and the copy-stream residency refresh
-   (conversation_snapshot.cpp:421/446). Correct per the contract (the device-wide pre-sync still drains everything,
-   and each kept site still device-syncs), and REPORT §2 now says so honestly (fixed at f3d89c6c7) - but the card
-   run should cover a gated-out shape (layer split or multi-card) once, since that tail rides those too.
-2. The FAST_LANE light path is likewise no longer byte-identical: `ConvStreams::run`
-   (generate.cpp:15907-15911) -> `narrow_sync` adds a sync of this thread's private copy stream the old
-   `LightSync::run` did not make. Documented; it waits MORE, never less.
-3. REPORT-p125k-park-sync.md:128-129 cites out-of-repo build paths (`/data/llm/maya/third_party/llama.cpp`,
-   `/usr/local/cuda-13.1/bin/nvcc`) in committed prose (FIX-REPORT.md does the same with the venv). Docs only -
-   normalize to a relative/env form if house style wants reports portable.
-4. The unit test exercises the pure wait-set decision (`wait_streams`, park_policy_test.cpp:101-133); the real
-   wiring (override hook, arming sites) is proven only by the build + the card run. The plan explicitly allows
-   this ("a unit test where the code allows it").
+1. (carried, r4 NIT 1) The restore tail `copy_done` (conversation_state.cpp:257) and the copy-stream residency
+   refresh (:421/:446) are UNGATED - the gated-out shapes wait less after their copies than before (the §5
+   contract: correct, never under-waited, the kept device syncs still drain). The card owes one gated-out-shape
+   run (layer split or multi-card) before this ships.
+2. (carried, r4 NIT 2) The FAST_LANE light path now also syncs this thread's private copy stream
+   (ConvStreams::run -> narrow_sync) - waits more than the old `LightSync::run`, never less; documented in
+   REPORT §2 (:84-89). No change asked.
+3. (new, low) The no-copy-stream refresh fallback (conversation_snapshot.cpp:354-358) launches on the LEGACY
+   stream and `cudaStreamSynchronize`s it WITHOUT the capture lock; the legacy-stream launch there carried the
+   same capture-collision exposure before this branch (the hazard conversation_copy.hpp:76-80 documents is why
+   the snapshot copies avoid the legacy stream), and the old tail wait - a device sync - held capture_mutex.
+   Reachable only when a thread cannot get a copy stream (#2409, full card) beside a live capture; the failure
+   mode is a loud restore error, not corruption. A comment or a card/nightly note would close it; not code.
+4. (new, wording) tools/card_tests/layer_pause.sh:13-14 still says "SAGUARO_PRIORITY_IDLE_S=0 (P125j's
+   defaults)" - after the round-4 revert 0 is no longer the default; the script's own
+   `SAGUARO_PRIORITY_IDLE_S="${IDLE:-0}"` (:104) keeps the run correct, so this is prose only.
 
 ## What ran here (one at a time, nothing on a GPU)
 
-* `park_policy_test` (the only test module this plan names), fresh from tip sources:
-  `g++ -std=c++20 -I engines/qfn/include engines/qfn/src/core/park_policy_test.cpp` into scratch/review-r4/ ->
-  **65 checks passed**; and as the `scratch/build-p125k-merge2` target (ninja: no work to do at tip) ->
+* `park_policy_test` (the only test module this plan names), fresh from the tip sources:
+  `g++ -std=c++20 -I engines/qfn/include engines/qfn/src/core/park_policy_test.cpp -o scratch/review-r5/ppt_r5`
+  -> **65 checks passed**; and as the `scratch/build-p125k-merge2` target (ninja: no work to do at tip) ->
   **65 checks passed**.
-* `tools/saguaro/extract_qfn_engine.py` -> serve/qfn_engine.py byte-identical, tree clean.
-* `layer_pause_test` was deliberately NOT run (not named by this plan).
+* `tools/saguaro/extract_qfn_engine.py` -> serve/qfn_engine.py byte-identical, `git status` clean.
+* `py_compile` on serve/server.py, serve/test_priority.py, serve/qfn_engine.py, engines/qfn/serve/server.py;
+  `bash -n` on tools/card_tests/layer_pause.sh - all clean.
+* `layer_pause_test` and `serve.test_priority` were deliberately NOT run - not named by this plan; the P125j
+  modules stay that branch's card's court.
