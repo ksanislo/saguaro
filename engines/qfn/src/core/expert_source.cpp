@@ -4007,12 +4007,15 @@ bool FileExpertSource::pin_cache_complement(
                         got += step;
                     }
                     // cut at an expert boundary: a blob that runs past the registered range would be refused by a
-                    // cudaMemcpyAsync as not page-locked
-                    uint64_t w = got;
+                    // cudaMemcpyAsync as not page-locked.  P124e: SAGUARO_PARTIAL_PIN caps the registration here too
+                    // (the hottest SAGUARO_PARTIAL_PIN_GIB); the tail above it is only locked, so relieve_ram can give
+                    // it back when a conversation's host K/V grows - a registered page cannot be.
+                    const uint64_t reg = partial_on ? std::min(got, pin_cap) : got;
+                    uint64_t w = reg;
                     for (size_t i = 0; i < offsets.size() && w < bytes; ++i) {
                         if (offsets[i] == kNoComplement) continue;
                         const uint64_t b = layer_blob_bytes_[i / (size_t) n_expert_];
-                        if (offsets[i] < got && offsets[i] + b > got) { w = offsets[i]; break; }
+                        if (offsets[i] < reg && offsets[i] + b > reg) { w = offsets[i]; break; }
                     }
                     if (w > 0) {
                         if (cudaHostRegister(arena, (size_t) w, cudaHostRegisterMapped | cudaHostRegisterPortable) ==
