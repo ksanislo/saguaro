@@ -39,6 +39,8 @@ td.log
 /strata-*.log
 /maya-*.json
 /maya-*.json.prev
+/saguaro-*.json
+/saguaro-*.json.prev
 /.maya-switch.json
 /.saguaro-last-good.json
 /token-savings.json*
