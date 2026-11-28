@@ -74,6 +74,12 @@ class ChatTemplate:
         hytk = re.search(r"set\s+HYTK\s*=\s*'([^']*)'", self.source)
         self.hy4 = bool(hytk) and "reasoning_mode" in self.source and "hy_start" in self.source
         self.hy4_tag = hytk.group(1) if hytk else ""
+        # Qwen3.x (upstream 92b457276): its template keeps a past turn's thinking (reasoning_content) unless told
+        # preserve_thinking=false - a client that sends it back gets the history as the model wrote it, so the next
+        # turn goes on from the engine's cache instead of reading the whole last answer again
+        self.qwen = (not self.glm_effort and not self.deepseek and not self.minimax and "<|im_start|>" in self.source
+                     and "<function=" in self.source and "tool | tojson" in self.source)
+        self.keeps_thinking = self.qwen and "preserve_thinking is undefined or preserve_thinking is true" in self.source
 
     def effort_shown(self, value) -> str | None:
         """Hy4-flash: a thinking level as given -> the level this model really runs it at ("none", or "high" for

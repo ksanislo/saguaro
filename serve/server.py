@@ -5919,6 +5919,31 @@ class Service:
         pp = getattr(tls, "pp", None) or (getattr(tls, "own_pp", None) or (None,))[0]
         return pp[:2] if isinstance(pp, (tuple, list)) and len(pp) >= 2 else None
 
+    def _closed_as_rendered(self, ids, produced, think_end):
+        """Upstream 92b457276: when the SERVER closes the thinking, the tokens the engine goes on from are written the way
+        a Qwen3.x template renders that turn in the next request's history - `<think>\\n` + reasoning.strip() +
+        `\\n</think>\\n\\n` - in the tokenizer's own ids, not a bare close after the last token (which read back
+        differently and cost the whole answer again).  What the client got is unchanged.  None: as before."""
+        if not getattr(self.template, "qwen", False) or not produced:
+            return None
+        tok = self.tok
+        nl, open_ = tok.encode("\n"), tok.encode("<think>", parse_special=True)
+        if len(nl) != 1 or len(open_) != 1 or len(ids) < 2 or list(ids[-2:]) != [open_[0], nl[0]]:
+            return None
+        if any(t in set(self.stop_ids) | {think_end, open_[0]} for t in produced):
+            return None
+        try:
+            text = b"".join(tok.token_bytes(t) for t in produced).decode("utf-8")
+        except (UnicodeDecodeError, AttributeError, KeyError, IndexError):
+            return None
+        body = text.strip()
+        if not body:
+            return None
+        canon = tok.encode("\n" + body + "\n")   # (the chunk between <think> and </think> in the next render)
+        if not canon or canon[0] != nl[0]:
+            return None
+        return canon[1:] + [think_end] + tok.encode("\n\n")
+
     def _loop_guard_on(self, sampling) -> bool:
         """The loop guard for this request: its own "loop_guard" when it sends one, else the server's."""
         own = (sampling or {}).get("loop_guard")
@@ -6227,7 +6252,12 @@ class Service:
                 if fresh is not None and fresh is not last0:
                     segments.append(fresh)
             if closed:                                  # the budget, at a sentence's or line's end: the thinking ends
-                produced.extend(close)
+                later = len(produced) - soft
+                canon = self._closed_as_rendered(ids, produced, think_end) if close == [think_end] else None
+                if canon is not None:                   # (as the next turn's history renders it: that turn reuses)
+                    produced[:] = canon
+                else:
+                    produced.extend(close)
                 sent = len(produced)
                 soft_text = None
                 yield from close
@@ -6235,7 +6265,7 @@ class Service:
                     guard.thinking_closed(produced)
                 print(f"[saguaro] thinking reached its budget ({soft} tokens): closed "
                       f"{'at the end of a sentence or line, ' if think_boundary(tail_text) else ''}"
-                      f"{len(produced) - len(close) - soft} tokens later; answering", flush=True)
+                      f"{later} tokens later; answering", flush=True)
                 if cancel.is_set() or self.stopping:
                     break
                 cur, left = list(ids) + produced, max_new - len(produced)
@@ -8386,6 +8416,8 @@ def make_handler(svc: Service):
                                  "images": svc.vision is not None, "api_key": bool(svc.api_key), "defaults": rec,
                                  "version": SAGUARO_VERSION, "mcp_tools": bool(svc.mcp), "unloaded": svc.unloaded,
                                  **({"thinking_levels": levels} if levels else {}),
+                                 # the web chat sends past answers' thinking back (a Qwen3.x template keeps it)
+                                 "history_thinking": bool(getattr(svc.template, "keeps_thinking", False)),
                                  "capabilities": svc.capabilities(), "supervisor": svc.supervisor})
             elif path == "/api/context":
                 # the dashboard's Context size: the range, the measured cost of the current size, a reload's state
