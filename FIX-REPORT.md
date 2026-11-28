@@ -106,7 +106,7 @@ as the plan's step 3 and the manager's gate require.
   prefill.cpp as committed) and `--target strata_prefill` exit 0.
 - `cmake --build ... --target layer_pause_test` + `ctest -R layer_pause_test`: Passed, binary
   prints "ok: 43 checks, 0 bad".
-- `/opt/llm/saguaro/.venv/bin/python -m unittest serve.test_priority`: Ran 68, OK.
+- `python -m unittest serve.test_priority` (the project venv's interpreter): Ran 68, OK.
 - `tools/saguaro/extract_qfn_engine.py`: regenerated `serve/qfn_engine.py` byte-identical
   (`git status` clean after) - no server-side change was needed for any finding.
 - `bash -n tools/card_tests/layer_pause.sh`: clean; `py_compile` on serve/server.py,

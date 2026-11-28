@@ -125,8 +125,9 @@ consumer is a stream the event form already existed (`order_after_queued`, conve
   (56 at the merge tip + 9), standalone (`g++ -std=c++20 -I engines/qfn/include ...` into scratch/) and as
   the `park_policy_test` target of the real build - each run one at a time. This is the only test module the
   plan names; nothing ran on a GPU here.
-* Engine build proof: `QFN_GGML_DIR=/data/llm/maya/third_party/llama.cpp tools/qfn/build.sh scratch/build-p125k`
-  (CUDA, sm_75, /usr/local/cuda-13.1/bin/nvcc, fresh build dir, llama.cpp at the pinned 3cf03257f):
+* Engine build proof: `QFN_GGML_DIR=../maya/third_party/llama.cpp tools/qfn/build.sh scratch/build-p125k`
+  (the llama.cpp checkout of the sibling worktree, named relative to this worktree, as the build's CMakeCache
+  confirms; CUDA, sm_75, the box's CUDA 13.1 nvcc on PATH, fresh build dir, llama.cpp at the pinned 3cf03257f):
   **QFN BUILD OK 179/179**, `saguaro-qfn` linked; `ninja -n -C scratch/build-p125k strata` reports *no work to
   do* at tip. The one `generate.cpp` warning in the log (:15814 unused `w`) predates this branch.
 * Card test (manager, after): parks/restores during 2-3 busy conversations - the park line's `sync` part must
