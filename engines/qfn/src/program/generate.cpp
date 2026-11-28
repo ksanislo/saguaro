@@ -13845,10 +13845,12 @@ vs.d_skip_usage = gs.d_skip_usage;
             bstat_toks0 = bstat_toks; bstat_off0 = bstat_off; bstat_acc0 = bstat_acc;
         };
         const auto batch_stat_line = [&](int active_slots) {
-            for (size_t k = 0; k < bslot_ss.size() && k < g_vl_slot_backed.size(); ++k) {   // (serve thread: VramLive reads these)
-                uint64_t b = 0;
-                for (const auto& u : bslot_ss[k]) b += strata::core::session_slot_backed(*u);
-                g_vl_slot_backed[k].store(b, std::memory_order_relaxed);
+            if (strata::program::vram_report_s() > 0) {   // (VramLive OFF: nothing reads these atomics, walk nothing)
+                for (size_t k = 0; k < bslot_ss.size() && k < g_vl_slot_backed.size(); ++k) {   // (serve thread: VramLive reads these)
+                    uint64_t b = 0;
+                    for (const auto& u : bslot_ss[k]) b += strata::core::session_slot_backed(*u);
+                    g_vl_slot_backed[k].store(b, std::memory_order_relaxed);
+                }
             }
             const Clock::time_point now = Clock::now();
             const double el = std::chrono::duration<double>(now - bstat_t1).count();
