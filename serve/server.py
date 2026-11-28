@@ -4507,16 +4507,23 @@ class Service:
 
     def _own_read_rate(self, st, now, n_own) -> float:
         """One chat's live read rate (PLAN-qfn-per-request-read-stats + PLAN-p124v-read-rate +
-        PLAN-p124v2-read-rate-true): its counted tokens (the beat's done plus the chunk in flight's
-        passed share, booked by _note_hb) over the read's OWN elapsed span - now minus the read's own
-        start, legs summed, staging left out, the engine's own read_ms pair as the floor.  Not the
-        beat's ms= alone: that is the read's RUN clock over its settled legs, and a read held between
-        pieces pairs whole-chunk tokens with a clock that stopped (the recorded mangonel: at 7.11 s the
-        engine's own new/read_ms said 704.2 tok/s while the Monitor showed 2,099.4).  A read the
-        engine beats for that stops beating (a stall, a wedge): the readout FALLS with the silence
-        instead of freezing at the last beat, and drains to nothing past the window.  Without the
-        engine's fields (an older engine): its counted tokens over the time since the engine took it,
-        as before - drained to 0 once nothing has landed for a full window."""
+        PLAN-p124v2-read-rate-true, round 4): the CUMULATIVE tokens this read counted (the beats'
+        done plus the unit in flight's passed share, booked by _note_hb, and the progress steps)
+        over the time since THIS read started - the read's OWN elapsed span: now minus its own
+        start, legs summed, staging left out, the engine's own read_ms pair as the floor.  Never an
+        interval rate and never a figure measured from a re-baselined start: the card rc2 read
+        (scratch/card-rc2-timeline.txt: the client's 17.8 s / 27,299 tokens, the true ~1,580)
+        showed ~2,393 mean and 9,881 max because a whole-cut progress step landing below the
+        share-credited counter fired the restart branch mid-read - read_pos, the interval,
+        engine_t0 and the pair all reset - and the readout became (tokens since that false
+        restart) / (the ~0.5 s since it).  Not the beat's ms= alone either: that is the read's RUN
+        clock over its settled legs, and a read held between pieces pairs whole-chunk tokens with
+        a clock that stopped (the recorded mangonel: at 7.11 s the engine's own new/read_ms said
+        704.2 tok/s while the Monitor showed 2,099.4).  A read the engine beats for that stops
+        beating (a stall, a wedge): the readout FALLS with the silence instead of freezing at the
+        last beat, and drains to nothing past the window.  Without the engine's fields (an older
+        engine): its counted tokens over the time since the engine took it, as before - drained to
+        0 once nothing has landed for a full window."""
         if st.read_eng_ms and st.read_eng_ms > 0 and st.read_eng_n:
             r = getattr(st, "read_cur", None)
             if r is not None and r[2] is None and st.first_token is None:
@@ -4527,7 +4534,7 @@ class Service:
                     # beating: its silence is the cadence, and the span below is the read's own elapsed.
                     if now - (st.read_t1 or now) > RATE_WINDOW_S + READ_BEAT_STALE_S:
                         return 0.0
-                return st.read_eng_n / max(st.read_eng_ms / 1000.0, self._read_span_s(st, now))
+                return n_own / max(st.read_eng_ms / 1000.0, self._read_span_s(st, now))
             # the read is over (BRA / a leg's close) but its answer has not started: its true rate ages
             # with the wall time since it ended, and drops out once it is only history.  A leg still open
             # with first_token set (one landed before _prefill_tok_s closed it): age from the last step.
@@ -4537,7 +4544,7 @@ class Service:
                 return 0.0
             span = max(st.read_eng_ms / 1000.0, self._read_span_s(st, ended))
             span += max(0.0, gap - READ_BEAT_STALE_S)
-            return st.read_eng_n / span
+            return (n_own or st.read_eng_n) / span
         if n_own and st.engine_t0 and now > st.engine_t0:
             r = getattr(st, "read_cur", None)
             if r is not None and r[2] is None and st.read_t1 and now - st.read_t1 > RATE_WINDOW_S:
@@ -4560,6 +4567,9 @@ class Service:
         with self.status_lock:
             self._read_close(stat, now)
             stat.engine_t0 = now
+            stat.read_hb = None                         # (round 3 nit, round 4 commit: the previous read's last
+            #  beat is not this read's - _read_span_s subtracts read_hb's stage_ms from the span and the
+            #  _note_read belt keys on its done/chunk; both belong to the interval that just closed)
             self._read_open(stat, now)
 
     def _note_read_safe(self, *a):
@@ -4684,13 +4694,34 @@ class Service:
                     r[4].append((now, n_read))
                 self._read_close(stat, now)             # (the engine's BRA ENDS this read: from here its tokens
                 return                                  #  spread over the read itself, never at its end)
-            if r is None:                               # the first step of a read the driver announced no start for
-                r = self._read_open(stat, now)
-            elif n_read < stat.read_pos:                # a new read of this request's prompt (a retry, a slice's leg)
+            was_open = r is not None                    # (the belt and the restart branch are for an OPEN read -
+            if r is None:                               #  a read whose interval closed opens a fresh one first,
+                r = self._read_open(stat, now)          #   exactly as before this round)
+            hb = getattr(stat, "read_hb", None)
+            if (was_open and n_read < stat.read_pos and hb is not None
+                    and now - hb.get("at", 0.0) <= RATE_WINDOW_S + READ_BEAT_STALE_S
+                    and n_read >= (hb.get("done") or 0)
+                    and stat.read_pos - n_read <= (hb.get("chunk") or 0)):
+                # P124v2 round 4 (the card rc2): NOT a restart - the engine's own belted done= has not
+                # fallen (this step agrees with the beat's, n_read >= its done) and the fall is at most
+                # the unit in flight's size: the step is the whole-cut count of a read whose in-flight
+                # unit the RHB beats already shared (done + chunk x pass_i/pass_n booked above this
+                # boundary, the PP/BRP line lags the beats it describes).  Book read_pos (monotone, the
+                # way _note_hb belts its own beats) and leave the interval, the counter, engine_t0 and
+                # the pair standing: the restart branch below re-baselined them mid-read and turned the
+                # readout into (tokens since the false restart) / (the ~0.5 s since it) - the card:
+                # 9,881 tok/s at 10.66 s (a 4,608-token cut over 0.466 s) and a ~2,393 mean against
+                # the client's true ~1,580.  A REAL restart falls below the beat's own done=, or by
+                # more than one unit, or with no live beat: it stands below.
+                n_read = stat.read_pos
+            elif was_open and n_read < stat.read_pos:   # a new read of this request's prompt (a retry, a slice's leg)
                 self._read_close(stat, now)
                 stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
                 stat.read_eng_n, stat.read_eng_ms = 0, None   # (the engine's live pair restarts with the read)
                 stat.read_leg_ms = 0.0                  # (P124v2: and so does its own elapsed span)
+                stat.read_hb = None                     # (round 3 nit: and its last beat goes too - _read_span_s
+                #  subtracts read_hb's stage_ms, and the PREVIOUS read's stale staging figure would shrink the
+                #  new read's span; the belt above keys on the beat's done/chunk alike)
                 if stat.engine_t0 is not None:
                     # (P124v2 review nit 3: the open leg's start re-baselines too - _read_span_s adds
                     #  now - engine_t0 to the span, and the counter going backwards mid-admission would
