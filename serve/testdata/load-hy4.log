@@ -1,0 +1,5 @@
+hy4: reading the pack pack/full (18.7 GB): 2048 experts, 60 layers
+saguaro hy4: CPU lane: 6144 experts re-coded at 4 bits (11.9 GB); 0 of 6144 expert runs kept on the GPU
+saguaro hy4: GPU fetch (profile): 81234 routed picks in its layers - 71.3% in VRAM, 28.7% on the SSD
+saguaro hy4: measuring this PC once, before the first answer: drafting (dfly2: a load and 24 short prompts)
+saguaro hy4: drafting trial: dfly2 8.42 tokens/s (220 tokens; load 6 s; 980 of 6144 routed experts in VRAM)

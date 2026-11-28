@@ -846,6 +846,17 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+class EngineStartFailed(RuntimeError):
+    """The engine process died before it said READY (P125m phase 2): the crash page shows its exit code and its
+    last engine-log lines, so it carries them (`exit_code`, from the process; `lines`, the engine's own ~20 lines
+    from the log).  exit_code is None only when the process would not report one (it never started)."""
+
+    def __init__(self, message: str, exit_code=None, lines=None):
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.lines = list(lines or [])
+
+
 class LendTimeout(ValueError):
     """A VLEND / VRECLAIM got no answer within its wait (PLAN-vision-fast-start review 4): the engine was busy reading
     its prompt and did not reach a settle.  Distinct from an ERR refusal (the engine alive and saying "no room"): on a
@@ -1453,6 +1464,53 @@ def narrate_start(log_path: str, offset: int, args: list, done: threading.Event,
             print(f"[saguaro] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
 
 
+def engine_log_tail(log: str | None, offset: int = 0, n: int = 20) -> list:
+    """The last ~n non-empty lines the engine wrote to its log at or after `offset` (P125m phase 2): the crash page
+    shows these - the engine's own reason is in them (shards read, experts pinned ... and the line or traceback
+    that ended it).  [] when there is no log or nothing in it from this start; each line trimmed to 500 chars."""
+    if not log:
+        return []
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2)
+            start = max(offset, f.tell() - 65536)              # (enough for n lines, never an earlier start's whole log)
+            f.seek(start)
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    text = text[1:] if start > offset else text                # (not a line cut in half at the window's edge)
+    return [x.rstrip()[:500] for x in text.splitlines() if x.strip()][-n:]
+
+
+# Windows NTSTATUS codes of a process the system ended (a crash, not an exit the engine chose): the same table the
+# batch driver keeps (engines/qfn/serve/server.py), so both engines' crashes say the same thing on the page.
+_WIN_CRASH = {0xC0000135: "a DLL the program needs was not found", 0xC00000FD: "stack overflow",
+              0xC0000005: "bad memory access", 0xC000001D: "illegal instruction (the CPU lacks an instruction it used)",
+              0xC0000409: "fast-fail / stack buffer overrun", 0xC0000374: "the heap was corrupted"}
+
+
+def engine_exit_words(rc):
+    """What the engine process's exit status says, in words (P125m phase 2, the crash page): "killed by signal 9
+    (SIGKILL - the system's out-of-memory killer ends it this way)" on Linux/macOS, a named Windows crash code, or
+    "exit code N"; "" when there is no status (None: the process never reported one)."""
+    if rc is None:
+        return ""
+    if rc < 0 and os.name != "nt":
+        import signal
+        try:
+            sig = signal.Signals(-rc)
+            extra = " - the system's out-of-memory killer ends it this way" if sig.name == "SIGKILL" else ""
+            return f"killed by signal {-rc} ({sig.name}, {signal.strsignal(sig) or sig.name}{extra})"
+        except (ValueError, AttributeError):
+            return f"killed by signal {-rc}"
+    code = rc & 0xFFFFFFFF
+    if code in _WIN_CRASH:
+        return f"exit code 0x{code:08X}: {_WIN_CRASH[code]}"
+    if 0xC0000000 <= code < 0xD0000000:
+        return f"exit code 0x{code:08X} (a system error status)"
+    return f"exit code {rc}"
+
+
 class StrataEngine:
     """The resident engine: `saguaro-glm --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -1537,7 +1595,18 @@ class StrataEngine:
             # its output closed: it is gone, even before the OS says so (as _pump) - alive() is False at once, not
             # only after the process is reaped (a busy CI runner saw it alive right after a failed restart)
             self.ended = True
-            raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
+            # P125m phase 2: a crash mid-load gets the crash page - the process's exit code and the engine's own
+            # last lines from the log go on the exception, so main() can hand them to the standing page.
+            code = self.exit_code()
+            lines = engine_log_tail(log, log_start)
+            for closer in (self.proc.stdin, self.proc.stdout):        # (its pipes and our handle on its log go back)
+                with contextlib.suppress(OSError, ValueError):
+                    closer.close()
+            if self.log is not subprocess.DEVNULL:
+                with contextlib.suppress(OSError):
+                    self.log.close()
+            raise EngineStartFailed("the engine exited before it was ready" + (f" (see {log})" if log else ""),
+                                    exit_code=code, lines=lines)
         # (#1026) a start that came out short of its VRAM reserve (INFO reserve_short=<MiB>) - the engine measured
         # what it allocates after its experts' plan and keeps that free from its next start on: started once more
         # now, so the first start after an update or a new setting never serves with the reserve used up
@@ -8965,23 +9034,160 @@ def index_html() -> bytes:
     return body.replace(b"?v=__VERSION__", f"?v={SAGUARO_VERSION or ''}".encode())
 
 
+# ------------------------------------------------- the engine's own load lines, as the load's progress (P125m phase 2)
+# What the loading screen and the switch bar show is NOT a timer: it is what the engine is writing to its log right
+# now, mapped through a small table of that engine's load milestones - shards read, experts pinned, cards ready ...
+# The lines come from each engine's own sources (src/, engines/qfn/src/) and from what this server already reads of
+# them (narrate_start, ik2_log_facts, _context_cost); the tables are tested against recorded lines in
+# serve/testdata/.  A line the table does not know keeps the last value: the bar never jumps on noise.  The
+# percentages say where a milestone sits in a usual load of that engine - the last stretch is quick and lands late,
+# and the engines that write little while they load (hy4, mm3) simply hold longer between their lines.
+def _between(lo: float, hi: float):
+    """A milestone's percentage from a counter line "N / M": `lo` at none, `hi` at all of them."""
+    def f(m):
+        n, d = int(m.group(1)), int(m.group(2))
+        return lo + (hi - lo) * (min(1.0, n / d) if d > 0 else 0.0)
+    return f
+
+
+# Each table: (pattern, percentage, the step's words), scanned in order, first match wins; a line none of them
+# knows keeps the last (pct, step).  The families are maya_quants.family_of's, plus "qfn" (the batch engine); an
+# engine with no table (the mock) simply never moves the bar.
+LOAD_MILESTONES = {
+    "glm": [
+        (re.compile(r"PLE on\b"), 12, "setting up the expert fast path"),
+        (re.compile(r"expert arena:"), 18, "making room for the experts in RAM"),
+        (re.compile(r" loaded .*GiB at"), 55, "experts read into RAM"),
+        (re.compile(r"(?:CUDA|HIP)\d+ VRAM before the expert pool"), 70, "cards ready: the context first"),
+        (re.compile(r"expert cache \d+ slots, "), 82, "filling the GPU's expert cache"),
+        (re.compile(r"session is up"), 95, "almost ready"),
+    ],
+    "deepseek": [
+        (re.compile(r"saguaro ds4: loading \d+ experts"), 5, "reading the pack's expert list"),
+        (re.compile(r"saguaro ds4: copying experts (\d+) / (\d+)"), _between(65, 82),
+         "pinning the experts for the CPU lane"),
+        (re.compile(r"saguaro ds4: experts (\d+) / (\d+)"), _between(8, 65), "copying the experts into RAM"),
+        (re.compile(r"saguaro ds4: CUDA\d+ layers \["), 88, "cards ready: layers placed"),
+    ],
+    "qfn": [
+        (re.compile(r"^\[strata\].*engine started"), 2, "the engine starts"),
+        (re.compile(r"reading the model's geometry from"), 6, "reading the pack"),
+        (re.compile(r"native pack: \d+ experts"), 10, "shards read: the pack's index"),
+        (re.compile(r"PLE table .* in "), 14, "reading the PLE table"),
+        (re.compile(r"experts via mmap"), 18, "mapping the experts from the model files"),
+        (re.compile(r"expert arena:"), 18, "making room for the experts in RAM"),
+        (re.compile(r"(?:CUDA|HIP)\d+ context ready, .* before expert arena registration"), 24, "cards ready"),
+        (re.compile(r"expert arena read "), 68, "experts read into RAM"),
+        (re.compile(r"expert arena checksum"), 74, "experts pinned in RAM"),
+        (re.compile(r"expert cache:?\s+\d+ slots, "), 84, "filling the GPU's expert cache"),
+        (re.compile(r"session is up"), 95, "almost ready"),
+    ],
+    "ik2": [
+        (re.compile(r"saguaro ik2: \d+ layers.*?\d+ shards"), 8, "shards read"),
+        (re.compile(r"kv cache: "), 30, "allocating the K/V cache"),
+        (re.compile(r"experts in pinned "), 60, "experts pinned in RAM"),
+        (re.compile(r"expert cache, GPU \d+: \d+ slots"), 85, "cards ready"),
+    ],
+    "hy4": [
+        (re.compile(r"CPU lane: \d+ experts re-coded at 4 bits"), 55, "recoding the CPU lane's experts"),
+        (re.compile(r"measuring this PC once"), 70, "measuring this PC once"),
+        (re.compile(r"drafting trial: "), 80, "trying the drafters"),
+    ],
+    "minimax": [
+        (re.compile(r"reading the model's files for NaN/Inf"), 45, "checking the model's files"),
+        (re.compile(r"CPU lane"), 68, "measuring the CPU lane"),
+    ],
+}
+
+
+def load_progress(family: str, line: str, pct=None, step: str = "") -> tuple:
+    """One engine log line against the engine's milestone table: the (pct, step) after it.  A line the table does
+    not know keeps the last value - and both stay None/"" until a table line has been seen."""
+    for rx, p, s in LOAD_MILESTONES.get(family) or []:
+        m = rx.search(line)
+        if m:
+            v = p(m) if callable(p) else p
+            return (None if v is None else int(v)), (s(m) if callable(s) else s)
+    return pct, step
+
+
 class LoadState:
     """What the "starting" service answers with while the engine is not there yet (issue #20 phase 1): the model's
     name, and that the load runs.  main() hands the real Service over on the same socket (take_over); a load that
-    fails says so here instead (fail), and the port keeps answering with it."""
+    fails says so here instead (fail), and the port keeps answering with it.  Phase 2 (P125m): /health carries the
+    load's real progress - the engine's own load lines, read as they land in its log, through the family's
+    milestone table (LOAD_MILESTONES): {"pct": 0..100 | null, "step": the current step's words}."""
 
     def __init__(self, model: str, log_path=None, api_key: str = "", supervisor: str | None = None, port=8095,
-                 config_path=None):
+                 config_path=None, switching: bool = False, family: str = ""):
         self.model, self.log_path = model, log_path
         self.api_key, self.supervisor, self.port = api_key, supervisor, port
         self.config_path = str(config_path) if config_path else None
+        self.switching = bool(switching)          # this start is the other half of a model switch (P125m): the page
+                                                  #  that shows the app keeps it and waits, and /v1/models keeps listing
+        self.family = family or ""                # the engine's family: which milestone table its log lines read by
         self.t0 = time.time()
         self.status, self.error = "loading", None
         self.failed_seen = threading.Event()      # a /health that told the supervisor about the failure
+        # the crash of a load (P125m phase 2): the engine process's exit code and its last lines, set by fail()
+        # when the load died (an EngineStartFailed / qfn's EngineDied carries them); None/[] otherwise.
+        self.exit_code, self.crash_lines = None, []
+        # the progress (P125m): the engine's log read as it lands, through the family's milestone table.  The first
+        # look starts where this start began (the log file still holds the earlier starts' lines); a line that
+        # died mid-load keeps the last value, so the bar waits rather than jumping back.
+        self.pct, self.step = None, ""
+        self._pos = None                          # bytes of the log read so far (None: take the size on first look)
+        self.log_start = 0                        # where this start's lines begin (the crash page's log tail)
+        self._log_lock = threading.Lock()
+        if log_path:
+            with contextlib.suppress(OSError):
+                self._pos = self.log_start = Path(log_path).stat().st_size
 
     def fail(self, error) -> None:
-        """The load failed (issue #20): the standing page shows this, /health says {"status": "failed"} with it."""
+        """The load failed (issue #20): the standing page shows this, /health says {"status": "failed"} with it.
+        A load that died with the engine (P125m phase 2) carries its exit code and last lines on the exception
+        (EngineStartFailed from the line engine, the batch driver's EngineDied) - those make it a crash the page
+        draws with the code, the engine's ~20 lines and the two ways out; a config error (no engine died) stays the
+        plain error page."""
         self.status, self.error = "failed", str(error) or type(error).__name__
+        code = getattr(error, "exit_code", None)
+        self.exit_code = code if isinstance(code, int) else None
+        lines = [str(x) for x in (getattr(error, "lines", None) or []) if str(x).strip()]
+        if self.exit_code is not None and not lines:
+            lines = engine_log_tail(self.log_path, self.log_start)   # (died but attached no lines: its log has them)
+        self.crash_lines = lines[-20:]
+
+    @property
+    def crashed(self) -> bool:
+        """The load failed with the engine process having died (not a config error): the crash page shows."""
+        return self.status == "failed" and (self.exit_code is not None or bool(self.crash_lines))
+
+    def restartable(self) -> bool:
+        """Whether this standing page can end the start with RESTART_EXIT so saguaro.py starts a config again: not
+        under a supervisor (it owns the starts) and only where saguaro.sh / START-SAGUARO.bat started this server."""
+        return not self.supervisor and bool(os.environ.get("SAGUARO_RESTART_ON_UPDATE"))
+
+    def _advance_progress(self) -> None:
+        """Read what the engine wrote to its log since the last look and run every new line through the family's
+        milestone table (load_progress): /health's pct and step follow the engine's own load, not a timer."""
+        if not self.log_path:
+            return
+        with self._log_lock:
+            try:
+                with open(self.log_path, "rb") as f:
+                    if self._pos is None:
+                        f.seek(0, 2)
+                        self._pos = f.tell()
+                        return
+                    f.seek(self._pos)
+                    chunk = f.read(262144)                     # (a 256 KiB step of the log, per look at most)
+                    cut = chunk.rfind(b"\n") + 1               # only complete lines: the half one is read again
+                    if cut:
+                        self._pos += cut
+                for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+                    self.pct, self.step = load_progress(self.family, line, self.pct, self.step)
+            except OSError:
+                pass                                           # (no log yet, or it moved: wait for the next look)
 
     def last_log_line(self) -> str:
         """The engine log's last line, trimmed - what the loading screen shows while it waits ("" before the
@@ -9006,15 +9212,36 @@ class LoadState:
         # model name, how long the load has run, and what the engine was last saying.  A failed load adds the error
         # and, when a different config loaded before, what the page's button would start (never under a supervisor,
         # which owns starts and switches itself).
+        self._advance_progress()     # (P125m: the progress the answer carries is the engine's own lines, read now)
         out = {"status": self.status, "model": self.model, "elapsed_s": int(time.time() - self.t0),
-               "line": self.last_log_line(), "supervisor": self.supervisor}
+               "line": self.last_log_line(), "supervisor": self.supervisor,
+               "pct": self.pct, "step": self.step}
+        if self.status == "loading" and self.switching:
+            out["switch"] = True      # (P125m: a page that shows the app keeps it on screen and says "loading <model>")
         if self.status == "failed":
             out["error"] = self.error
             if not self.supervisor:
                 lg = read_last_good()
                 if lg and lg["path"] != self.config_path:
                     out["last_good"] = lg
+            if self.crashed:
+                # (P125m phase 2: the crash page - the engine's exit code, its last ~20 lines, and the way out)
+                out["crashed"] = True
+                out["exit_code"] = self.exit_code
+                out["exit"] = engine_exit_words(self.exit_code)
+                out["lines"] = self.crash_lines
+                if self.config_path and self.restartable():
+                    # (the "load again" button: shown only where this page can actually end the start and retry,
+                    #  i.e. not under a supervisor and only when saguaro.sh / START-SAGUARO.bat started this server)
+                    out["again"] = Path(self.config_path).name
         return out
+
+    def models_listing(self) -> dict:
+        """The /v1/models answer while a SWITCH loads (P125m): the model asked for, listed with status "loading" -
+        the listing a client polls keeps answering across the switch instead of dropping to a bare 503; the chat
+        routes still answer 503 + Retry-After until it is ready."""
+        return {"object": "list", "data": [{"id": self.model, "object": "model", "owned_by": "saguaro",
+                                            "created": int(self.t0), "status": {"value": "loading"}}]}
 
 
 def last_good_note_path() -> Path:
@@ -9078,6 +9305,29 @@ def start_last_good(state: LoadState) -> dict:
     print(f"[saguaro] starting again with {lg['config']} (the last config that worked) ...", flush=True)
     threading.Thread(target=_restart_after_answer, daemon=True).start()
     return lg
+
+
+def start_again(state: LoadState) -> dict:
+    """The crash page's "load again" button (P125m phase 2): start this very config again - the one whose engine
+    died mid-load.  It is the same RESTART_EXIT note the last-good button leaves, only for the current config, so it
+    works when saguaro.py started this server and no supervisor owns the starts; after the operator fixed what the
+    engine's last lines say (or to ride out a one-off crash) the page just tries it once more."""
+    if state.supervisor:
+        raise ValueError(f"this server runs under {state.supervisor}, which starts, stops and switches the "
+                         "models: change models there (pick another model id), not here")
+    if not state.config_path:
+        raise ValueError("this server runs without a config of its own: it cannot start one again by itself")
+    p = Path(state.config_path)
+    if not p.is_file():
+        raise ValueError(f"{p.name} is gone, so it cannot be started again")
+    if not os.environ.get("SAGUARO_RESTART_ON_UPDATE"):
+        raise ValueError("this server was not started by saguaro.sh or START-SAGUARO.bat, so it cannot start "
+                         f"again by itself: start it again: python saguaro.py --config {p}")
+    (ROOT / models.SWITCH_FILE).write_text(json.dumps({"config": str(p), "port": state.port,
+                                                       "why": "load again", "time": time.time()}), encoding="utf-8")
+    print(f"[saguaro] starting again with {p.name} (load again after the crash) ...", flush=True)
+    threading.Thread(target=_restart_after_answer, daemon=True).start()
+    return {"config": p.name, "path": str(p)}
 
 
 def make_loading_handler(state: LoadState):
@@ -9173,6 +9423,11 @@ def make_loading_handler(state: LoadState):
                     state.failed_seen.set()      # (the supervisor has now heard it from us: main() may end)
                 self._json(503, state.health())
                 return
+            if state.switching and path in ("/v1/models", "/models"):
+                # (P125m: a switch keeps the model listing answering: the model asked for, status "loading")
+                if self._authorized():
+                    self._json(200, state.models_listing())
+                return
             if self._authorized():
                 self._loading()
 
@@ -9186,6 +9441,28 @@ def make_loading_handler(state: LoadState):
                         self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
                         return
                     self._json(200, {"starting": lg["config"]})
+                return
+            if path == "/api/load-again":                   # (the crash page's "load again": start this config over)
+                if self._authorized() and not self._foreign_page():
+                    if state.status != "failed":
+                        self._json(409, {"error": {"type": "invalid_request_error",
+                                                   "message": "nothing failed to load again"}})
+                        return
+                    try:
+                        out = start_again(state)
+                    except ValueError as e:
+                        self._json(409, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                        return
+                    self._json(200, {"starting": out["config"]})
+                return
+            if state.switching and path in ("/v1/chat/completions", "/v1/responses", "/v1/messages"):
+                # (P125m: the chat API keeps answering through a switch, and names the model it is waiting for -
+                #  the same words the running server uses when a request names another installed model)
+                if self._authorized():
+                    self._json(503, {"error": {"type": "model_not_loaded",
+                                               "message": f"loading model {state.model}: Saguaro switched to it and "
+                                                          "answers once the load is done (GET /v1/models shows when)"},
+                                     "loading": state.model}, retry_after=5)
                 return
             if self._authorized():
                 self._loading()
@@ -9980,10 +10257,13 @@ def main() -> int:
     api_key = a.api_key or cfg.get("api_key", "")
     supervisor = os.environ.get("SAGUARO_SUPERVISOR") or supervisor_name()
     # the page answers on this port from the first second of the load (issue #20); this bind doubles as the old
-    # "is the port free" check: a second start stops here, before the minutes of loading
+    # "is the port free" check: a second start stops here, before the minutes of loading.  SAGUARO_SWITCH=1 (set by
+    # saguaro.py when it starts again because the page switched models, P125m): this load is a switch - /health says
+    # "switch", /v1/models keeps listing, and a page that already shows the app keeps it on screen and waits.
     load_state = LoadState(cfg.get("model_name", "qwen3.8-flash-next"), log_path=cfg.get("log"),
-                           api_key=api_key, supervisor=supervisor,
-                           config_path=str(Path(a.config).resolve()) if a.config else None)   # (as write_last_good keeps it)
+                           api_key=api_key, supervisor=supervisor, switching=os.environ.get("SAGUARO_SWITCH") == "1",
+                           family=maya_quants.family_of(cfg) if cfg and kind != "mock" else "",   # (P125m: whose
+                           config_path=str(Path(a.config).resolve()) if a.config else None)   # (milestones its log has)
     try:
         httpd = serve_loading(load_state, host=a.host, port=a.port)
     except OSError:

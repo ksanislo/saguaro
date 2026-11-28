@@ -1,0 +1,6 @@
+saguaro ik2: 24 layers (20 sliding), 128 experts (8 a token), width 2304, vocab 200058; 1 shards
+kv cache: FP16 (1.31 GiB across 48 layer visits)
+experts in pinned (mmap+register) memory: 14.7 GiB; allocating 0.0 s, reading 4.9 s (3.01 GiB/s)
+expert cache, GPU 0: 2088 slots across 2 pools (10.0 GiB); load 7.2 s in all
+expert cache, GPU 1: 1900 slots across 2 pools (9.1 GiB); load 6.5 s in all
+saguaro ik2 serve: GEN <max_new> <ids>; STOP, QUIT

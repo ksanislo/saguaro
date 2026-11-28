@@ -8,6 +8,9 @@ export const S = {
   health: {model: "maya", images: false, max_context: 0, version: null, api_key: false, mcp_tools: false},
   starting: null,           // the starting service's /health while the model loads: loading, or failed (issue #20);
                             // null once the real service answers (null before its first answer too)
+  switching: null,          // a model switch in progress over a page that already shows the app (P125m): the starting
+                            // service's /health body, or {label} when this page asked for the switch itself; the app
+                            // stays on screen, sending waits, and a bar says "loading <model> NN%"
   metrics: null,            // GET /metrics, every second
   conn: "connecting",       // "ok", "connecting", "down" (three failed polls), "key" (an API key is needed),
                             // "unloaded" (behind llama-swap: the model is off the card, nothing is polled)
