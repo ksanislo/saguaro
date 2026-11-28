@@ -331,6 +331,10 @@ uint64_t qsa_kv_host_bytes();
 uint64_t qsa_kv_bytes_per_cell(const ModelGeometry& g);
 /// The host copies' addresses (pinned or not): what a host copy pinned whole would take.
 uint64_t qsa_kv_host_reserved_bytes();
+/// One growth step across every elastic host copy, in bytes (P124e round 12): the lead the copies run ahead of
+/// their conversations with.  The P124x resident-budget margin counts qsa_kv_host_bytes() + this - what the
+/// copies COMMIT - and never the reserved ceiling (resident_policy.hpp's committed_kv_bytes).
+uint64_t qsa_kv_host_step_bytes();
 /// SAGUARO_KV_HOST_ELASTIC: the states qsa_state_init makes from now on with a streamed host copy (not only the elastic
 /// slots') get one that grows (session_host_fit); --serve sets it around the solo session and the stages' sessions.
 void qsa_set_host_elastic_main(bool on);

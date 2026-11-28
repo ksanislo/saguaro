@@ -29,6 +29,19 @@ inline uint64_t runtime_bytes(uint64_t kv_pool_bytes) {
     return 2 * kv_pool_bytes;
 }
 
+/// The pool figure the margin counts (P124e, manager card round 12, finding A): what the K/V host copies
+/// COMMIT - the pages pinned now (the elastic copies' backed pages plus any copy pinned whole,
+/// qsa_kv_host_bytes) plus the one growth step the elastic copies run ahead of their conversations
+/// (qsa_kv_host_step_bytes).  Never --max-context x slots: that is only the ceiling the elastic copies'
+/// ADDRESSES could grow to, and counting it at load made a 1048576 setting cost 37 GiB of expert tier
+/// beside a 32768-cell start (the merge regression on mortar, 2026-11-27: 67.90 GiB of experts at 262144,
+/// 30.78 at 1048576).  A pinned-whole layout is counted by the same rule and comes out the same as before:
+/// it has committed the whole context at load, so `backed_bytes` already IS that ceiling.  Growth past the
+/// start pays the way every grow pays: room is made for it when it arrives (park releases, ram_reclaim).
+inline uint64_t committed_kv_bytes(uint64_t backed_bytes, uint64_t step_lead_bytes) {
+    return backed_bytes + step_lead_bytes;
+}
+
 /// The largest resident tier the host can carry: `total - runtime - margin`, 0 when nothing is left.  Unknown
 /// inputs (0) mean no cap is derived, never a cap of the whole host.
 inline uint64_t budget_cap(uint64_t total_bytes, uint64_t kv_pool_bytes) {

@@ -39,6 +39,31 @@ int main() {
     check(budget_cap(24 * G, 10 * G) == 0, "a 24 GiB host cannot carry a 20 GiB runtime plus its margin (0)");
     check(budget_cap(40 * G, 16 * G) == 0, "exactly full still means nothing is left for a tier (0)");
     check(budget_cap(40 * G + 1, 16 * G) == 1, "one byte over the tight fit leaves exactly that byte");
+
+    // P124e round 12 (manager card A): the margin counts the K/V the host copies COMMIT - backed + one
+    // growth step of lead - never the --max-context ceiling.  The mortar shape of 2026-11-27: 91.74 GiB
+    // host, 12700 B per position across the QSA layers, --batch 2, the elastic start and step 32768 cells,
+    // 1.30 GiB pinned for K/V at load whatever --max-context says, the asked tier 68 GiB.
+    const uint64_t host = (uint64_t) (91.74 * (double) G);
+    const uint64_t asked = 68 * G;
+    const uint64_t cell = 12700;
+    const uint64_t ceil262 = cell * 262144ull * 2;    // what --max-context 262144 x 2 slots would take whole
+    const uint64_t ceil1m = cell * 1048576ull * 2;    // ... and 1048576: the SAME 32768-cell start backed
+    const uint64_t before262 = budget_cap(host, ceil262);
+    const uint64_t before1m = budget_cap(host, ceil1m);
+    check(before262 > (uint64_t) (67.5 * (double) G) && before262 < asked,
+          "before the fix, 262144: the asked 68 GiB cut to ~67.9 by the ceiling-sized pool (mortar's 67.90)");
+    check(before1m < before262 / 2, "before the fix, 1048576: the same host kept only ~30.8 GiB of tier - the regression");
+    const uint64_t backed = (uint64_t) (1.30 * (double) G);
+    const uint64_t lead = (uint64_t) (1.30 * (double) G);   // the start IS one step: the lead matches it
+    check(committed_kv_bytes(backed, lead) == backed + lead, "committed = backed + the step it runs ahead");
+    const uint64_t after262 = budget_cap(host, committed_kv_bytes(backed, lead));
+    const uint64_t after1m = budget_cap(host, committed_kv_bytes(backed, lead));
+    check(after262 == after1m, "after the fix the tier is sized the same at 262144 and 1048576: memory follows use");
+    check(after1m >= asked, "and the asked 68 GiB stands at both contexts (mortar's pre-merge 68.00/68.00)");
+    // a pinned-whole layout commits its whole context at load: counted as backed, it still sizes the margin
+    const uint64_t whole1m = budget_cap(host, committed_kv_bytes(ceil1m, 0));
+    check(whole1m == before1m, "pinned whole (CUDA0-on-HIP fallback, no elastic copies): the whole context is COMMITTED");
     std::printf("resident_policy_test: %d checks passed\n", checks);
     return 0;
 }

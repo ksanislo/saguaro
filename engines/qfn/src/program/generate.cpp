@@ -6512,9 +6512,16 @@ int main(int argc, char** argv) {
                                               return v != nullptr && std::string(v) == "0"; }();
     if (o.resident_budget > 0 && !resident_cap_off) {
         const uint64_t host_total = strata::platform::total_physical_memory();
-        const uint64_t kv_pool = strata::core::qsa_kv_bytes_per_cell(g) *
-                                 (uint64_t) std::max<int64_t>(0, g.n_qsa_layers()) * (uint64_t) o.max_context *
-                                 (uint64_t) std::max(o.batch, 1);
+        // P124e (round 12, manager card A): the margin counts the K/V the host copies COMMIT - what is
+        // BACKED now plus the one growth step the elastic copies run ahead - never --max-context x slots.
+        // The elastic starts (every conversation holder pinned its 32768-cell step above, before the
+        // "pinned RAM for the K/V of every session" line) are the same at 262144 and 1048576, so the expert
+        // tier is sized the same at both: the merged rule counted the ceiling and cut the 68 GiB asked to
+        // 30.78 at 1048576 beside a 1.30 GiB start (mortar, 2026-11-27: -37 GiB of experts, +20% read time).
+        // Growth past the start takes its room when it arrives (the park / ram_reclaim give-back paths); a
+        // pinned-whole layout has already committed the whole context, and is counted whole by the same rule.
+        const uint64_t kv_pool = strata::core::resident::committed_kv_bytes(
+            strata::core::qsa_kv_host_bytes(), strata::core::qsa_kv_host_step_bytes());
         const uint64_t cap = strata::core::resident::budget_cap(host_total, kv_pool);
         if (host_total > 0 && o.resident_budget > cap) {
             if (cap == 0)

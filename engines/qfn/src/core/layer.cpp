@@ -2023,6 +2023,21 @@ int64_t qsa_kv_resident() { return g_kv_resident; }
 int64_t qsa_kv_resident_min() { return 20480; }
 uint64_t qsa_kv_host_bytes() { return g_kv_host_bytes.load(); }
 uint64_t qsa_kv_host_reserved_bytes() { return g_kv_host_reserved.load(); }
+// P124e (round 12, manager card A): one growth step across every elastic host copy, in bytes - the lead
+// a copy runs ahead of its conversation with (kv_host_growth.hpp: it backs about a step past the cells it
+// has reached), so this is the RAM the next step may pin before the conversation gets there.  The P124x
+// resident-budget margin counts qsa_kv_host_bytes() + this, never the reserved ceiling.
+uint64_t qsa_kv_host_step_bytes() {
+#ifndef _WIN32
+    std::lock_guard<std::mutex> lk(g_host_mu);
+    uint64_t s = 0;
+    for (const auto& p : g_host_pools)
+        s += (uint64_t) p->unit * std::accumulate(p->per.begin(), p->per.end(), (uint64_t) 0);
+    return s;
+#else
+    return 0;   // no elastic host copies (the Windows path pins whole): the backed bytes are the commit
+#endif
+}
 uint64_t qsa_kv_bytes_per_cell(const ModelGeometry& g) {
     // the same arrays qsa_state_init carves (kv_per_slot's order), per page over the K/V dtype's codes and scales
     const strata::kernels::QsaShapes s = qsa_shapes(g);
