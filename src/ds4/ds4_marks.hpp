@@ -117,6 +117,32 @@ struct TailCost {
     }
 };
 
+// does the position `x` cut one of the picture spans (`spans`: start, length)?  A span is stored whole or not at
+// all (the model's Check holds no partial rows), so no point a stopped read may land on stands inside one
+inline bool splits_span(int64_t x, const std::vector<std::pair<int64_t, int64_t>>& spans) {
+    for (const auto& s : spans)
+        if (x > s.first && x < s.first + s.second) return true;
+    return false;
+}
+
+// Where a prompt read that a STOP ends keeps its conversation (P124k, ds4_main's stopped branch).  Candidates, first
+// that answers and splits none of the picture spans wins: `done` - the end of the read's last whole piece, asked for
+// only when the run that was going finished whole (`mid` false: a Stop between two runs leaves the state live there,
+// a Stop inside a run leaves everything past that run's start unusable, so what the stopped run had consumed is never
+// asked for); `stored` - the deepest restore point the model holds at or before the stopped run's own start (the
+// read's last mark, or the checkpoint its keep left at a piece end; -1: none); `from` - the position the read started
+// at, checkpoint 1 of a prompt that continued a conversation.  `spans`: {start, len} of the prompt's pictures and
+// those the state holds - a state stopped inside a picture's rows is not kept, its span is stored whole or not at
+// all.  The answer is the position to keep, 0 for nothing of its own (the read goes back to before the prompt, or
+// resets, as without the keep).  Pure logic (tests/ds4_marks_test.cpp).
+inline int64_t read_stop_landing(bool mid, int64_t done, int64_t stored, int64_t from,
+                                 const std::vector<std::pair<int64_t, int64_t>>& spans = {}) {
+    const int64_t v[3] = {mid ? -1 : done, stored, from};
+    for (const int64_t p : v)
+        if (p > 0 && !splits_span(p, spans)) return p;
+    return 0;
+}
+
 // a kept restore point as the choice of the one to give up sees it
 struct MarkUse {
     int64_t pos = 0;
