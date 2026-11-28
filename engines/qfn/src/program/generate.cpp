@@ -6855,8 +6855,17 @@ int main(int argc, char** argv) {
             }
         return srcp->relieve_ram(bytes);
     });
+    // P125p: and the CAN-question beside it - host_make_room asks above only when the source says it has bytes it
+    // could give back (0: no resident complement, or registered whole), so a tier with nothing to give is never
+    // asked and never reports another "gave 0.00 GiB back" line per grow step.
+    strata::core::set_host_relief_query([srcp]() -> uint64_t {
+        return srcp == nullptr ? 0 : srcp->ram_relievable_bytes();
+    });
     struct HostReliefScope {
-        ~HostReliefScope() { strata::core::set_host_relief(nullptr); }
+        ~HostReliefScope() {
+            strata::core::set_host_relief(nullptr);
+            strata::core::set_host_relief_query(nullptr);
+        }
     } host_relief_scope;
     if (pool.is_hybrid() && pool.affinity() != strata::kernels::cpu::PoolAffinity::All) {
         const char* aff_str = pool.affinity() == strata::kernels::cpu::PoolAffinity::PCores ? "p-cores" :

@@ -3,6 +3,7 @@
 #include "strata/core/capture_lock.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/devnotes.hpp"
+#include "strata/core/host_relief_choice.hpp"
 #include "strata/core/kv_host_growth.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/on_device.hpp"
@@ -1019,6 +1020,16 @@ void host_make_room(uint64_t bytes) {
     const auto av = available_host_bytes();
     if (!av || bytes == 0 || *av >= bytes + reserve) return;
     const uint64_t ask = bytes + reserve - *av;
+    // P125p (Paul's P40): 1.2.4-pre asked the tier and printed the give-back line on EVERY step, so a tier that
+    // cannot give - not a pinned resident complement, or registered whole - said "gave 0.00 GiB back (2.89 asked)"
+    // ~20 times a long read about a give-way that never happened and never could. Ask only when the tier CAN give;
+    // when it cannot, one line per load says the room is short and why. (host_relief below stays asked-only.)
+    static HostRoomDecision room_note;   // (this runs under g_host_mu; the engine loads once: per load = per process)
+    const HostRoomDecision::Answer a = room_note.answer(host_relief_query());
+    if (!a.ask) {
+        if (a.say) std::fprintf(stderr, "%s", host_room_short_text(bytes, *av, ask).c_str());
+        return;
+    }
     const uint64_t got = host_relief(ask);
     std::fprintf(stderr, "saguaro: KV streaming: the host copy grows by %.2f GiB with %.2f GiB of RAM available: the "
                          "expert RAM tier gave %.2f GiB back (%.2f asked)\n", (double) bytes / 1073741824.0,
@@ -1490,6 +1501,7 @@ std::mutex g_relief_mu;
 VramRelief g_relief;
 std::mutex g_host_relief_mu;
 HostRelief g_host_relief;
+HostReliefQuery g_host_relief_query;
 }  // namespace
 void set_vram_relief(VramRelief f) {
     std::lock_guard<std::mutex> lk(g_relief_mu);
@@ -1516,6 +1528,20 @@ uint64_t host_relief(uint64_t bytes) {
         f = g_host_relief;
     }
     return f ? f(bytes) : 0;
+}
+// P125p: the give-way's CAN-question (ExpertSource::ram_relievable_bytes(), set beside the handler in generate.cpp);
+// 0 with no handler - nobody to ask, which is exactly the answer host_make_room needs before it spends a step asking.
+void set_host_relief_query(HostReliefQuery f) {
+    std::lock_guard<std::mutex> lk(g_host_relief_mu);
+    g_host_relief_query = std::move(f);
+}
+uint64_t host_relief_query() {
+    HostReliefQuery f;
+    {
+        std::lock_guard<std::mutex> lk(g_host_relief_mu);
+        f = g_host_relief_query;
+    }
+    return f ? f() : 0;
 }
 int64_t qsa_slot_budget_chunks(int dev, int64_t* free, int64_t* made) {
     std::lock_guard<std::mutex> lk(g_slot_mu);

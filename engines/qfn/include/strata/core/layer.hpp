@@ -488,6 +488,12 @@ uint64_t vram_relief(int dev, uint64_t bytes);
 using HostRelief = std::function<uint64_t(uint64_t bytes)>;
 void set_host_relief(HostRelief f);
 uint64_t host_relief(uint64_t bytes);
+/// P125p: whether the expert RAM tier CAN give at all - the bytes it could hand back if asked
+/// (ExpertSource::ram_relievable_bytes(); 0: no handler, no resident complement, or it is registered whole).
+/// host_make_room asks only on a nonzero answer; on 0 it says the short room once per load, not once per step.
+using HostReliefQuery = std::function<uint64_t()>;
+void set_host_relief_query(HostReliefQuery f);
+uint64_t host_relief_query();
 /// Chunks the states still lack to hold `cells` cells.
 int64_t qsa_slots_need(const std::vector<const QsaState*>& states, int64_t cells);
 /// Backs `cells` cells in every state (all on one device): all or nothing, false when the budget is short.  New chunks

@@ -222,6 +222,11 @@ public:
     /// a grace window for CPU readers that latched a trimmed blob before its offset was trimmed; the caller must
     /// have the devices quiet, and the engine holds it as a slow path (a K/V pin that RAM refused).
     virtual uint64_t relieve_ram(uint64_t bytes) { (void) bytes; return 0; }
+    /// P125p: the bytes `relieve_ram` COULD hand back if asked (0: not a resident complement, a cudaHostAlloc arena,
+    /// a registration that covers the complement whole, or anything else the give-way declines up front).
+    /// host_make_room asks only when this is nonzero - a tier that cannot give gets one line about the short room
+    /// instead of a "gave 0.00 GiB back" report on every grow step.
+    virtual uint64_t ram_relievable_bytes() { return 0; }
     /// Whether the verify window may give the GPU a PCIe share of this layer's misses at all (each expert is still
     /// checked with `pinned`).  The arena answers per layer through its expert 0; the resident RAM mode's compact
     /// copy has no expert 0 when the GPU cache holds it, so it answers for the whole copy.
@@ -911,6 +916,9 @@ public:
     /// P124e: give the resident complement's coldest experts back to the OS (madvise, and their working-set lock
     /// undone) so a growing conversation's K/V can be pinned; reads of a trimmed expert go back to the files.
     uint64_t relieve_ram(uint64_t bytes) override;
+    /// P125p: the resident complement's bytes the trims can sit on (what relieve_ram could give): 0 when there is no
+    /// resident complement, it is a cudaHostAlloc arena or registered whole, or its fallback is not page-aligned.
+    uint64_t ram_relievable_bytes() override;
     bool pinned(int64_t layer, int64_t expert) const override;
     const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
     bool pcie_layer(int64_t layer) const override;

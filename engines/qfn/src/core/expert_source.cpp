@@ -3578,6 +3578,22 @@ uint64_t FileExpertSource::relieve_ram(uint64_t bytes) {
 #endif
 }
 
+// P125p: relieve_ram's early ends, as a number: host_make_room asks only when this answers nonzero, so a tier that
+// has nothing it can give never draws the "gave 0.00 GiB back" line.  It reads the backing's scalars only - no
+// offset scan, no lock: a racing install/close can at worst make ONE grow step ask a tier that then answers 0 (the
+// old behaviour), or hold the note back for one step; the give-way itself stays the authority on what it frees.
+uint64_t FileExpertSource::ram_relievable_bytes() {
+    if (!complement_ready_ || complement_host_ == nullptr || exchange_storage_.active()) return 0;
+    if (complement_pinned_ && !complement_registered_) return 0;   // cudaHostAlloc: the driver holds it whole
+#if defined(_WIN32)
+    return 0;   // (the complement's pages are VirtualLock'ed whole: giving a slice back waits for a Windows rig)
+#else
+    if ((((uintptr_t) complement_host_) & 4095u) != 0) return 0;   // (relieve_ram declines the unaligned fallback)
+    const uint64_t keep = complement_registered_ ? complement_pin_limit_ : 0;   // the registered prefix is never trimmed
+    return complement_bytes_ > keep ? complement_bytes_ - keep : 0;   // (registered whole: nothing sits above the prefix)
+#endif
+}
+
 bool FileExpertSource::pin_cache_complement(
     const ExpertCache& cache, std::string& err, bool pin,
     const std::vector<std::pair<int32_t, int32_t>>& additional_gpu_pairs, int64_t lend_from_slot,
