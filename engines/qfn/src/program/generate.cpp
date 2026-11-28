@@ -20710,15 +20710,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 ctx_from = incoming_src;
                 // a mapped image's K/V are read-only views (and an adopted one's are aliases - review N: the whole
                 // image is checked, not one sampled buffer, so a partly-external K/V never reaches retain() to be
-                // written into by the next park): they are not kept for the next park to write into
-                auto external_image = [](const strata::core::SavedConversation& s) {
-                    for (const auto& l : s.kv)
-                        for (const strata::core::ConversationBuffer* b : {&l.k, &l.v, &l.k_scale, &l.v_scale, &l.pooled})
-                            if (b->external()) return true;
-                    return false;
-                };
-                bool mapped = external_image(*incoming);
-                for (const auto& si : incoming->stage_images) mapped = mapped || external_image(si);
+                // written into by the next park): they are not kept for the next park to write into.  The check is
+                // the cache's own static (P124y2: one rule, one place - retain() now refuses it again as belt
+                // and braces), so this site and the cache can never drift apart.
+                bool mapped = strata::core::ConversationCache::external_kv(incoming->kv);
+                for (const auto& si : incoming->stage_images)
+                    mapped = mapped || strata::core::ConversationCache::external_kv(si.kv);
                 if (std::getenv("SAGUARO_SNAPSHOT_FULL_CAPTURE") == nullptr && !mapped) {
                     std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park
                     for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));
