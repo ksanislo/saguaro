@@ -43,6 +43,7 @@ bool window_vram_parts(uint64_t& weights, uint64_t& kv, uint64_t& pool, uint64_t
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/park_policy.hpp"
 #include "strata/core/park_release.hpp"
+#include "../core/conversation_copy.hpp"   // (PLAN-p125k: the narrowed park/restore wait, `narrow_sync`)
 #include "strata/core/resident_policy.hpp"
 #include "strata/core/vram_policy.hpp"
 #include "strata/core/coupled_draft.hpp"
@@ -8652,7 +8653,12 @@ int main(int argc, char** argv) {
     // first chunk or a read mostly busy staging its K/V from RAM no longer looks frozen until it ends and the
     // server's rate of it is a live figure, not a per-chunk jump):
     //   `RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-    //        pass=<i>/<n> ms=<read ms> [stage_ms=<ms>]` - stage: the reused prefix is being copied host->VRAM,
+    //        pass=<i>/<n> ms=<read ms> [stage_ms=<ms>] pos0=<unit's first token> chunk=<unit's tokens>` -
+    //   pos0 / chunk name the unit the passes count and print on EVERY RHB line (the piece-boundary line's
+    //   defined pos0=-1 chunk=0 included: done= just moved piece by piece, no unit in flight); a reader
+    //   before P124v2 ignores the two fields and books no share, and one reading a line without them (a
+    //   replay, an older engine) likewise keeps the whole-units figure.
+    //   stage: the reused prefix is being copied host->VRAM,
     //   read: new tokens are being read; done / new count from where THIS read started (never a reused / restored
     //   / parked prefix); pass is the current host pass (layer pass of the chunk, or piece of the plan between
     //   pieces) of their total; ms is this request's own read time (the PP lines' read_ms) and stage_ms the part
@@ -10872,6 +10878,19 @@ vs.d_skip_usage = gs.d_skip_usage;
         bool live_ok = false;
         // the prompt length of the request that left `live` (-1: unknown), for conv_cache::own_rewind
         int64_t live_prompt_n = -1;
+        // P125j: the live conversation's read is PAUSED between two layers of the chunk from token `pos`:
+        // layers < `layer` read its tokens (their K/V cells, GDN/conv state and indexer tails hold them
+        // in the session), layers >= `layer` have not, and `live` runs THROUGH the chunk (its tokens count
+        // as reused; the next request of the same prompt goes on at `layer` or re-reads the chunk - the
+        // same result).  The rows themselves live in the prompt path (Prefill) while the conversation is
+        // live; a park moves them into the parked image and a restore brings them back.  Dropping one is
+        // always safe: the read falls back to P124b's landing or a plain re-read.
+        struct ReadPause {
+            int64_t pos = -1, layer = -1, tokens = 0;
+            std::vector<int32_t> ids;
+        };
+        ReadPause read_pause;
+        auto drop_read_pause = [&] { read_pause = ReadPause{}; sp.clear_pause(); };
         // #879: a window met non-finite logits: the next request drops every cached state first and reads from token 0
         bool nan_flush = false;
         // #3465: the non-finite logits came in a window that reads the PROMPT's tail (the last few tokens, read through
@@ -11171,6 +11190,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             return (size_t) (v != nullptr ? std::atoll(v) : 256); }();
         auto turn_capture = [&](const ParkFrom& f, TurnHold& h, const std::string& label) -> bool {
             if (!sdir || !turn_save_on || f.ids.empty()) return false;
+            // P125j: a conversation whose read is paused between two layers has session cells only half
+            // written past the pause; a file for it could not hold the saved rows, so it is never saved.
+            if (f.slot < 0 && read_pause.pos >= 0) return false;
             const auto t0 = Clock::now();
             std::string e;
             try {
@@ -11276,7 +11298,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
         };
         auto spill_current = [&]() {
-            if (!sdir || !live_ok || live.empty() || spill_skip_rewind) return;
+            // P125j: never spill a conversation whose read is paused between two layers: its file could
+            // not carry the saved rows, and the half-written cells must not look complete on a reload.
+            if (!sdir || !live_ok || live.empty() || spill_skip_rewind || read_pause.pos >= 0) return;
             spill_from(ParkFrom{live, live_imgs, checks, cvec_cached, -1});
         };
         auto park_body = [&](const ParkFrom& f, size_t held) -> bool {
@@ -11407,6 +11431,9 @@ vs.d_skip_usage = gs.d_skip_usage;
             // estimate must stay uncapped: it counts the retained buffers'
             // capacity and directories, and put() charges that same true size -
             // a capped figure would under-evict and overfill the budget.
+            // P125j: a paused read's rows are RAM this park holds too (they go into the image below);
+            // without them a park that only fits without them would push the cache over its budget.
+            if (f.slot < 0 && read_pause.pos >= 0) estimate += sp.pause_rows_bytes();
             if (!conversations.make_room(estimate, held)) {
                 std::fprintf(stderr, "saguaro serve: conversation cache: skip parking (snapshot %zu MiB exceeds available budget)\n",
                              estimate >> 20);
@@ -11513,9 +11540,30 @@ vs.d_skip_usage = gs.d_skip_usage;
                     spill();
                     return true;
                 }
+                // P125j: a read paused between two layers parks WITH its conversation: the chunk's record
+                // and its rows go into the parked image (counted in its bytes, admitted above) and come
+                // back with it.  Such an image is never written to the session dir.
+                bool parked_paused = false;
+                if (f.slot < 0 && read_pause.pos >= 0) {
+                    std::vector<float> pause_rows;
+                    sp.take_pause_rows(pause_rows);
+                    if (!pause_rows.empty()) {
+                        image.pause_pos = read_pause.pos;
+                        image.pause_layer = read_pause.layer;
+                        image.pause_tokens = read_pause.tokens;
+                        image.pause_ids = read_pause.ids;
+                        image.pause_rows = std::move(pause_rows);
+                        parked_paused = true;
+                        std::fprintf(stderr, "saguaro serve: conversation cache: the parked conversation keeps a "
+                                             "prompt read paused at token %lld, layer %lld (%zu MiB of chunk rows)%s\n",
+                                     (long long) read_pause.pos, (long long) read_pause.layer,
+                                     image.pause_rows.size() * sizeof(float) >> 20, who.c_str());
+                    }
+                    drop_read_pause();   // (the live conversation is ending here either way)
+                }
                 const size_t snapshot_bytes = image.bytes();
                 const bool stored = conversations.put(std::move(image), held, park_clock());
-                if (stored && sdir) sdir->write(conversations.newest());   // written behind, after its delay
+                if (stored && sdir && !parked_paused) sdir->write(conversations.newest());   // written behind, after its delay
                 if (stored) (f.slot < 0 ? turn_main : turn_slot[(size_t) f.slot]).reset();   // (its file moves on without the track)
                 const double park_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 if (stored) {   // the server's log: a conversation going out, to RAM
@@ -11640,10 +11688,13 @@ vs.d_skip_usage = gs.d_skip_usage;
         // second: the server's live read rate follows the read at its own cadence, without a client-side window
         // hiding a stall), printed from the host points between layer passes / pipe pieces / KV staging passes:
         //   RHB rid=<rid|0> stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it>
+        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it> pos0=<unit's first token> chunk=<unit's tokens>
         // stage: its K/V prefix is coming in from RAM; read: its new tokens are being read.  ms is this read's
         // own running time (the read clock above: not the waits between pieces) and stage_ms the part of it spent
-        // staging: ms - stage_ms is its own elapsed READ time.  Output only - every existing line stays exactly
+        // staging: ms - stage_ms is its own elapsed READ time.  P124v2: pos0/chunk= name the unit the passes
+        // count (a chunk, or a piece of a pipelined read): done= is whole units, and the server's readout
+        // shares the unit in flight (chunk x pass_i/pass_n) when done stands at pos0 - reused.
+        // Output only - every existing line stays exactly
         // as it was, and rid=0 lines (the batch path's) carry an appended slot=<b>.
         std::mutex rhb_mu;
         Clock::time_point rhb_t{};
@@ -11655,23 +11706,26 @@ vs.d_skip_usage = gs.d_skip_usage;
         // at `new` when the read ends.  One card: exactly the figure its own host points report (what it printed).
         strata::program::ReadProgress solo_prog;
         auto rhb_print = [&](long long rid, const char* stage, long long done, long long newn, long long reused,
-                             long long pass_i, long long pass_n, double ms, double stage_ms) {
+                             long long pass_i, long long pass_n, double ms, double stage_ms,
+                             long long pos0, long long chunk) {
             std::lock_guard<std::mutex> lk(rhb_mu);
             const auto now = Clock::now();
             if (rhb_rid == rid && std::chrono::duration<double, std::milli>(now - rhb_t).count() < 230.0) return;
             rhb_rid = rid;
             rhb_t = now;
-            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f\n",
-                        rid, stage, done, newn, reused, pass_i, pass_n, ms, stage_ms);
+            std::printf("RHB rid=%lld stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f"
+                        " pos0=%lld chunk=%lld\n",
+                        rid, stage, done, newn, reused, pass_i, pass_n, ms, stage_ms, pos0, chunk);
             std::fflush(stdout);
         };
-        auto rhb_solo = [&](const char* stage, int64_t card, int64_t pos0, long long pass_i, long long pass_n) {
+        auto rhb_solo = [&](const char* stage, int64_t card, int64_t pos0, long long pass_i, long long pass_n,
+                            long long chunk) {
             if (pp_rid == 0 || pp_total <= pp_from) return;   // nothing of this request is being read (a warm run)
             pp_host_point(stage[0] == 's');   // P124v: this pass's time into the read's staging / read clocks
             solo_prog.report(card, pos0, pass_i, pass_n);     // this card's host point, into the read's figure
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
                       (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
-                      pp_stage_ms());
+                      pp_stage_ms(), pos0, chunk);
         };
         // the host point between the pieces of a pipelined read: the piece ended, everything below `pos` has
         // passed every card - the read's figure takes it as its fully-read point (U5b)
@@ -11681,7 +11735,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             solo_prog.report_full(pos);
             rhb_print(pp_rid, stage, (long long) solo_prog.done(),
                       (long long) (pp_total - pp_from), (long long) pp_from, pass_i, pass_n, pp_running_ms(),
-                      pp_stage_ms());
+                       pp_stage_ms(), -1, 0);   // (chunk 0: done= just moved piece by piece; no unit in flight here,
+                                                //  so no unit's first token: pos0=-1, NOT the piece's end `pos`)
         };
         // #471: the position the prompt pass has read up to (a chunk's or a window's end): what a request cancelled
         // mid-read reports as read, instead of the whole prompt
@@ -12034,8 +12089,8 @@ vs.d_skip_usage = gs.d_skip_usage;
         // The batch slot reads replace these for the time they hold the path (see the admission's swap below).
         // U5b: the card is its first layer (`lb`, unique across a split's stages); the read's shared figure
         // (solo_prog) is what the line's done= shows - every card reports, one figure prints.
-        sp.on_layer_pass = [&](int64_t pass, int64_t passes, bool staged, int64_t lb, int64_t pos0) {
-            rhb_solo(staged ? "stage" : "read", lb, pos0, (long long) pass, (long long) passes);
+        sp.on_layer_pass = [&](int64_t pass, int64_t passes, bool staged, int64_t lb, int64_t pos0, int64_t chunk) {
+            rhb_solo(staged ? "stage" : "read", lb, pos0, (long long) pass, (long long) passes, (long long) chunk);
         };
         for (auto& st : stages)
             st->sp.on_layer_pass = sp.on_layer_pass;
@@ -13130,6 +13185,14 @@ vs.d_skip_usage = gs.d_skip_usage;
             return true;
         };
         sp.should_stop = [&] { return stop_req.load(); };
+        // P125j: the same STOP, taken at the chunk's NEXT LAYER BOUNDARY too instead of only before a
+        // chunk: a read a priority cut catches mid-chunk ends within one layer pass, keeping its chunk's
+        // rows with the conversation (Prefill::run_impl; SAGUARO_LAYER_PAUSE=0 restores the old wait).
+        // Round-4 FIX-FIRST: the pause is armed ONLY at the one reader that captures it - read_part's run
+        // lambda arms it around its own sp.run and reads paused_chunk() right after. An arm here, live for
+        // every reader of this Prefill, armed the readers with no capture: a batch slot's read thread and
+        // the piped read's own thread would end mid-chunk on err "layer paused" and drop the chunk's rows
+        // instead of keeping them. Their STOP stays the plain between-chunk stop (should_stop above).
         // 149-prefetch SAGUARO_RAM_ADAPT2: the prompt's routing seeds the RAM policy with a limited weight
         // (SAGUARO_RAM_ADAPT_PROMPT_W, default 0.25: an expert every prompt token routes to counts like ~5 decode routings),
         // fading by 5% a decode window; the decode's own counts and the GPU tier are untouched
@@ -13308,13 +13371,18 @@ vs.d_skip_usage = gs.d_skip_usage;
                         (long long) o.prefill_chunk, sp.stage_count(),
                         (long long) strata::prefill::Prefill::stream_all_min_tokens(),
                         strata::prefill::Prefill::pipe_setting(),
-                        o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
-                                       " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
-                                       " batch_groups=" + std::to_string(o.batch_groups) +
-                                       (slot_admit ? " slot_admit=1" : "") +
-                                       // SAGUARO_PIPED_MTP: a window holds live slots only, so an idle slot keeps its
-                                       // conversation for its next turn (the server picks slots by what they hold)
-                                       (piped_mtp ? " slot_keep=1" : "")).c_str() : "");
+                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
+                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
+                                        " batch_groups=" + std::to_string(o.batch_groups) +
+                                        (slot_admit ? " slot_admit=1" : "") +
+                                        // SAGUARO_PIPED_MTP: a window holds live slots only, so an idle slot keeps its
+                                        // conversation for its next turn (the server picks slots by what they hold)
+                                        (piped_mtp ? " slot_keep=1" : "") +
+                                        // P125m: a prompt read here steps aside between LAYERS of a chunk (P125j,
+                                        // SAGUARO_LAYER_PAUSE, off with =0): the server may cut a BATCH prompt read
+                                        // by a priority STOP - the pause keeps it with the conversation
+                                        (strata::prefill::Prefill::layer_pause_wanted() ? " layer_pause=1" : "")).c_str()
+                                   : "");
             // the Monitor's "Where the experts live" layout (parity with the maya engines' Qwen path, which names
             // itself the same way): engine_kind=qfn picks TIER_SETS.qfn (serve/web/monitor.js), and tierShares()
             // (serve/web/server.js) reads experts / vram_slots / vram_gb / ram_slots / ram_gb from here and
@@ -16383,16 +16451,53 @@ vs.d_skip_usage = gs.d_skip_usage;
         // `light` (SAGUARO_FAST_LANE): the slot is idle and nothing in flight writes it (pipelined groups with drafts: a
         // window holds live slots only; their doorbells are the stages' threads'), so no drain: the save's device syncs
         // wait only for the streams that can write it (its stages' window streams, its drafter, the copies)
-        struct LightSync {
+        // PLAN-p125k: the same mechanism for the MAIN conversation's parks, restores and turn saves. A scope names
+        // the streams THIS conversation's queued compute rides on; while one is set, the snapshot syncs
+        // (conversation_state.cpp `sync`, and the direct `device_sync()` calls inside the scope) wait for that
+        // device's share of them and this thread's private copy stream (`conversation_detail::narrow_sync`) -
+        // this conversation's own bytes - instead of the whole device, and they no longer take the capture lock.
+        // What they must NOT wait for is everything else: other conversations' queued windows, the expert tier's
+        // background fills (several ride the legacy stream), PLE io, the adaptive tier. Where the stream list
+        // cannot bound this conversation's writers (`park_own_ok` below), no scope is set and every sync stays
+        // the whole-device sync of before. The wait-set itself is `park::wait_streams` (unit-tested).
+        struct ConvStreams {
             std::vector<std::pair<int, cudaStream_t>> streams;   // (device, stream)
             static cudaError_t run(void* self) {
-                int dev = 0;
-                if (cudaGetDevice(&dev) != cudaSuccess) return cudaGetLastError();
-                for (const auto& [d, st] : static_cast<LightSync*>(self)->streams)
-                    if (d == dev)
-                        if (const cudaError_t e = cudaStreamSynchronize(st); e != cudaSuccess) return e;
-                return cudaSuccess;
+                return strata::core::conversation_detail::narrow_sync(static_cast<ConvStreams*>(self)->streams);
             }
+        };
+        struct ConvSyncScope {   // (this thread only)
+            bool on;
+            ConvSyncScope(bool o_, ConvStreams* s) : on(o_) {
+                if (!on) return;
+                strata::core::device_sync_override() = &ConvStreams::run;
+                strata::core::device_sync_override_arg() = s;
+            }
+            ~ConvSyncScope() {
+                if (!on) return;
+                strata::core::device_sync_override() = nullptr;
+                strata::core::device_sync_override_arg() = nullptr;
+            }
+        };
+        // the shapes the stream list below bounds: the whole model on one card (no layer split, so no stage
+        // sessions and no pipelined decode - `pipe` requires a split), no prompt read running beside (its chunks
+        // queue on streams of their own), no concurrent doorbell serving. Anything else keeps the device sync.
+        auto park_own_ok = [&] { return stages.empty() && !pipe && !conc_serving && !in_prompt_read; };
+        // the main conversation's own streams: `main_stream` carries every session call (session_capture/replay/
+        // token/loop/zero); with --mtp the draft K/V the park saves is written by the drafter's stream (its final
+        // cell may still be queued) and on this card by the verify windows on `ver`/`ver_b` - a slot's batched
+        // draft prefill on the SHARED drafter writes that same pool too - and those verifiers fork/join their
+        // side streams through their own stream, so waiting for it waits for them.
+        auto add_main_streams = [&](ConvStreams& cs) {
+            int dev = 0;
+            if (cudaGetDevice(&dev) != cudaSuccess) { cudaGetLastError(); return false; }
+            cs.streams.emplace_back(dev, main_stream);
+            if (use_mtp) {
+                cs.streams.emplace_back(ver.device(), ver.stream());
+                cs.streams.emplace_back(ver_b.device(), ver_b.stream());
+                cs.streams.emplace_back(mtp.device(), mtp.stream());
+            }
+            return true;
         };
         auto persist_slot = [&](int b, bool from_this_slot, const std::vector<int32_t>& next, bool exiting,
                                 const char* why, bool ram = false, bool light = false, bool turn = false) -> bool {
@@ -16406,7 +16511,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 return true;
             std::string e = !light && pipe_inflight() ? "pipelined groups in flight" : "";
             if (light && (sl.active || sl.reading || !piped_mtp || !stage_serving)) e = "not an idle slot beside served groups";
-            LightSync ls;
+            ConvStreams ls;
             if (light) {
                 for (int k = 0; k < n_pipe; ++k) ls.streams.emplace_back(stage_verifier(k).device(), stage_verifier(k).stream());
                 if (batch_mtp) ls.streams.emplace_back(slot_mtp[(size_t) b]->device(), slot_mtp[(size_t) b]->stream());
@@ -16428,19 +16533,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                              sl.ids.size(), why, light ? " (beside the groups in flight)" : "");
             static const std::vector<ImgKey> no_imgs;   // a slot with pictures is never kept
             bool ok = true;
-            struct SyncScope {   // (this thread only, for the save)
-                bool on;
-                SyncScope(bool o_, LightSync* l) : on(o_) {
-                    if (!on) return;
-                    strata::core::device_sync_override() = &LightSync::run;
-                    strata::core::device_sync_override_arg() = l;
-                }
-                ~SyncScope() {
-                    if (!on) return;
-                    strata::core::device_sync_override() = nullptr;
-                    strata::core::device_sync_override_arg() = nullptr;
-                }
-            } sync_scope(light, &ls);
+            ConvSyncScope sync_scope(light, &ls);   // (this thread only, for the save)
             try {
                 ok = turn ? turn_capture(ParkFrom{sl.ids, no_imgs, sl.checks, sl.cvec, b}, turn_slot[(size_t) b],
                                          "slot" + std::to_string(b))
@@ -17185,13 +17278,17 @@ vs.d_skip_usage = gs.d_skip_usage;
         // itself at most one line per ~0.23 s (a steady four or so a second) from host points between the layer
         // passes of its pieces:
         //   RHB rid=0 stage=<stage|read> done=<new tokens done> new=<new tokens total> reused=<n>
-        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it> slot=<b>
+        //       pass=<i>/<n> ms=<read ms> stage_ms=<staging part of it> pos0=<unit's first token> chunk=<unit's
+        //       tokens> slot=<b>
         // rid=0 (as in the protocol note): the slot tells which read it is, like its BRP / BRA lines. done and
         // new count from where THIS read started (never its reused / parked prefix); ms is this read's own time
         // over its runs so far (the legs add up like the BRP lines' read_ms; a read held at a piece boundary
         // prints no lines and adds no time while held) and stage_ms the part of it spent staging its K/V in
         // from RAM: ms - stage_ms is its own elapsed READ time (a restored prefix staged first must not dilute
         // the read's rate to single digits - the server's figure divides by the read's time, staging left out).
+        // P124v2: pos0/chunk= name the unit (chunk, or a piece of a pipelined read) these passes count;
+        // done= is whole units, and the server shares the one in flight (chunk x pass_i/pass_n) when done
+        // stands at pos0 - reused.
         // U5b (PLAN-u5b-split-progress): done is this read's shared figure (its AdmJob's ReadProgress): every
         // card's host point feeds its own card, one figure prints - never decreasing, ending at `new` (the BRP
         // points report the chunks that passed every card); two reads at once keep separate figures by their slot.
@@ -17210,7 +17307,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             return (double) j.stage_us.load(std::memory_order_relaxed) / 1000.0;
         };
         auto rhb_slot = [&](AdmJob& j, int b, int64_t n, Clock::time_point t_read, int64_t card, int64_t pos0,
-                            long long pass_i, long long pass_n, bool staged) {
+                            long long pass_i, long long pass_n, bool staged, int64_t chunk) {
             adm_host_point(j, staged);   // P124v: this pass's time into the read's staging / read clocks
             j.prog.report(card, pos0, pass_i, pass_n);   // this card's host point, into the read's figure
             std::lock_guard<std::mutex> lk(rhb_mu);   // (every stage's thread reports: two pieces of one read at a time)
@@ -17219,11 +17316,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::chrono::duration<double, std::milli>(now - j.rhb_t).count() < 230.0) return;
             j.rhb_t = now;
             std::printf(
-                "RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f slot=%d\n",
+                "RHB rid=0 stage=%s done=%lld new=%lld reused=%lld pass=%lld/%lld ms=%.0f stage_ms=%.0f"
+                " pos0=%lld chunk=%lld slot=%d\n",
                 staged ? "stage" : "read", (long long) j.prog.done(),
                         (long long) std::max<int64_t>(0, n - j.resume), (long long) j.resume, pass_i, pass_n,
                         j.read_ms + std::chrono::duration<double, std::milli>(now - t_read).count(),
-                        adm_stage_ms(j), b);
+                        adm_stage_ms(j), (long long) pos0, (long long) chunk, b);
             std::fflush(stdout);
         };
         // SAGUARO_SLOT_GRID=N (buckets, 0 = off; 6 keeps at most 12, two per bucket): a batch slot's conversation keeps grid checkpoints
@@ -17492,7 +17590,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             const size_t n_st = stages.size() + 1;
             strata::prefill::Prefill& rep = multi_gpu ? stages.back()->sp : sp;   // the stage that reports a chunk
             std::vector<std::function<bool(int64_t, std::string&)>> old_stage_chunk(n_st);
-            std::vector<std::function<void(int64_t, int64_t, bool, int64_t, int64_t)>> old_layer_pass(n_st);   // (U5 heartbeat)
+            std::vector<std::function<void(int64_t, int64_t, bool, int64_t, int64_t, int64_t)>> old_layer_pass(n_st);   // (U5 heartbeat)
             auto old_chunk = std::move(rep.on_chunk);
             auto old_stop = std::move(sp.should_stop);
             auto old_yield = std::move(sp.stop_at_chunk);
@@ -17541,8 +17639,8 @@ vs.d_skip_usage = gs.d_skip_usage;
             for (size_t k = 0; k < n_st; ++k) {
                 old_layer_pass[k] = std::move(stage_prefill(k).on_layer_pass);
                 stage_prefill(k).on_layer_pass = [&, b](int64_t pass, int64_t passes, bool staged, int64_t lb,
-                                                        int64_t pos0) {
-                    rhb_slot(j, b, n, t_read, lb, pos0, (long long) pass, (long long) passes, staged);
+                                                        int64_t pos0, int64_t chunk) {
+                    rhb_slot(j, b, n, t_read, lb, pos0, (long long) pass, (long long) passes, staged, chunk);
                 };
             }
             const int64_t at0 = j.at;
@@ -18312,8 +18410,8 @@ vs.d_skip_usage = gs.d_skip_usage;
                 // U5b: `lb` names the card (this one callback runs on every stage's thread); done= is the read's
                 // shared figure (jp->prog), fed by every card, printed by whichever point opens the 230 ms gate.
                 pj->on_layer_pass = [&, jp, b, n](int64_t pass, int64_t passes, bool staged, int64_t lb,
-                                                  int64_t pos0) {
-                    rhb_slot(*jp, b, n, jp->t_read, lb, pos0, (long long) pass, (long long) passes, staged);
+                                                  int64_t pos0, int64_t chunk) {
+                    rhb_slot(*jp, b, n, jp->t_read, lb, pos0, (long long) pass, (long long) passes, staged, chunk);
                 };
                 if (j.msg_at > j.resume && z == j.msg_at && (int64_t) jp->mparts.size() == (int64_t) n_st)
                     for (size_t k = 0; k < n_st; ++k)   // stage k's part of the message checkpoint, as it reaches it
@@ -19896,20 +19994,31 @@ vs.d_skip_usage = gs.d_skip_usage;
                     turn_main.reset();
                     turn_main.adopt_clear();   // (PLAN-p124a2: the restore below rewrites the session)
                     live_ok = false;
+                    // P125j: the file replaces the live session; a conversation with a paused read is never
+                    // written to the session dir, so the file's conversation has none - the armed pause and
+                    // its rows go with the session they belonged to.
+                    drop_read_pause();
                     // host -> device in synchronous copies of the whole state: one bounded allowance
                     blocking("transfer", bytes);
-                    bool restored = (n_st > 0 ? strata::core::conversation_snapshot_restore(
-                                                    image, ss, g, (const strata::core::QsaState*) nullptr, err)
-                                              : strata::core::conversation_snapshot_restore(image, ss, g, mtp.kv_state(),
-                                                                                            err)) ==
-                                    strata::core::ConversationRestore::restored;
-                    for (size_t k = 0; restored && k < n_st; ++k) {   // the later stages, each on its own GPU
-                        const strata::core::OnDevice on(stages[k]->dev);
-                        restored = strata::core::conversation_snapshot_restore(image.stage_images[k], stages[k]->ss, g,
-                                                                               draft_of(k), err) ==
-                                       strata::core::ConversationRestore::restored &&
-                                   strata::core::device_sync() == cudaSuccess;
-                        if (!restored && err.empty()) err = "stage CUDA" + std::to_string(stages[k]->dev) + " sync";
+                    bool restored = false;
+                    {   // PLAN-p125k: this restore waits on its own conversation only (no scope when the shape
+                        //  cannot be bounded - a layer split's syncs below stay whole-device, as they must)
+                        ConvStreams ctx_streams;
+                        const bool ctx_own = park_own_ok() && add_main_streams(ctx_streams);
+                        const ConvSyncScope ctx_scope(ctx_own, &ctx_streams);
+                        restored = (n_st > 0 ? strata::core::conversation_snapshot_restore(
+                                                   image, ss, g, (const strata::core::QsaState*) nullptr, err)
+                                             : strata::core::conversation_snapshot_restore(image, ss, g, mtp.kv_state(),
+                                                                                           err)) ==
+                                   strata::core::ConversationRestore::restored;
+                        for (size_t k = 0; restored && k < n_st; ++k) {   // the later stages, each on its own GPU
+                            const strata::core::OnDevice on(stages[k]->dev);
+                            restored = strata::core::conversation_snapshot_restore(image.stage_images[k], stages[k]->ss, g,
+                                                                                   draft_of(k), err) ==
+                                           strata::core::ConversationRestore::restored &&
+                                       strata::core::device_sync() == cudaSuccess;
+                            if (!restored && err.empty()) err = "stage CUDA" + std::to_string(stages[k]->dev) + " sync";
+                        }
                     }
                     if (!restored) {
                         // validated above: a failure here is a transfer failure, after device writes began - never
@@ -20231,6 +20340,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 const auto head_t0 = Clock::now();
                 native_head.unload();
                 sp.reset();
+                drop_read_pause();   // P125j: the reset dropped the saved rows - the record goes with them
                 if (init_prompt_paths() != 0) {
                     std::printf("ERR rebuilding the head-alias prompt path failed: %s\n", err.c_str());
                     return 1;
@@ -20249,6 +20359,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             nf_hit = false;
             read_vram = false;
+            // P125j: where THIS request's prompt read stopped between two layers of a chunk (the leg's
+            // chunk index, its absolute token, its layer, its token count) and the DONE suffix saying it.
+            int64_t lp_pos = -1, lp_layer = -1, lp_tokens = 0, lp_chunk = -1;
+            std::string lp_note;
             // #879: an earlier window met non-finite logits.  The poison sits in a conversation's K/V and recurrent
             // state, so nothing that may hold it is continued: the live session, every checkpoint, every parked
             // conversation and every idle batch slot go, and this prompt is read from token 0 (resume == 0 below)
@@ -20260,6 +20374,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 }
                 const size_t n_checks = checks.size();
                 live_ok = false;
+                drop_read_pause();   // P125j: the paused read went with the dropped conversation
                 checks.clear();
                 tail_ckpt_len = -1;
                 const size_t n_parked = conversations.clear();
@@ -20422,6 +20537,22 @@ vs.d_skip_usage = gs.d_skip_usage;
             // (a layer split borrows stage by stage: each stage image's K/V up to there and the checkpoint's parts;
             // a batch slot that holds a longer start of this prompt wins as before)
             bool borrow = parked.tokens > std::max(resume, slot_tokens) && conversations.borrows(parked);
+            // P125j: a parked conversation whose read is PAUSED between two layers has its own cells from
+            // the pause token to its paused chunk's end written only for the layers below the pause, and its
+            // pause record and rows stay behind with it - a borrow to parked.tokens there would hand the
+            // borrower half-written cells it treats as fully read, and it decodes over them silently wrong.
+            // Borrowing up to the pause token is fine (everything below it is written for every layer);
+            // deeper is not: the image then goes the whole-adopt way below, which caps the same way.
+            if (borrow) {
+                const strata::core::SavedConversation* donor_img = conversations.find(parked.serial);
+                if (donor_img != nullptr && donor_img->paused() && parked.tokens > donor_img->pause_pos) {
+                    std::fprintf(stderr, "saguaro serve: conversation cache: cannot borrow %lld tokens from a parked "
+                                         "conversation whose read is paused at token %lld (its cells past that are "
+                                         "only partly written): taking it whole instead\n",
+                                 (long long) parked.tokens, (long long) donor_img->pause_pos);
+                    borrow = false;
+                }
+            }
             if (fetched && from_disk > std::max({resume, slot_tokens, parked.tokens})) {
                 // straight to the cards, not through the cache: its K/V are views into the file (no RAM copy), so
                 // this works with parking off too (low RAM)
@@ -20603,35 +20734,43 @@ vs.d_skip_usage = gs.d_skip_usage;
                     std::fprintf(stderr, "saguaro serve: conversation cache: the outgoing %zu tokens are not parked: %s\n",
                                  live.size(), park_skip);
             }
-            if (borrow && !pin_sibling && park_worth) {
-                conversations.guard(parked.serial);   // parking the outgoing conversation must not evict the donor
-                const bool parked_ok = park_current(0);
-                const bool blocked = conversations.guard_blocked();
-                conversations.unguard();
-                if (!parked_ok) {
-                    std::printf("ERR %s\n", err.c_str());
-                    return 1;
-                }
-                if (blocked) {
-                    // the outgoing conversation fits only in the donor's room: it keeps its place, the donor is
-                    // taken whole as before (it was validated above)
-                    std::fprintf(stderr, "saguaro serve: conversation cache: no room beside the parked conversation "
-                                         "this request starts with; taking it instead of borrowing\n");
-                    borrow = false;
-                    if (const size_t at = conversations.index_of(parked.serial); at != SIZE_MAX) {
-                        if (sdir) sdir->claim(conversations.shared(at).get());
-                        incoming.emplace(conversations.take(at));
-                        incoming_src = "ram";
-                        incoming_tokens = parked.tokens;
-                        incoming_live = parked.live;
-                    }
-                    if (!park_current(incoming ? incoming->bytes() : 0)) {
+            {   // PLAN-p125k: the switch's park (and the checkpoint mount inside park_current) waits on this
+                // conversation's own bytes: the pre-copy syncs wait for its queued compute only, not for every
+                // other conversation's queued work or the expert tier's fills (the `sync 2471 ms` park). No
+                // scope where the shape cannot be bounded: the syncs stay whole-device, as before.
+                ConvStreams park_streams;
+                const bool park_own = park_own_ok() && add_main_streams(park_streams);
+                const ConvSyncScope park_scope(park_own, &park_streams);
+                if (borrow && !pin_sibling && park_worth) {
+                    conversations.guard(parked.serial);   // parking the outgoing conversation must not evict the donor
+                    const bool parked_ok = park_current(0);
+                    const bool blocked = conversations.guard_blocked();
+                    conversations.unguard();
+                    if (!parked_ok) {
                         std::printf("ERR %s\n", err.c_str());
                         return 1;
                     }
+                    if (blocked) {
+                        // the outgoing conversation fits only in the donor's room: it keeps its place, the donor is
+                        // taken whole as before (it was validated above)
+                        std::fprintf(stderr, "saguaro serve: conversation cache: no room beside the parked conversation "
+                                             "this request starts with; taking it instead of borrowing\n");
+                        borrow = false;
+                        if (const size_t at = conversations.index_of(parked.serial); at != SIZE_MAX) {
+                            if (sdir) sdir->claim(conversations.shared(at).get());
+                            incoming.emplace(conversations.take(at));
+                            incoming_src = "ram";
+                            incoming_tokens = parked.tokens;
+                            incoming_live = parked.live;
+                        }
+                        if (!park_current(incoming ? incoming->bytes() : 0)) {
+                            std::printf("ERR %s\n", err.c_str());
+                            return 1;
+                        }
+                    }
+                } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth && park_skip == nullptr) {
+                    park_ok = park_current(incoming ? incoming->bytes() : 0);
                 }
-            } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && park_worth && park_skip == nullptr) {
-                park_ok = park_current(incoming ? incoming->bytes() : 0);
             }
             spill_skip_rewind = false;
             if (!park_ok) {
@@ -20645,6 +20784,10 @@ vs.d_skip_usage = gs.d_skip_usage;
             //  of those rewrites, so no later park can adopt bytes a rewrite is replacing.)
             turn_main.adopt_clear();
             if (slot_source >= 0) {
+                // P125j: the same shape as the capture above (review L1): a batch slot's copy-in rewrites the
+                // session (and a failed copy leaves it half-written, to be read from 0) - the outgoing
+                // conversation's paused read does not cross it: its park (if one ran) took the pause with it.
+                drop_read_pause();
                 lent_slot = -1;   // (a longer start than the main session's)
                 const auto t0 = Clock::now();
                 if (!copy_from_slot(slot_source, slot_ck, err)) {
@@ -20709,7 +20852,15 @@ vs.d_skip_usage = gs.d_skip_usage;
                 std::printf("ERR the K/V cannot grow to the parked conversation: no VRAM is left\n");
                 return 1;
             }
-            if (borrow) {
+            if (borrow) {   // (PLAN-p125k: the prefix restore's waits ride the main conversation's own scope)
+                ConvStreams borrow_streams;
+                const bool borrow_own = park_own_ok() && add_main_streams(borrow_streams);
+                const ConvSyncScope borrow_scope(borrow_own, &borrow_streams);
+                // P125j: the borrow restore rewrites the session with the donor's prefix - if this request
+                // took the place of a conversation whose park was skipped (park_worth, park_skip, a
+                // pin_sibling borrow), its armed pause has nothing left to go on: the session it paused in is
+                // gone. (When the park did run, park_body already dropped the pause; this is the no-op case.)
+                drop_read_pause();
                 const auto t0 = Clock::now();
                 const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked
                 bool stages_ok = donor != nullptr && donor->stage_images.size() == stages.size();
@@ -20758,6 +20909,17 @@ vs.d_skip_usage = gs.d_skip_usage;
                              conversations.size(), conversations.bytes(), conversations.borrowed());
             }
             if (incoming) {
+                // PLAN-p125k: the incoming restore waits on its own bytes - the pre-copy sync for this
+                // conversation's queued work only, the post-copy wait for its own copy stream (which the
+                // 1 ms 281-token restore that still cost 1066 ms did not get, ref/REPORT-p124a2 §1).
+                ConvStreams rest_streams;
+                const bool rest_own = park_own_ok() && add_main_streams(rest_streams);
+                const ConvSyncScope rest_scope(rest_own, &rest_streams);
+                // P125j: the incoming restore rewrites the session with another conversation's state - the
+                // outgoing one's armed pause (still set when its park was skipped: park_worth, park_skip, a
+                // pin_sibling borrow) has nothing to go on any more. The parked pause the incoming one brings
+                // is armed again below, once the restore has run.
+                drop_read_pause();
                 // (PLAN-p124a: the restore line's split counts this restore only - reset at its own start, so a
                 //  borrow's copies or a slot copy before it cannot land in it (F7: no split over its printed total))
                 strata::core::conversation_snapshot_reset_split();
@@ -20806,6 +20968,41 @@ vs.d_skip_usage = gs.d_skip_usage;
                     if (!strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear();
                 }
                 adopt_msg_tail(checks);   // (one parked with a message checkpoint)
+                // P125j: a parked conversation can come back WITH a read paused between two layers of a
+                // chunk: the record becomes the live conversation's again and the saved rows go back into
+                // the prompt path, so the next request of that prompt goes on at the saved layer.  That is
+                // only sound when this adoption lands exactly at the paused chunk's END - the one place the
+                // session's state is only continued, never trusted past the pause.  A prompt that branches
+                // INSIDE the paused chunk would sit on cells written for the layers below the pause alone:
+                // the resume then starts again at the pause's first token, which reads that chunk over all
+                // of its layers (the pause itself is dead for it - its tokens differ from the chunk's).
+                if (incoming->paused()) {
+                    const int64_t pause_end = incoming->pause_pos + incoming->pause_tokens;
+                    if (incoming_tokens == pause_end &&
+                        sp.give_pause(incoming->pause_pos, incoming->pause_layer, incoming->pause_tokens,
+                                      std::move(incoming->pause_rows))) {
+                        // (arm the record only once the rows are really in the prompt path: a give_pause that
+                        //  refuses has nothing to go on, and an armed record without rows is the mismatch shape)
+                        read_pause.pos = incoming->pause_pos;
+                        read_pause.layer = incoming->pause_layer;
+                        read_pause.tokens = incoming->pause_tokens;
+                        read_pause.ids = incoming->pause_ids;
+                    } else if (incoming_tokens > incoming->pause_pos) {
+                        std::fprintf(stderr, "saguaro serve: conversation cache: this prompt branches inside the "
+                                             "parked conversation's paused chunk (paused at token %lld, it shares "
+                                             "%lld): continuing from the pause's first token instead\n",
+                                     (long long) incoming->pause_pos, (long long) incoming_tokens);
+                        incoming_tokens = incoming->pause_pos;
+                        // the conversation is trusted only as deep as every layer wrote: a park of a longer
+                        // `live` would snapshot the partly-written cells into an image that no longer says it
+                        // is paused (its pause died with the diverging branch) - the same cap on the live
+                        // length and the checkpoints, and the read past there rewrites every layer anyway.
+                        live.resize((size_t) incoming->pause_pos);
+                        live_imgs = imgs_below(live_imgs, incoming->pause_pos);
+                        for (auto it = checks.begin(); it != checks.end();)
+                            it = (int64_t) it->ids.size() > incoming->pause_pos ? checks.erase(it) : it + 1;
+                    }
+                }
                 cvec_cached = incoming->cvec;
                 resume = incoming_tokens;
                 from_live = incoming_live;
@@ -20844,6 +21041,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (want_cvec != cvec_cached) {
                 live_ok = false;
+                drop_read_pause();   // P125j: the session is about to change under the paused read
                 checks.clear();
                 cvec_cached = want_cvec;
             }
@@ -20962,13 +21160,58 @@ vs.d_skip_usage = gs.d_skip_usage;
                         }
                         break;
                     }
+            // P125j: does this request go on with a read paused between two layers of a chunk?  Only the
+            // exact continuation can: same conversation ending exactly at the paused chunk's end, and the
+            // chunk's tokens are the request's own.  The session then starts the read INSIDE that chunk
+            // (read_from = its first token) at the saved layer, while the reused figures still cover the
+            // whole chunk (its lower layers were read: reused + read = the prompt, nothing read twice).
+            // Anything else has zeroed or restored the session or taken another conversation - the pause
+            // goes with what dropped it, and the read continues from the checkpoint / token 0 as usual.
+            // But a dropped pause must also CAP what this request trusts: from the pause's first token to
+            // the paused chunk's end the session's cells hold these tokens for the layers BELOW the pause
+            // alone, and a read starting above them (an image follow-up, whose image sits past the live
+            // prefix, continues at resume = live.size() = the chunk's end) would decode over cells no
+            // layer >= the pause ever wrote.  The chunk is re-read over all its layers before anything
+            // deeper is trusted - the parked path clamps a diverging adopt exactly this way.
+            int64_t lp_from = -1;
+            if (read_pause.pos >= 0) {
+                const bool go_on = reread_to <= 0 && req_imgs.empty() &&
+                                   resume == (int64_t)live.size() &&
+                                   resume == read_pause.pos + read_pause.tokens &&
+                                   read_pause.pos + read_pause.tokens <= n &&
+                                   std::equal(read_pause.ids.begin(), read_pause.ids.end(),
+                                              ids.begin() + read_pause.pos,
+                                              [](int32_t a, int64_t b) { return (int64_t) a == b; }) &&
+                                   sp.paused_tokens() == read_pause.tokens &&
+                                   sp.paused_chunk() == read_pause.pos;
+                if (go_on) lp_from = read_pause.pos;
+                else {
+                    const int64_t pause_pos = read_pause.pos;
+                    drop_read_pause();
+                    if (resume > pause_pos) {
+                        std::fprintf(stderr, "saguaro serve: this prompt does not go on with the paused read "
+                                             "(paused at token %lld, it shares %lld): continuing from the "
+                                             "pause's first token instead\n",
+                                     (long long) pause_pos, (long long) resume);
+                        resume = pause_pos;
+                        // the conversation is trusted only as deep as every layer wrote: the read past
+                        // here rewrites every layer anyway, and a park of a longer `live` would snapshot
+                        // the half-written cells into a conversation that no longer says it is paused
+                        live.resize((size_t) pause_pos);
+                        live_imgs = imgs_below(live_imgs, pause_pos);
+                        for (auto it = checks.begin(); it != checks.end();)
+                            it = (int64_t) it->ids.size() > pause_pos ? checks.erase(it) : it + 1;
+                    }
+                }
+            }
             // KV streaming: the drafter's ring may hold cells past `resume` from a longer turn; the main layers'
-            // host copies and slots are always current (every writer writes both), so they need nothing
+            // host copies and slots are always current (every writer writes both), so they need nothing.
+            // (P125j: below the pause decision, so a clamped `resume` restores the ring to the trusted depth)
             if (use_mtp && resume > 0 && reread_to <= 0) mtp.kv_restore(resume);
             tr("request", n, geni ? 1 : 0);
             req_times = ReqTimes{};
             if (use_mtp) mtp.set_prompt_len(n);
-            const int64_t read_from = reread_to > 0 ? 0 : resume;
+            const int64_t read_from = lp_from >= 0 ? lp_from : (reread_to > 0 ? 0 : resume);
             conversations.limit_reuse(read_from);
             turn_main.begin(read_from);
             pp_total = n;
@@ -21328,9 +21571,24 @@ vs.d_skip_usage = gs.d_skip_usage;
                         if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
                         const ShareScope share_scope(read_share_set, read_share_now());
                         pp_run_begin();   // (this request's own read clock: the pieces between two runs - the slots'
+                        // P125j round 4 (carried on P125k): arm the layer-boundary STOP for THIS run only - its
+                        // caller captures it (paused_chunk / take_pause_rows); the guard disarms on every way out
+                        struct PauseArm {
+                            std::function<bool()>& hook;
+                            ~PauseArm() { hook = nullptr; }
+                        } pause_arm{sp.stop_between_layers};
+                        sp.stop_between_layers = [&] { return stop_req.load(); };
                         const bool ok = sp.run(ids.data() + q, qe - q, q, e);
                         pp_run_end();     //  decode share, a yield hold - are not read time: PLAN-qfn-per-request-read-stats)
-                        if (!ok) return false;
+                        if (!ok) {
+                            if (sp.paused_chunk() >= 0) {   // P125j: the read stopped between two layers
+                                lp_pos = sp.paused_chunk();        //   (absolute token of the paused chunk's start)
+                                lp_layer = sp.paused_layer();
+                                lp_tokens = sp.paused_tokens();
+                                lp_chunk = sp.paused_chunk_index();   // the run's own chunk figure
+                            }
+                            return false;
+                        }
                         // P124e (round 9, manager card): Prefill::stop_at_chunk (live only for the concurrent reader:
                         // a BYIELD or a pending lend) ended this run at its next chunk - the piece did NOT finish and
                         // the cells past the stop were never read.  Hand the run back as "stopped, not failed" with
@@ -21666,9 +21924,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                             e = "a pipelined batch window failed";
                             return false;
                         }
-                        // round 9: the stop cell comes from the piece loop (absolute) - the bare stopped_at() is
-                        // relative to the LAST sp.run, which once the loop has backed ahead is no longer q0's run
-                        const int64_t q = read_ok && read_stop >= 0 ? read_stop : b0;
+                        // round 9: the stop cell comes from the piece loop (absolute).  P125j: or the read stopped
+                        // between two LAYERS on a priority STOP mid-chunk - the pause's rows say where it got to
+                        const bool lp_stop = !read_ok && sp.paused_chunk() >= 0;
+                        const int64_t q = lp_stop ? sp.paused_chunk() + sp.paused_tokens()
+                                                  : read_ok && read_stop >= 0 ? read_stop : b0;
                         const double read_ms = std::chrono::duration<double, std::milli>(Clock::now() - tc).count();
                         std::string per;
                         for (int k = 0; k < n_pipe; ++k) {
@@ -21687,11 +21947,19 @@ vs.d_skip_usage = gs.d_skip_usage;
                                      (long long) (pipe_rows - rows0),
                                      read_ms > 0.0 ? 1000.0 * (double) (pipe_rows - rows0) / read_ms : 0.0,
                                      per.c_str());
-                        if (!read_ok) {
-                            e = read_err;
-                            return false;
-                        }
-                        // review 4b: the read stopped at this chunk for a pending lend (not a BYIELD).  pipe_drain
+                         if (!read_ok) {
+                             if (lp_stop) {   // P125m: the reader thread's run stopped between two layers
+                                 lp_pos = sp.paused_chunk();        //   (absolute token of the paused chunk's
+                                 lp_layer = sp.paused_layer();      //   start) - the same capture the inline
+                                 lp_tokens = sp.paused_tokens();    //   run lambda does above, so the DONE keep
+                                 lp_chunk = sp.paused_chunk_index();   // arms on this leg too and the next
+                                 // request of the same prompt goes on at lp_layer; without it the rows
+                                 // prefill saved would be dropped (the cancelled-and-kept-nothing path)
+                             }
+                             e = read_err;
+                             return false;
+                         }
+                         // review 4b: the read stopped at this chunk for a pending lend (not a BYIELD).  pipe_drain
                         // above left nothing in flight, so CUDA0 is quiet: run the give / take-back step on it (the
                         // card the read just released), say the hold length, and resume from the next chunk.
                         if (q < b0 && !pipe_inflight() && lend_yield.load(std::memory_order_acquire) &&
@@ -22438,6 +22706,7 @@ vs.d_skip_usage = gs.d_skip_usage;
             }
             if (o.prefill_head_alias) {
                 sp.reset();
+                drop_read_pause();   // P125j: the reset dropped the saved rows - the record goes with them
                 const auto head_t0 = Clock::now();
                 if (!native_head.load(o.native_head_shards, g.n_embd, n_vocab, err)) {
                     std::printf("ERR restoring the native output head failed: %s\n", err.c_str());
@@ -23613,6 +23882,37 @@ vs.d_skip_usage = gs.d_skip_usage;
                 live_ok = o.prompt_cache > 0 && (req_ckpt || req_cont);   // ckpt=0: nothing to continue or park (#830)
                 if (nf_hit) live_ok = false;   // #879 (the next request's start drops the rest)
                 live_prompt_n = live_ok ? n : -1;
+                drop_read_pause();   // P125j: the read went on to its end; any paused chunk is complete
+            } else if (!nf_hit && !read_vram && lp_pos >= 0 && sp.pause_rows_bytes() > 0 && req_imgs.empty() &&
+                       o.prompt_cache > 0 && (req_ckpt || req_cont) && lp_pos + lp_tokens <= (int64_t) cur.size()) {
+                // P125j: the read stopped between two LAYERS of the chunk from token lp_pos: the layers
+                // below lp_layer read that chunk (its K/V cells, GDN/conv state and indexer tails hold
+                // its tokens in the session) and the layers from lp_layer on did not.  The conversation
+                // stays live THROUGH the paused chunk - its tokens count as reused, the rows stay with
+                // the conversation (in the prompt path while it is live, in its parked image after a
+                // switch), and the next request of the same prompt goes on at lp_layer.
+                live.assign(cur.begin(), cur.begin() + lp_pos + lp_tokens);
+                live_imgs = imgs_below(req_imgs, lp_pos + lp_tokens);
+                live_ok = true;
+                live_prompt_n = n;
+                // The paused chunk counts as READ on this leg (its layers below the pause read it):
+                // pp_reached only advances at COMPLETED chunk ends, and this chunk never completes here,
+                // so without this the DONE `read` figure leaves the chunk in NEITHER leg - the cut leg
+                // stops at its start and the resumed leg counts from above it - and the legs' reads no
+                // longer sum to the prompt (layer_pause.sh's nothing-read-twice check).
+                pp_reached = lp_pos + lp_tokens;
+                read_pause.pos = lp_pos;
+                read_pause.layer = lp_layer;
+                read_pause.tokens = lp_tokens;
+                read_pause.ids.assign(cur.begin() + lp_pos, cur.begin() + lp_pos + lp_tokens);
+                lp_note = " paused_layer=" + std::to_string(lp_layer) +
+                          " paused_chunk=" + std::to_string(lp_chunk) +
+                          " paused_at=" + std::to_string(lp_pos);
+                std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: the read paused "
+                                     "at chunk %lld, layer %lld (of token %lld): %zu MiB of chunk rows stay with "
+                                     "it, %lld tokens live\n",
+                             (long long) lp_chunk, (long long) lp_layer, (long long) lp_pos,
+                             sp.pause_rows_bytes() >> 20, (long long) (lp_pos + lp_tokens));
             } else if (!nf_hit && !read_vram && pp_exact && pp_reached > 0 && o.prompt_cache > 0 && (req_ckpt || req_cont) &&
                        pp_reached <= (int64_t) cur.size()) {
                 // #1620: stopped between two windows (or before the first token was read): the session is exactly at
@@ -23621,6 +23921,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                 live.assign(cur.begin(), cur.begin() + pp_reached);
                 live_imgs = imgs_below(req_imgs, pp_reached);
                 live_ok = true;
+                drop_read_pause();   // P125j: the session sits exactly at a boundary; no paused chunk
                 std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: %lld tokens live\n",
                              (long long) pp_reached);
             }
@@ -23647,6 +23948,11 @@ vs.d_skip_usage = gs.d_skip_usage;
                     });
                 if (land >= 0) {
                     const ConvCheckpoint& c = checks[(size_t) land];
+                    // (PLAN-p125k: the cut read that must not still be writing the session ran on this
+                    //  conversation's own streams, so the drain and the checkpoint restore wait on those)
+                    ConvStreams cut_streams;
+                    const bool cut_own = park_own_ok() && add_main_streams(cut_streams);
+                    const ConvSyncScope cut_scope(cut_own, &cut_streams);
                     (void) strata::core::device_sync();   // (nothing of the cut read may still be writing the session)
                     bool back = checkpoint_restore(c, ss, g);
                     for (size_t i = 0; back && i < stages.size(); ++i) {
@@ -23657,6 +23963,7 @@ vs.d_skip_usage = gs.d_skip_usage;
                         live.assign(c.ids.begin(), c.ids.end());
                         live_imgs = c.imgs;
                         live_ok = true;
+                        drop_read_pause();   // P125j: back on a checkpoint of every layer; no paused chunk
                         std::fprintf(stderr, "saguaro serve: cancelled request keeps its conversation: %lld tokens "
                                              "live (its checkpoint: the read stopped inside a part)\n",
                                      (long long) c.ids.size());
@@ -23666,6 +23973,15 @@ vs.d_skip_usage = gs.d_skip_usage;
                     }
                 }
             }
+            // P125j: a cancelled read that did not keep its paused chunk (no pause, or the keep refused)
+            // leaves the saved rows with nothing to go on - the session was rolled back, zeroed, or the
+            // conversation parked without them. They drop; the next read re-runs the chunk if it must.
+            // The keep branch armed read_pause with THIS request's record (pos and layer); a pause this
+            // request hit that the keep branch refused must not leave the OLD record armed beside the NEW
+            // rows either - that pair is what a later park would attach to the image.
+            if (cancelled && lp_pos >= 0 && (read_pause.pos != lp_pos || read_pause.layer != lp_layer))
+                drop_read_pause();
+            if (cancelled && read_pause.pos < 0) sp.clear_pause();
             static const bool state_hash = std::getenv("SAGUARO_STATE_HASH") != nullptr;
             if (state_hash && !cancelled && o.prompt_cache > 0) {   // every finished request, ckpt=0 too (parity gates)
                 // DEBUG: a fingerprint of every part of the session over the positions it holds ([0, L)), and
@@ -23814,15 +24130,17 @@ vs.d_skip_usage = gs.d_skip_usage;
                              (long long) (sp.stage_cells() > 0 ? sp.stage_cells() : o.max_context),
                              (long long) solo_backed_cells(), pl_ran ? ", the pipelined decode ran" : "");
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
+            // P125j: when this request's read stopped between two layers, say WHERE on the DONE line
+            // (layer l of chunk c, at token P) so the server's pause line can name it.
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s chunk=%lld "
-                        "experts_streamed=%lld\n",
+                        "experts_streamed=%lld%s\n",
                         (long long) produced_n,
                         (long long) n, prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) resume, (long long) req_hits, (long long) req_look,
                         (long long) (src.ram_reads() - ram0), (long long) (src.file_reads() - files0),
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
                         (long long) req_offload, chain_txt, (long long) req_chunk,
-                        (long long) (sp.chain_experts_streamed() - streamed0));
+                        (long long) (sp.chain_experts_streamed() - streamed0), lp_note.c_str());
             std::fflush(stdout);
             if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&
@@ -23994,7 +24312,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                         in_slot = true;
                 }
                 std::string te;
-                if (!in_slot && ver.wait_commit(te)) (void) turn_capture(ParkFrom{live, live_imgs, checks, cvec_cached, -1}, turn_main, "main");
+                if (!in_slot && ver.wait_commit(te)) {   // (PLAN-p125k: the turn capture reads the main session:
+                    ConvStreams turn_streams;            //  its pre-copy sync waits on this conversation only)
+                    const bool turn_own = park_own_ok() && add_main_streams(turn_streams);
+                    const ConvSyncScope turn_scope(turn_own, &turn_streams);
+                    (void) turn_capture(ParkFrom{live, live_imgs, checks, cvec_cached, -1}, turn_main, "main");
+                }
             }
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             const bool lazy_was = !lazy_fly.empty();

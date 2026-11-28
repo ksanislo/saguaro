@@ -273,6 +273,88 @@ class StalledReadFalls(Base):
         self.assertEqual(self.live(), 0.0)
 
 
+class MangonelTrueReadout(Base):
+    """P124v2 (PLAN-p124v2-read-rate-true): replay of the recorded mangonel read
+    (ref/mangonel-engine-after-p124v.txt: "prompt 27254 tokens = 0 reused + 27254 read in 17383 ms
+    (1567.8 tok/s)") - a fresh 27,254-token read in 17,383 ms, read in 4,608-token chunks at a steady
+    ~4 lines a second (ref/mangonel-timeline-after-p124v.txt: 0.0 for the first 1.8 s, then 834 rising
+    to 2,000-2,450, peak 2,577: the shape is right, the VALUE reads 30-60% high and says 0 while the
+    first chunk is read).  The true readout is (tokens finished + the chunk in flight's tokens x passes
+    done / passes) over the read's OWN elapsed time: its integral over the read is the tokens read, so
+    the readout must average to the engine's own 1,567.8 over this read, be never 0 after the read's
+    first RHB, and never peak over 1.25 x it for a read this steady.  `chunk=` is the size of the chunk
+    the pass counts (P124v2: the line's own contribution - without it the server cannot share a chunk
+    it has not seen end)."""
+
+    NEW = 27254
+    CHUNK = 4608                # five 4,608 chunks + a 4,214 tail: 27,254 (the recorded PP steps: 4608, 9216, ...)
+    MS = 17383                  # the read's own time, the recorded summary
+    RATE = NEW / (MS / 1000.0)  # 1,567.8 tok/s - the engine's own figure, the truth to average to
+    BEAT_MS = 230               # the engine's recorded cadence (~4 a second)
+    PASSES = 78                 # layer passes per chunk (the RHB pass=i/n field; any fixed count works)
+
+    def lines(self):
+        """The read's RHB beats, its chunk-end BRP steps at the chunk's own end time, and the closing
+        BRA, all in engine-clock order: done = whole chunks done (what the recorded engine's U5b figure
+        gave - the chunk in flight is NOT in it), pass= counts its layer passes, pos0/chunk= name the
+        chunk in flight."""
+        beats = int(self.MS / self.BEAT_MS)
+        sizes = [min(self.CHUNK, self.NEW - self.CHUNK * c) for c in range((self.NEW + self.CHUNK - 1) // self.CHUNK)]
+        ends, cum = [], 0
+        for s in sizes:
+            cum += s
+            ends.append(cum / self.RATE * 1000.0)
+        nxt = 0
+        for k in range(1, beats + 1):
+            ms = k * self.BEAT_MS
+            while nxt < len(ends) and ends[nxt] < ms:      # (the chunk ended before this beat: its step first)
+                pos_e = self.CHUNK * (nxt + 1) if nxt + 1 < len(sizes) else self.NEW
+                yield (f"BRP 7 {int(pos_e)} {self.NEW} {ends[nxt]:.0f} {self.RATE:.1f} new_read={int(pos_e)} "
+                       f"read_ms={ends[nxt]:.0f} stage_ms=0")
+                nxt += 1
+            pos = self.RATE * ms / 1000.0
+            c = min(int(pos // self.CHUNK), len(sizes) - 1)
+            frac = (pos - self.CHUNK * c) / sizes[c] if pos >= self.CHUNK * c else 0.0
+            p = max(1, min(self.PASSES, int(frac * self.PASSES)))
+            yield (f"RHB rid=0 stage=read done={self.CHUNK * c} new={self.NEW} reused=0 "
+                   f"pass={p}/{self.PASSES} ms={ms} stage_ms=0 pos0={self.CHUNK * c} "
+                   f"chunk={sizes[c]} slot=7")
+        yield f"BRA 7 1 prompt={self.NEW} reused=0 read_ms={self.MS}.0 stage_ms=0"
+
+    def test_the_read_readout_averages_the_engine_s_own_figure(self):
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        shown = []
+        for line in self.lines():
+            eng.feed(7, line)
+            if not line.startswith("BRA"):
+                self.assertIsNone(eng.step(it))
+            if line.startswith("RHB "):                   # (a): never blank or zero once the read beats
+                v = self.row()["prefill_tok_s"]
+                self.assertIsNotNone(v, f"{line[:24]}: no rate after the read's first RHB")
+                self.assertGreater(v, 0, f"{line[:24]}: 0 while the read runs")
+            if line.startswith("RHB "):                   # (the chunk-end steps land in the same window)
+                self.tick(self.BEAT_MS / 1000.0)
+            if line.startswith("RHB ") and not eng.hooked[7].read_engine:
+                shown.append(self.live())
+        # (b): the readout's time-average over the read = its integral / the read's time = the tokens read /
+        # the read's time - the engine's own 1,567.8, within 5%.
+        self.assertTrue(shown)
+        avg = sum(shown) / len(shown)
+        self.assertLess(abs(avg - self.RATE), 0.05 * self.RATE, f"readout averages {avg:.0f}, not {self.RATE:.0f}")
+        # (c): a peak over a window >= 5 s of the same readout: a steady read never peaks 25% over it
+        # (the recorded Monitor peaked 2,577 - 1.64x the truth).
+        self.assertLessEqual(max(shown), 1.25 * self.RATE, f"readout peaks {max(shown):.0f}")
+        p = self.svc.totals.get("peak_prefill")
+        self.assertIsNotNone(p, "the readout never made a peak")
+        self.assertLessEqual(p["tok_s"], 1.25 * self.RATE, f"peak_prefill {p['tok_s']} tok/s")
+        # and the read closes on the engine's exact figures: 27,254 counted, nothing invented
+        self.assertTrue(eng.step(it)["start"])
+        self.assertEqual(self.svc._read_counted(stat), self.NEW)
+
+
 class PeaksTellTheTruth(Base):
     """The PEAKS half of PLAN-p124v-read-rate (ref/mangonel-peaks-shown.txt vs ref/mangonel-peaks-log.txt):
     the Monitor showed peak_decode 94.7 tok/s ("4668 tokens") and peak_prefill 171,860.8 tok/s

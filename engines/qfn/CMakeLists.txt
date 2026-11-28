@@ -1749,6 +1749,12 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(fast_lane_test src/program/fast_lane_test.cpp)
   target_include_directories(fast_lane_test PRIVATE include)
   add_test(NAME fast_lane_test COMMAND fast_lane_test)
+  # P125j: where a mid-chunk STOP pauses (the last layer pass never does, the short last chunk keeps its count,
+  # a one-layer stage has no between), which run goes on with the saved rows (the whole-chunk check at the run's
+  # own c0, a cross-run continuation at c0 0, a relayout's different C), the rows' byte count (saturates) (header-only, CPU)
+  add_executable(layer_pause_test src/program/layer_pause_test.cpp)
+  target_include_directories(layer_pause_test PRIVATE include)
+  add_test(NAME layer_pause_test COMMAND layer_pause_test)
   # which --batch slot conversation --session-dir saves before the slot is overwritten (header-only, CPU)
   add_executable(slot_persist_test src/program/slot_persist_test.cpp)
   target_include_directories(slot_persist_test PRIVATE include)

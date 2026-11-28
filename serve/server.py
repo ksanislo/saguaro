@@ -417,7 +417,7 @@ def priority_idle_seconds() -> float:
     """SAGUARO_PRIORITY_IDLE_S (5): the idle rule (R122) - a low request starts, or resumes after a pause, only
     when nothing normal or high runs or waits AND none finished in the last this many seconds (0 = no grace):
     a person's follow-up a few seconds after an answer finds the model where they left it."""
-    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 5.0)   # (30 until 1.2.4: parks are fast now; 0 once a read can pause between layers)
+    return _env_seconds("SAGUARO_PRIORITY_IDLE_S", 5.0)   # (30 until 1.2.4, 5 through 1.2.5; P125j's 0 is reverted (round 4): a low read steps aside at its next LAYER only on the SOLO read that keeps its rows - a batch slot's read is never cut (Service._sliced: keeps_stopped_read and not batch) and the engine arms the pause only where it captures it - so the grace is again what keeps a follow-up's wait short; set 0 by hand where the cut read works)
 
 
 class FairLock:
@@ -3295,6 +3295,7 @@ class RequestStat:
         # reader's rate, never wall time since the engine took it
         self.read_eng_n, self.read_eng_ms = 0, None     # live pair (the last progress step's)
         self.read_engine = None                         # the finished read's exact (new tokens, read_ms)
+        self.read_leg_ms = 0.0                          # P124v2: the read's closed legs' wall time (ms) so far
         # U5 read heartbeat (PLAN-u5-read-heartbeat): the engine's last RHB report of the read in flight - stage
         # (staging the reused prefix from RAM, or reading new tokens), done/new (new tokens done of total),
         # reused, the rate over the last heartbeat interval and when it arrived (consumers ignore a stale one)
@@ -4611,6 +4612,7 @@ class Service:
             return
         r[3] = max(0, stat.read_pos - r[5])             # (what THIS read counted, not the absolute position: a
         r[2] = max(r[1], (time.time() if at is None else at) - 0.0)   #  slice's next leg starts from the held prefix)
+        stat.read_leg_ms += 1000.0 * (r[2] - r[1])      # (P124v2: the read's own elapsed span sums its legs)
         self._read_prune(time.time())
 
     def _read_exact(self, stat, tokens):
@@ -4629,32 +4631,51 @@ class Service:
         while self.reads and self.reads[0][2] is not None and self.reads[0][2] < now - 2 * RATE_WINDOW_S:
             self.reads.popleft()
 
+    def _read_span_s(self, stat, now) -> float:
+        """P124v2: the read's own elapsed span on the server's clock - the closed legs' wall time plus
+        the open leg's - with the staging time (the engine's stage_ms: the reused prefix's RAM -> VRAM
+        copy, not read time) left out.  0.0 when the server never saw the read's start (no start hook:
+        the engine's own pair is the figure then); a closed read's span stands at its end."""
+        if getattr(stat, "engine_t0", None) is None:
+            return 0.0
+        r = getattr(stat, "read_cur", None)
+        wall = stat.read_leg_ms / 1000.0 + (max(0.0, now - stat.engine_t0)
+                                            if r is not None and r[2] is None else 0.0)
+        stage = ((getattr(stat, "read_hb", None) or {}).get("stage_ms") or 0.0) / 1000.0
+        return max(0.0, wall - min(wall, stage))
+
     def _own_read_rate(self, st, now, n_own) -> float:
-        """One chat's live read rate (PLAN-qfn-per-request-read-stats + PLAN-p124v-read-rate): once the engine's
-        progress lines carry its own figures, its new_read over its own read_ms (the heartbeat's READ time:
-        staging / restore / queue / decode left out) - the reader's wall time no longer mixes in what the chat
-        spent queued or held at a piece boundary.  A read the engine beats for that stops beating (a stall, a
-        wedge): the readout FALLS with the silence instead of freezing at the last beat, and drains to nothing
-        past the window.  Without the engine's fields (an older engine): its counted tokens over the time since
-        the engine took it, as before - drained to 0 once nothing has landed for a full window."""
+        """One chat's live read rate (PLAN-qfn-per-request-read-stats + PLAN-p124v-read-rate +
+        PLAN-p124v2-read-rate-true): its counted tokens (the beat's done plus the chunk in flight's
+        passed share, booked by _note_hb) over the read's OWN elapsed span - now minus the read's own
+        start, legs summed, staging left out, the engine's own read_ms pair as the floor.  Not the
+        beat's ms= alone: that is the read's RUN clock over its settled legs, and a read held between
+        pieces pairs whole-chunk tokens with a clock that stopped (the recorded mangonel: at 7.11 s the
+        engine's own new/read_ms said 704.2 tok/s while the Monitor showed 2,099.4).  A read the
+        engine beats for that stops beating (a stall, a wedge): the readout FALLS with the silence
+        instead of freezing at the last beat, and drains to nothing past the window.  Without the
+        engine's fields (an older engine): its counted tokens over the time since the engine took it,
+        as before - drained to 0 once nothing has landed for a full window."""
         if st.read_eng_ms and st.read_eng_ms > 0 and st.read_eng_n:
-            span = st.read_eng_ms / 1000.0
             r = getattr(st, "read_cur", None)
             if r is not None and r[2] is None and st.first_token is None:
                 if getattr(st, "read_hb", None) is not None:
                     # an engine that beats every ~0.23 s: a beat older than the cadence plus one Monitor poll is
-                    # silence - the readout falls with it (a stalled read shows a falling rate, never a frozen one)
-                    gap = now - (st.read_t1 or now)
-                    if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
+                    # silence - the readout falls with it (a stalled read shows a falling rate, never a frozen
+                    # one).  An engine whose progress steps are sparse (a BRP per chunk, none between) is not
+                    # beating: its silence is the cadence, and the span below is the read's own elapsed.
+                    if now - (st.read_t1 or now) > RATE_WINDOW_S + READ_BEAT_STALE_S:
                         return 0.0
-                    span += max(0.0, gap - READ_BEAT_STALE_S)
-            elif r is None or r[2] is not None:
-                # the read is over (BRA / a leg's close) but its answer has not started: its true rate ages
-                # with the wall time since it ended, and drops out once it is only history
-                gap = now - (r[2] if r is not None else st.read_t1 or now)
-                if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
-                    return 0.0
-                span += max(0.0, gap - READ_BEAT_STALE_S)
+                return st.read_eng_n / max(st.read_eng_ms / 1000.0, self._read_span_s(st, now))
+            # the read is over (BRA / a leg's close) but its answer has not started: its true rate ages
+            # with the wall time since it ended, and drops out once it is only history.  A leg still open
+            # with first_token set (one landed before _prefill_tok_s closed it): age from the last step.
+            ended = r[2] if r is not None and r[2] is not None else st.read_t1 or now
+            gap = now - ended
+            if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
+                return 0.0
+            span = max(st.read_eng_ms / 1000.0, self._read_span_s(st, ended))
+            span += max(0.0, gap - READ_BEAT_STALE_S)
             return st.read_eng_n / span
         if n_own and st.engine_t0 and now > st.engine_t0:
             r = getattr(st, "read_cur", None)
@@ -4665,10 +4686,11 @@ class Service:
 
     def _read_counted(self, stat) -> int:
         """The prompt tokens this request's reads have counted (closed intervals plus an open one's steps) - what
-        the Monitor's figures and the tests read back."""
+        the Monitor's figures and the tests read back.  int(): the -> int annotation stands even if a booking
+        ever hands a fractional step (the RHB share at _note_hb is already booked whole)."""
         n = sum(r[3] or 0 for r in self.reads if r[0] is stat and r[2] is not None)
         r = getattr(stat, "read_cur", None)
-        return n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0)
+        return int(n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0))
 
     def _read_start(self, stat):
         """(a driver's hook) the engine took this request - a QFN admission after its wait for a slot says so too:
@@ -4707,11 +4729,37 @@ class Service:
         own time (rt): the request's live rate is then done / rt - the tokens really read over the time the read
         really ran, with no staging / restore / queue / decode time mixed in (that mixing is what showed
         single-digit tok/s during a read that runs at 100-800).  The beat's own interval rate is NOT a peak
-        candidate: only the readout itself feeds the peaks.  No step of its own while it stages (done 0: nothing
-        to count)."""
+        candidate: only the readout itself feeds the peaks.  Nothing counts while it stages (the share is of a
+        chunk being READ); while a chunk is being read its passed share counts (P124v2, below)."""
         stat.read_hb = dict(hb, at=time.time())
         n = hb.get("done") or 0
+        # P124v2 (PLAN-p124v2-read-rate-true): done= counts WHOLE units (chunks - or pieces, when the
+        # read pipelines) and never the unit in flight; the line's pass=<i>/<n> counts that unit's layer
+        # passes, and its pos0=/chunk= say the unit being read: pos0 - reused is where done stands when
+        # only whole units are done.  The readout then adds the in-flight unit's share,
+        # done + chunk x pass_i/pass_n - so the read's first chunk shows its true rate, never 0.0
+        # (the recorded mangonel sat at 0.0 for the first 1.8 s, and saw-toothed 1,178 -> 801 -> 1,214
+        # around a true 1,568 with whole chunks landing only at their ends).  When done stands further
+        # along than the reporting card's unit start - a split read's cross-card figure already holds the
+        # share - nothing is added.  A beat whose tokens are only the share counts too.
+        chunk, pr, pos0 = hb.get("chunk") or 0, hb.get("pass"), hb.get("pos0")
+        new = hb.get("new") or 0
+        if chunk > 0 and pr and pr[1] > 0 and hb.get("stage") != "stage" and new > n and pos0 is not None \
+                and pos0 - (hb.get("reused") or 0) == n:
+            n = int(n + min(chunk, new - n) * min(1.0, max(0.0, pr[0] / pr[1])))
         if n > 0:
+            if n < stat.read_pos:
+                # P124v2 (review round 2): the booking is belted like the engine belts done= - a beat never
+                # books a step BACKWARDS.  On a split read the guard above holds for every card working the
+                # unit in flight while their pass= fractions differ: the lead card books done + chunk x share,
+                # the lagging card's next beat (or either card's once done moves off the boundary and the
+                # guard fails and only the shared done= books) would book below that - and a booked decrease
+                # is _note_read's engine-counter-went-backwards signal: close the interval, double the closed
+                # leg in _read_counted, re-baseline engine_t0 mid-read - the span collapse this plan is about.
+                # Real restarts stand: _rhb belts done per new/rid and starts that belt over on a new read, a
+                # retry's or slice's first PP / BRP steps book below read_pos through the unbelted _note_read
+                # path (its restart branch resets read_pos, releasing this belt), BRA's exact figures correct.
+                n = stat.read_pos
             rt = hb.get("rt")
             self._note_read(stat, n, None, False, False, rt if rt and rt > 0 else hb.get("ms"))
 
@@ -4781,6 +4829,12 @@ class Service:
                 self._read_close(stat, now)
                 stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
                 stat.read_eng_n, stat.read_eng_ms = 0, None   # (the engine's live pair restarts with the read)
+                stat.read_leg_ms = 0.0                  # (P124v2: and so does its own elapsed span)
+                if stat.engine_t0 is not None:
+                    # (P124v2 review nit 3: the open leg's start re-baselines too - _read_span_s adds
+                    #  now - engine_t0 to the span, and the counter going backwards mid-admission would
+                    #  otherwise carry the PREVIOUS read's whole time into the new read's span)
+                    stat.engine_t0 = now
                 self._read_open(stat, now)              # (counts from nothing again; the engine's counter reset)
             d = n_read - stat.read_pos
             stat.read_pos = n_read
@@ -5989,13 +6043,19 @@ class Service:
                         # no timer, and only for engines that keep a stopped read: GLM by its PAUSE, a multi
                         # conversation engine or solo with keeps_stopped_read (the line engine keeps a cancelled
                         # read, generate.cpp #573; maya-metal drops one, so it never claims it), and QFN by its
-                        # cut SOLO (the conversation stays live at the token reached, keeps_stopped_read) - a QFN
-                        # BATCH slot's cancelled read is dropped, nothing of it reaches the next BGEN, so its
-                        # read runs on; every other engine's read runs to its end rather than lose what it read.
+                        # cut SOLO (the conversation stays live at the token reached, keeps_stopped_read) - and
+                        # since P125m by its cut under --batch too: the read on the engine's own reader thread
+                        # pauses between two LAYERS of its chunk and is kept with the conversation (generate.cpp
+                        # captures the pause on that leg; the engine's INFO batch line says layer_pause=1 while
+                        # SAGUARO_LAYER_PAUSE is on - its pauses_batch_read), so the cut lands within one layer
+                        # pass. A batch engine without that pause still drops a cut read (nothing of it reaches
+                        # the next BGEN), so its read runs on, as before; every other engine's read runs to its
+                        # end rather than lose what it read.
                         if (prio < PRIORITY_HIGH and t0 is None and not pausing and not emb and not self.stopping
                                 and ((getattr(self.engine, "can_pause", False) and getattr(self.engine, "multi", 0))
                                      or (getattr(self.engine, "keeps_stopped_read", False)
-                                         and not getattr(self.engine, "batch", 0)))):
+                                         and (not getattr(self.engine, "batch", 0)
+                                              or getattr(self.engine, "pauses_batch_read", False))))):
                             pos = self._read_position()
                             if pos and pos[0] < pos[1] and self.fifo.step_aside(prio):
                                 # (the decision held; the last waiter can still have left the line by now -
@@ -6123,9 +6183,19 @@ class Service:
             hold[0] = False
             if preempt:
                 stat.paused_for_priority = True
+                if produced:
+                    where = f"answer paused at {len(produced)} tokens"
+                else:
+                    where = f"prompt read paused at {pos[0]:,} of {pos[1]:,} prompt tokens"
+                    # P125j: a QFN solo read cut BETWEEN two layers of a chunk says where on its DONE
+                    # (paused_layer/paused_chunk/paused_at) - name it: the chunk's lower layers were read,
+                    # and the next call of this prompt goes on at that layer, not at the chunk's end.
+                    lp = fresh if fresh is not last0 and isinstance(fresh, dict) else None
+                    if lp is not None and isinstance(lp.get("paused_layer"), int):
+                        where += (f", inside chunk {lp.get('paused_chunk', -1)} at layer {lp['paused_layer']}"
+                                  f" (the chunk from token {lp.get('paused_at', -1):,})")
                 print(f"[saguaro] priority: a {PRIORITY_NAMES[prio]} "
-                      f"{f'answer paused at {len(produced)} tokens' if produced else f'prompt read paused at {pos[0]:,} of {pos[1]:,} prompt tokens'}"
-                      f" for a {preempt}-priority request ({waiting} waiting)", flush=True)
+                      f"{where} for a {preempt}-priority request ({waiting} waiting)", flush=True)
             else:
                 print(f"[saguaro] fair slice: {len(produced)} tokens written, the engine goes to the next request "
                       f"({waiting} waiting); this one continues after it", flush=True)
@@ -9947,18 +10017,31 @@ def _qfn_engine_class():
         the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself).  A STOP is its
         cut: SOLO, a stopped request keeps its conversation, so an answer or a half-read prompt continues from the
         token it reached (see keeps_stopped_read) - which is what lets a priority preemption cut a solo QFN read.
-        In a batch slot a stopped request's conversation is kept for the answer, but its half-read prompt is not:
-        a stopped batch read runs again from 0 on its next BGEN, so the preemption never cuts a batch read."""
+        Under --batch the READS still run on the control lines (one at a time, the slots decoding beside them);
+        since P125m a stopped batch read is kept too - the engine pauses it between two LAYERS of its chunk and the
+        next request continues at that layer (the P125j pause, generate.cpp's concurrent reader leg) - and the
+        engine says so on its INFO batch line (`layer_pause=1`, off with SAGUARO_LAYER_PAUSE=0), which is what
+        pauses_batch_read reads.  A batch SLOT's cancelled read is still dropped ("a read that failed keeps
+        none"): those reads report no read position, so the preemption does not see them anyway."""
         can_pause = False
         keeps_stopped_read = True      # R122: a stopped (cut) request keeps its conversation LIVE at the token it
         #  reached, also in the middle of a prompt read, and the next request continues from it or parks it -
-        #  the SOLO GEN path only: engines/qfn/src/program/generate.cpp #1620 ("stopped between two windows ...
-        #  it stays the live conversation", printed as "cancelled request keeps its conversation: N tokens live").
-        #  A BATCH slot's cancelled read is dropped, not kept: "a read that failed keeps none" - the BRA 0 cancel
-        #  and the BSTOP path clear the slot's read and ids and hand every checkpoint back to the pool
-        #  (generate.cpp, the cancelled-read and BSTOP branches), and the driver frees the slot with nothing held
-        #  for the next BGEN (leaving "queued" it drops its held tokens) - which is why Service._sliced fires the
-        #  read preemption for this engine only while it runs solo (`not engine.batch`).
+        #  engines/qfn/src/program/generate.cpp #1620 ("stopped between two windows ... it stays the live
+        #  conversation", printed as "cancelled request keeps its conversation: N tokens live") and, for a read cut
+        #  BETWEEN two layers, the P125j keep ("the read paused at chunk c, layer l: ... MiB of chunk rows stay
+        #  with it").  P125m: that keep arms on the --batch concurrent-reader leg too, so the read preemption cuts
+        #  a batch read as well - but only while the engine reports the layer pause (pauses_batch_read below):
+        #  an older engine, or SAGUARO_LAYER_PAUSE=0, drops a cut batch read ("a read that failed keeps none" -
+        #  the BRA 0 cancel and the BSTOP path clear the slot's read and hand the checkpoints back), and such a
+        #  read must run on rather than lose what it read.
+
+        @property
+        def pauses_batch_read(self) -> bool:
+            """The engine stops a --batch prompt read at a LAYER boundary and keeps what it read: its INFO batch
+            line says `layer_pause=1` (generate.cpp, while Prefill::layer_pause_wanted() - SAGUARO_LAYER_PAUSE,
+            default on).  Service._sliced's read preemption cuts a batch read only with this; without it the old
+            rule holds and the read runs to its end rather than lose what it read."""
+            return bool(self.batch) and str(self.info.get("layer_pause") or "") == "1"
         vram_reserve = QE.StrataEngine.vram   # the VRAM give-back command; self.vram (below) is the Monitor's lines
 
         def __init__(self, *a, **kw):

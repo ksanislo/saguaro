@@ -64,8 +64,10 @@ struct PromptJob {
     /// U5 read heartbeat (output only): host point between the layer passes of a chunk: `pass`/`passes` the
     /// pass's index and this stage's layer count, `staged` whether the pass copied this read's K/V prefix from
     /// RAM into VRAM, `lb` the stage's first layer (a queued job's callback runs on every stage's thread: it tells
-    /// the cards apart), `pos0` the chunk's (this segment's) first token position. Changes nothing that is read.
-    std::function<void(int64_t pass, int64_t passes, bool staged, int64_t lb, int64_t pos0)> on_layer_pass;
+    /// the cards apart), `pos0` the chunk's (this segment's) first token position, `chunk` the tokens of that
+    /// chunk (this segment's piece of it: the server shares the chunk in flight with it, P124v2).
+    /// Changes nothing that is read.
+    std::function<void(int64_t pass, int64_t passes, bool staged, int64_t lb, int64_t pos0, int64_t chunk)> on_layer_pass;
     std::function<bool()> should_stop;
     const float* const* embd_rows = nullptr;
     /// Once: from the last stage's thread when it has read the last chunk, or from the stage that failed.
@@ -341,12 +343,50 @@ public:
     /// U5 read heartbeat (output only): called between the layer passes of every chunk (on every stage's thread,
     /// while it reads): `pass`/`passes` the pass's index and this stage's layer count, `staged` whether the pass
     /// copied this read's K/V prefix from RAM into VRAM, `lb` the stage's first layer (it tells a split's cards
-    /// apart), `pos0` the chunk's first token position. Not called for queued jobs (`PromptJob::on_layer_pass`
+    /// apart), `pos0` the chunk's first token position, `chunk` its token count (P124v2: the chunk in flight's
+    /// share, the RHB chunk= field). Not called for queued jobs (`PromptJob::on_layer_pass`
     /// is); it changes nothing that is read.
-    std::function<void(int64_t pass, int64_t passes, bool staged, int64_t lb, int64_t pos0)> on_layer_pass;
+    std::function<void(int64_t pass, int64_t passes, bool staged, int64_t lb, int64_t pos0, int64_t chunk)> on_layer_pass;
 
     /// Checked before every chunk: true stops the prompt early (`run` returns false with err "cancelled").
     std::function<bool()> should_stop;
+    /// P125j: a STOP taken BETWEEN the layers of a chunk, not only before one. Checked at the end of every
+    /// layer pass of a SOLO run (no queued job, no batched chunk, no layer split, no picture rows) while
+    /// SAGUARO_LAYER_PAUSE is on: true finishes the current layer, saves the chunk's residual rows
+    /// (tokens x hc*n_embd FP32) on the host and ends the run with err "layer paused" - the conversation
+    /// keeps the read (generate.cpp's pause keep) and the next run of the same tokens goes on at the saved
+    /// layer (the K/V of the layers below it for this chunk is already written). Unset, or the variable
+    /// 0: the plain between-chunk stop, byte-identical to before. Arm it only for a run whose caller reads
+    /// `paused_chunk()` / `take_pause_rows()` right after (generate.cpp's read_part does): armed anywhere
+    /// else the pause ends the run on err "layer paused" with nobody to keep its rows.
+    std::function<bool()> stop_between_layers;
+    /// SAGUARO_LAYER_PAUSE (default on): whether `run` honours a layer pause at all - OFF, the check, the
+    /// row copies and the resume all stay untouched and the read behaves exactly as before P125j.
+    static bool layer_pause_wanted();
+    /// Where the last `run` (or one a park handed back) paused between two layers: the paused chunk's
+    /// first token as an ABSOLUTE position, the first layer it did not read, and the chunk's token count;
+    /// -1 / -1 / 0 when it did not pause.
+    int64_t paused_chunk() const;
+    int64_t paused_layer() const;
+    int64_t paused_tokens() const;
+    /// The paused chunk's index IN THE RUN that paused (its c0 / that run's chunk size - the figure the
+    /// server's "layer l of chunk c" line shows; -1 with no pause, and -1 for a pause a restore handed
+    /// back too: the run-relative label of the run that paused does not survive the park - the engine's
+    /// own DONE/keep line carries the label it captured while the pause was taken in a run).
+    int64_t paused_chunk_index() const;
+    /// The paused chunk's saved rows, moved out to park them with the conversation (P125j: a parked read
+    /// keeps its in-flight chunk), given back on restore (`pos0`: the paused chunk's absolute first
+    /// token), or dropped. Dropping is always safe: the chunk is then read again whole (the same result,
+    /// the layer skip lost). Moving the rows out clears the record too: with no rows there is nothing to
+    /// go on, and `paused_*()` must stop reporting a pause (a later park would pair an old record with
+    /// a newer run's rows).
+    void take_pause_rows(std::vector<float>& rows);
+    /// The saved rows' size in bytes (0 with no pause): the park's budget adds it to its estimate.
+    size_t pause_rows_bytes() const;
+    /// Arm a pause handed back by a restore: false (and nothing armed) unless the rows came with it, so
+    /// the caller only mirrors the record into its own bookkeeping when this returned true.
+    bool give_pause(int64_t pos0, int64_t layer, int64_t tokens, std::vector<float>&& rows);
+    void clear_pause();
     /// The first stage only, checked before every chunk but the first: true ends the run there as if the prompt
     /// ended there.  `run` returns true once every stage has read the tokens before that chunk, and `stopped_at()`
     /// says how many of the run's tokens that is (-1 when the run read them all).  A read beside the batch slots
@@ -427,6 +467,13 @@ private:
     bool drain_pipeline(std::string& err);
 
     int64_t stage_lb_ = 0, stage_le_ = -1;
+    /// P125j: the chunk a run stopped between two layers of (or the one a park handed back): its absolute
+    /// first token, the first layer not read for it, its token count, and its residual rows on the host.
+    struct SavedPause {
+        int64_t pos0 = -1, layer = -1, tokens = 0, chunk = -1;   // chunk: the index within the run that paused
+        std::vector<float> rows;
+    };
+    SavedPause pause_;
     std::vector<int> tap_layers_;
     int64_t tap_first_ = 0, tap_cap_ = 0;
     float* tap_dev_ = nullptr;
