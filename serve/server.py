@@ -1295,6 +1295,15 @@ def _quiet_seconds() -> float:
 
 REQUEST_QUIET_S = _quiet_seconds()
 
+# P124z: how often a request whose PROMPT READ is still unfinished wakes on its own while the engine says
+# nothing of it.  The read preemption of R122 decides on the request loop's ticks, and a quiet reader says
+# nothing for as long as it waits (saguaro-ds4's DS4_READER hands its cards to a running answer between the
+# read's pieces, src/ds4/ds4_main.cpp:2149): a normal request that fits a free place and is gone inside one
+# silence was never seen by the low read beside it - the card's DS4 run logged no priority line at all
+# (ref/rc2-ds4-engine.txt).  0.25 s: QFN's own read heartbeat's cadence (an RHB line every ~0.23 s), and a
+# wake costs only the cancel/stall looks the line-less waits already take.
+READ_TICK_S = 0.25
+
 
 # The longest a stopped request's own lines (T / PP / DONE) are waited for when it is drained after a cancel with
 # --parallel: a STOP an engine does not honour (or a rid it has already let go) would otherwise hold the FIFO place for
@@ -2128,10 +2137,27 @@ class StrataEngine:
         on = sampling.get("experimental_speed_projection")
         return f" cvec={int(on)}" if isinstance(on, bool) else ""
 
+    def _read_tick(self, otherwise: float) -> float:
+        """The wait for the engine's next line in a request loop: `otherwise`, shortened to READ_TICK_S while
+        THIS thread's prompt read is unfinished (P124z).  That is what hands a quiet reader its ticks: the
+        read preemption of R122 (Service._sliced, `prio < PRIORITY_HIGH and t0 is None ...`) decides on the
+        None ticks this wait yields, and an engine that says nothing of its read for seconds (DS4_READER
+        waiting on the cards, a chunk of a long context) must not put that decision to sleep beside a
+        normal request that runs and finishes inside the silence.  The position it reads is exactly what
+        Service._read_position looks at (its own lines: _tls.pp on the multi path, _tls.own_pp on the solo
+        one and every driver's per-request read), so the two can never disagree on whether a read is open."""
+        tls = getattr(self, "_tls", None)
+        pp = (getattr(tls, "pp", None) if tls is not None else None) \
+            or ((getattr(tls, "own_pp", None) or (None,))[0] if tls is not None else None)
+        if isinstance(pp, (tuple, list)) and len(pp) >= 2 and 0 <= pp[0] < pp[1]:
+            return min(READ_TICK_S, otherwise)
+        return otherwise
+
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-        """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
-        the HTTP layer turns it into an SSE comment, which keeps clients' watchdogs calm and notices a client that
-        has gone.  A consumer that stops early (or `cancel`) makes the engine STOP, so it does not run to max_new."""
+        """Yields token ids, and None as a heartbeat while the engine is quiet (reading a long prompt: every
+        READ_TICK_S while that read is unfinished, 10 s otherwise - P124z): the HTTP layer turns it into an
+        SSE comment, which keeps clients' watchdogs calm and notices a client that has gone.  A consumer that
+        stops early (or `cancel`) makes the engine STOP, so it does not run to max_new."""
         if self.multi:
             yield from self._generate_multi(ids, max_new, sampling, cancel, embeddings)
             return
@@ -2158,7 +2184,8 @@ class StrataEngine:
         try:
             while True:
                 try:
-                    line = self.lines.get(timeout=10)
+                    line = self.lines.get(timeout=self._read_tick(10.0))   # (P124z: a read that says nothing
+                    #  of itself still ticks, so a low one beside a running normal is seen - _read_tick)
                 except queue.Empty:
                     if lp_wait is not None:
                         t, lp_wait = lp_wait, None
@@ -2389,7 +2416,8 @@ class StrataEngine:
             want_lp, lp_wait = logprobs_asked(sampling) is not None, None   # (as generate(): a token waits for its LP)
             while True:
                 try:
-                    line = q.get(timeout=poll_s)
+                    line = q.get(timeout=self._read_tick(poll_s))   # (P124z: same - a quiet reader's low
+                    #  read must still tick while a normal request runs beside it on a free place)
                 except queue.Empty:
                     if lp_wait is not None:
                         t, lp_wait = lp_wait, None

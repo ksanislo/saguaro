@@ -1108,11 +1108,14 @@ def run(rid, ids, start, base, max_new):
         out(f"PP {tag}{pos} {total} 10.0 1000.0 {start}")
         # the LONG prompt's reader goes quiet right after its first chunk (its first call only: a
         # continued read speaks every chunk); short prompts answer between their chunks as always
-        time.sleep(QUIET if (total > 200 and start == 0 and total == len(base) and pos == step) else 0.02)
+        # short reads pace themselves like a real request's (a read of tens of tokens plus three answer
+        # tokens takes the better part of a second on a card - long enough for the LOW read beside it
+        # to see the normal on one of its READ_TICK_S wakes)
+        time.sleep(QUIET if (total > 200 and start == 0 and total == len(base) and pos == step) else 0.05)
     script = [111, 107, 257]                            # "ok" + im_end, continued past what it wrote
     for t in script[len(ids) - len(base):][:max_new]:
         out("T " + tag + str(t))
-        time.sleep(0.02)
+        time.sleep(0.05)
     out(f"DONE {tag}{len(script) - (len(ids) - len(base))} {total} 10.0 30.0 stop 0 0 {total} 0 0")
     with lock:
         busy.pop(rid, None)
