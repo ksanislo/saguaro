@@ -131,6 +131,26 @@ public:
     // PLE history, each QSA layer's indexer tail and tail-block key); the KV and pooled keys are positional
     bool checkpoint_save(strata::core::ConversationCheckpoint& c, std::string& err);
     bool checkpoint_restore(const strata::core::ConversationCheckpoint& c, std::string& err);
+    bool checkpoint_check(const strata::core::ConversationCheckpoint& c, std::string& err) const;
+    std::array<uint64_t, 5> checkpoint_sizes() const;   // the checkpoint arrays' byte counts (checkpoint_save)
+    // the Monitor's "What fills the GPU" parts the host code cannot see on Metal: the window's weights (the dense
+    // tensors when the experts stream, else the mapped model), its K/V, the expert arena and the prompt's own buffers
+    void vram_parts(uint64_t& weights, uint64_t& kv, uint64_t& pool, uint64_t& prompt) const {
+        weights = W_.bytes + Q8_.bytes;
+        kv = 0;
+        for (const auto* v : {&kq_, &vq_, &ksc_, &vsc_, &tail_, &dead_, &pooled_})
+            for (const mtl::Buffer& b : *v) kv += b.bytes;
+        pool = st_ ? st_->arena_used_bytes() : 0;
+        prompt = st_ ? st_->prompt_bytes() : 0;
+    }
+    // the K/V of the session's QSA state `st` (its ordinal in ss_->qsa_states): [kq, vq, ksc, vsc, pooled]
+    bool kv_pools(const strata::core::QsaState* st, std::array<void*, 5>& p) const {
+        if (ss_ == nullptr || ss_->qsa_states == nullptr || st == nullptr) return false;
+        const std::ptrdiff_t j = st - ss_->qsa_states;
+        if (j < 0 || (size_t) j >= kq_.size()) return false;
+        p = {kq_[(size_t) j].ptr, vq_[(size_t) j].ptr, ksc_[(size_t) j].ptr, vsc_[(size_t) j].ptr, pooled_[(size_t) j].ptr};
+        return true;
+    }
     void reset();   // a new sequence (session_zero): the running state zeroed
     void set_max_t(int t) { max_t_ = std::min(t, MAXT); }
     // ---- the MTP draft layer (mtp.hpp's math on mac-kern's kernels; the MTP GGUF from tools/mtp_pack.py)
@@ -1545,13 +1565,24 @@ void Window::reset() {
     }
 }
 
-bool Window::checkpoint_restore(const strata::core::ConversationCheckpoint& c, std::string& err) {
+std::array<uint64_t, 5> Window::checkpoint_sizes() const {
     const size_t gs = 4 * 128 * 48 * 128, hs = 4 * 10240 * 3, ts = 4 * 4 * 128, dsz = 4 * 128;
-    if (c.gdn.size() != gst_.size() * (gs + hs) || c.ple.size() != (size_t) 4 * 9 * 10240 ||
-        c.tails.size() != tail_.size() * ts || c.dead.size() != dead_.size() * dsz) {
+    return {gst_.size() * (gs + hs), (uint64_t) 4 * 9 * 10240, tail_.size() * ts, dead_.size() * dsz, 0};
+}
+
+bool Window::checkpoint_check(const strata::core::ConversationCheckpoint& c, std::string& err) const {
+    const std::array<uint64_t, 5> z = checkpoint_sizes();
+    if (c.gdn.size() != z[0] || c.ple.size() != z[1] || c.tails.size() != z[2] || c.dead.size() != z[3] ||
+        c.block_pos.size() != z[4]) {
         err = "metal window: the checkpoint is not this engine's (sizes differ)";
         return false;
     }
+    return true;
+}
+
+bool Window::checkpoint_restore(const strata::core::ConversationCheckpoint& c, std::string& err) {
+    const size_t gs = 4 * 128 * 48 * 128, hs = 4 * 10240 * 3, ts = 4 * 4 * 128, dsz = 4 * 128;
+    if (!checkpoint_check(c, err)) return false;
     pend_fold_ = 0;   // the restored state replaces whatever was pending
     last_T_ = 0;
     for (size_t i = 0; i < gst_.size(); ++i) {
@@ -2634,6 +2665,24 @@ void window_reset() {
 bool window_checkpoint_save(strata::core::ConversationCheckpoint& c, std::string& err) {
     if (g_the_window == nullptr || !g_the_window->ready()) { err = "metal window: not up"; return false; }
     return g_the_window->checkpoint_save(c, err);
+}
+bool window_kv_pools(const strata::core::QsaState* st, std::array<void*, 5>& p) {
+    if (g_the_window == nullptr || !g_the_window->ready()) return false;
+    return g_the_window->kv_pools(st, p);
+}
+bool window_vram_parts(uint64_t& weights, uint64_t& kv, uint64_t& pool, uint64_t& prompt) {
+    if (g_the_window == nullptr || !g_the_window->ready()) return false;
+    g_the_window->vram_parts(weights, kv, pool, prompt);
+    return true;
+}
+bool window_checkpoint_sizes(std::array<uint64_t, 5>& sizes) {
+    if (g_the_window == nullptr || !g_the_window->ready()) return false;
+    sizes = g_the_window->checkpoint_sizes();
+    return true;
+}
+bool window_checkpoint_check(const strata::core::ConversationCheckpoint& c, std::string& err) {
+    if (g_the_window == nullptr || !g_the_window->ready()) { err = "metal window: not up"; return false; }
+    return g_the_window->checkpoint_check(c, err);
 }
 bool window_checkpoint_restore(const strata::core::ConversationCheckpoint& c, std::string& err) {
     if (g_the_window == nullptr || !g_the_window->ready()) { err = "metal window: not up"; return false; }

@@ -1,4 +1,5 @@
 // src/core/expert_source.cpp - the adapter.  See the header for the three clauses of the contract.
+#include "strata/platform/mac_memory.hpp"
 #include "strata/core/capture_lock.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/foresight_swap.hpp"
@@ -499,6 +500,11 @@ bool free_memory_bytes(uint64_t& bytes) {
         }
     }
     bytes = detail::numa_pin_free(bytes, nodes);
+    return bytes > 0;
+#elif defined(__APPLE__)
+    strata::platform::MacHostMemory m;
+    if (!strata::platform::mac_host_memory(m)) return false;
+    bytes = m.free;
     return bytes > 0;
 #else
     bytes = 0;
@@ -1973,6 +1979,9 @@ uint64_t gate_cache_room() {
     std::stringstream text;
     text << info.rdbuf();
     return detail::meminfo_bytes(text.str(), "MemAvailable");
+#elif defined(__APPLE__)
+    strata::platform::MacHostMemory m;
+    return strata::platform::mac_host_memory(m) ? m.available : 0;
 #else
     return 0;
 #endif

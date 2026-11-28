@@ -18,8 +18,22 @@
 #include <mutex>
 #include <cstdio>
 
+#if defined(STRATA_GPU_METAL)
+namespace strata::metal_engine {
+// The Metal decode window (metal/src/engine/window.cpp) holds the QSA layers' K/V itself; the session's own K/V
+// buffers are given back at load.  This hands out the window's CPU-visible buffers for one of the session's QSA
+// states: [K int8, V int8, K scales, V scales, pooled index rows].  false: `st` is not one of the window's.
+bool window_kv_pools(const strata::core::QsaState* st, std::array<void*, 5>& pools);
+}  // namespace strata::metal_engine
+#endif
+
 namespace strata::core {
 namespace {
+#if defined(STRATA_GPU_METAL)
+// the window's K/V: INT8 [cell][head][head_dim] with an fp16 scale per 64 values, one pooled index row per idx_block
+// cells - its own format id, so a Metal image never restores into a CUDA state or the reverse
+constexpr int kMetalKvFormat = 0x4D00 | 1;
+#endif
 struct Layout {
     int format;
     int64_t cells, pooled_rows, page_size;
@@ -37,6 +51,28 @@ bool valid_extent(const QsaState& st, int64_t upto, std::string& error) {
 
 bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index, Layout& l, std::string& error) {
     if (!valid_extent(st, upto, error)) return false;
+#if defined(STRATA_GPU_METAL)
+    {
+        const auto s = strata::kernels::qsa_real_shapes();
+        if (g.n_head_kv <= 0 || g.head_dim <= 0 || g.head_dim % 64 || g.idx_key_dim <= 0) {
+            error = "conversation snapshot: invalid K/V geometry";
+            return false;
+        }
+        const int64_t cells = ((upto + s.page_size - 1) / s.page_size) * s.page_size;
+        const int64_t pooled = index && upto > 0 ? upto / s.idx_block + 1 : 0;
+        l = {kMetalKvFormat, cells, pooled, s.page_size, 0, 0, 0, 0, 0};
+        using conversation_detail::product;
+        if (!product(l.data, {(uint64_t) cells, (uint64_t) g.n_head_kv, (uint64_t) g.head_dim}) ||
+            !product(l.scales, {(uint64_t) cells, (uint64_t) g.n_head_kv, (uint64_t) (g.head_dim / 64) * 2}) ||
+            !product(l.pooled, {(uint64_t) pooled, (uint64_t) g.idx_key_dim, sizeof(float)})) {
+            error = "conversation snapshot: K/V byte count overflow";
+            return false;
+        }
+        l.value_data = l.data;
+        l.value_scales = l.scales;
+        return true;
+    }
+#endif
     if (st.kv_hybrid && (st.kv_mode == 2 || st.kv_q4 || st.kv_int8)) {   // a streamed one reads its host copy
         error = "conversation snapshot: hybrid K8V4 cannot be a ring and needs distinct format flags";
         return false;
@@ -82,6 +118,12 @@ bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index
 }
 
 std::array<void*, 5> pools(const QsaState& st, bool resident = false) {
+#if defined(STRATA_GPU_METAL)
+    (void) resident;
+    std::array<void*, 5> w{};
+    if (!strata::metal_engine::window_kv_pools(&st, w)) w = {};
+    return w;
+#endif
     const bool host = st.kv_mode != 0 && !resident;
     if (st.kv_hybrid)
         return {host ? st.host.k_q : st.k_q, host ? st.host.v_q4 : st.v_q4, host ? st.host.k_scale : st.k_scale,
@@ -95,6 +137,16 @@ std::array<void*, 5> pools(const QsaState& st, bool resident = false) {
 }
 
 bool valid(const QsaState& st, const Layout& l, int64_t upto, std::string& error) {
+#if defined(STRATA_GPU_METAL)
+    // the window's buffers (pools above): the session's paging fields describe buffers Metal does not use
+    std::array<void*, 5> w{};
+    if (upto < 0 || upto > st.max_cells || !strata::metal_engine::window_kv_pools(&st, w) ||
+        l.pooled_rows > st.idx_pooled_rows) {
+        error = "conversation snapshot: not a K/V state of the Metal decode window, or beyond its extent";
+        return false;
+    }
+    return true;
+#endif
     if (upto < 0 || upto > st.max_cells || st.n_pages < 0 || l.cells / l.page_size > st.n_pages ||
         st.kv_mode < 0 || st.kv_mode > 2 || st.n_slots <= 0 ||
         (st.kv_mode == 0 && st.n_slots < st.n_pages) ||
@@ -140,6 +192,10 @@ bool host_both(const void* dst, const void* src) {
 // default) maps those bytes from both sides.  An unknown pointer still counts as host for everything else - the
 // parked image's own buffers are plain memory, and their threaded copy is the 11-19 park-stall fix.
 bool host_end_is_cpu(const QsaState& st) {
+#if defined(STRATA_GPU_METAL)
+    (void) st;
+    return true;   // the window's buffers are CPU-visible (unified memory)
+#endif
     return st.host_elastic < 0 || !qsa_host_elastic_prefix();
 }
 struct CopyJob { void* dst; const void* src; size_t n; };
@@ -203,6 +259,12 @@ bool host_copy_threaded(void* dst, const void* src, size_t n) {
 bool transfer(void* dst, const void* src, size_t n, std::string& error, bool cpu_ends = true) {
     if (!n) return true;
     if (!src || !dst) { error = "conversation snapshot: missing state buffer"; return false; }
+#if defined(STRATA_GPU_METAL)
+    // both ends are CPU memory on Metal: the window's buffers (pools) and the host image
+    (void) cpu_ends;
+    if (!host_copy_threaded(dst, src, n)) std::memcpy(dst, src, n);
+    return true;
+#endif
     if (cpu_ends && host_copy_threaded(dst, src, n)) return true;   // (cpu_ends: no end is a known GPU alias)
     // Default handles both device allocations and device-mapped host pool aliases.
     const cudaError_t e = conversation_detail::copy_nonblocking(dst, src, n);
@@ -340,6 +402,10 @@ namespace {
 // After the authoritative pools were rewritten: the VRAM slots of a streamed state still hold the outgoing
 // conversation, so resolve must refill them before any attention reads (shared by restore and direct copy).
 bool refresh_residency(const QsaState& st, const ModelGeometry& g, int64_t upto, std::string& error) {
+#if defined(STRATA_GPU_METAL)
+    (void) st; (void) g; (void) upto; (void) error;
+    return true;   // the window reads its K/V in place: nothing is resident elsewhere
+#endif
     // P124e: a follow pool's page table is written only where it is mapped (the fresh chunks are -1 filled)
     if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, nullptr, qsa_table_backed_pages(st));
     if (st.kv_mode == 2 && upto > 0) {
@@ -377,6 +443,10 @@ bool conversation_kv_copy(const QsaState& from, const QsaState& to, const ModelG
     for (size_t i = 0; i < sizes.size(); ++i) {
         if (!sizes[i]) continue;
         if (!src[i] || !dst[i]) { error = "conversation snapshot: missing state buffer"; return false; }
+#if defined(STRATA_GPU_METAL)
+        if (src[i] != dst[i]) std::memcpy(dst[i], src[i], sizes[i]);
+        continue;
+#endif
         const cudaError_t e = conversation_detail::copy_nonblocking(dst[i], src[i], sizes[i], queued);
         if (e != cudaSuccess) { error = std::string("conversation snapshot direct copy: ") + cudaGetErrorString(e); return false; }
     }
