@@ -35,6 +35,7 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
+. "$(dirname "$0")/health.sh"        # readiness: ready / loading / failed (PLAN-p124t2: stop at a failed load)
 OUT=scratch/glm-pinned-start
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -127,11 +128,14 @@ PY
     SRV_PID=$!
     echo "server pid $SRV_PID on :$PORT at ctx $CTX (loading the model ...)"
     for _ in $(seq 1 240); do
-        curl -fs -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
+        case "$(health_status "$PORT")" in
+            ready) break ;;
+            failed) fail "the model failed to load at ctx $CTX - /health says so (its error is in the log tails below)" ;;
+        esac
         kill -0 "$SRV_PID" 2>/dev/null || fail "the server died while loading at ctx $CTX; see $SRV_LOG"
         sleep 5
     done
-    curl -fs -m 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 || fail "no /health after 20 min at ctx $CTX"
+    [ "$(health_status "$PORT")" = ready ] || fail "no /health after 20 min at ctx $CTX"
     MODEL=$("$PYTHON" - "$PORT" <<'PY'
 import json, sys, urllib.request
 print(json.load(urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/v1/models"))["data"][0]["id"])

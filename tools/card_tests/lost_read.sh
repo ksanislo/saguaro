@@ -41,6 +41,7 @@ RATIO=${RATIO:-1.30}
 IDLE=${IDLE:-2}                      # SAGUARO_PRIORITY_IDLE_S for the resume (the live default 30 only slows this)
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT_DIR" || exit 1
+. "$(dirname "${BASH_SOURCE[0]}")/health.sh"   # readiness: ready / loading / failed (PLAN-p124t2: stop at a failed load)
 CUT_N=$(echo "$CUTS" | wc -w)
 DIR=$OUT
 SERVE_LOG="$DIR/serve.log"
@@ -101,11 +102,14 @@ echo $! > "$DIR/serve.pid"
 trap cleanup EXIT
 echo "server pid $(cat "$DIR/serve.pid") on :$PORT, log $SERVE_LOG (loading the model ...)"
 for _ in $(seq 1 240); do
-    curl -fs -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
+    case "$(health_status "$PORT")" in
+        ready) break ;;
+        failed) fail "the model failed to load - /health says so (its error is in the log tail below)" ;;
+    esac
     kill -0 "$(cat "$DIR/serve.pid")" 2>/dev/null || fail "the server died while loading; see $SERVE_LOG"
     sleep 5
 done
-curl -fs -m 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 || fail "no /health after 20 min"
+[ "$(health_status "$PORT")" = ready ] || fail "no /health after 20 min"
 MODEL=$("$PYTHON" - "$PORT" <<'PY'
 import json, sys, urllib.request
 print(json.load(urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/v1/models"))["data"][0]["id"])
@@ -179,12 +183,12 @@ for target in $CUTS; do
     done
     echo "-- cut $i at read position ${p} >= ${target}: running a short normal request"
     short || fail "the short normal request (cut $i) failed"
-    for _ in $(seq 1 180); do
+    for _ in $(seq 1 90); do         # PLAN-p124t2: a log-line wait gives up at ~90 s, not 180
         [ "$(count "$MARK_L" 'prompt read paused')" -ge "$i" ] && break
         sleep 1
     done
     [ "$(count "$MARK_L" 'prompt read paused')" -ge "$i" ] || fail "no 'prompt read paused' line for cut $i"
-    for _ in $(seq 1 600); do        # the resume waits out SAGUARO_PRIORITY_IDLE_S; the line then carries M
+    for _ in $(seq 1 90); do         # the resume waits out SAGUARO_PRIORITY_IDLE_S; the line then carries M
         [ "$(count "$MARK_L" 'prompt read continued')" -ge "$i" ] && break
         sleep 1
     done
