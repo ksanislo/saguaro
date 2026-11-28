@@ -5246,8 +5246,11 @@ def server_command(cfg_path: Path, a) -> tuple:
         cmd += ["--api-key", a.api_key]
     if a.gpus or a.gpu is not None:                    # this start only, on these cards
         cmd += ["--gpu", str(a.gpus or a.gpu)]
-    if WIN or sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
-        cmd.append("--open")                           # a desktop: the browser opens when the model is ready
+    # a desktop: the browser opens when the model is ready - unless the config says "open_browser": false or
+    # SAGUARO_NO_BROWSER=1 is set (a server restarted often, or one only reached through its API)
+    no_browser = cfg.get("open_browser") is False or os.environ.get("SAGUARO_NO_BROWSER", "") not in ("", "0")
+    if not no_browser and (WIN or sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        cmd.append("--open")
     here = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     ctx = args[args.index("--max-context") + 1] if "--max-context" in args[:-1] else None
     gpus = str(a.gpus or a.gpu if a.gpus or a.gpu is not None else cfg.get("gpu", 0)).strip("[]").split(",")

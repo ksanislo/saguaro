@@ -168,7 +168,8 @@ private:
                             const SessionLogStats* log = nullptr);
     void writer_loop();
     void preload_loop();
-    bool read_file(const std::string& path, SavedConversation& image, std::string& error) const;
+    // `transient`: the read failed for a reason that is not the file's (not enough RAM right now): keep the file
+    bool read_file(const std::string& path, SavedConversation& image, std::string& error, bool* transient = nullptr) const;
     void drop_entry_locked(size_t i, const char* why);
     void touch_locked(Entry& e);
     void note_locked(const char* what, uint64_t tokens, uint64_t bytes, double ms, const char* why);

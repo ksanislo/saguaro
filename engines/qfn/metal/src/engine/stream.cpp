@@ -758,6 +758,7 @@ uint8_t* ExpertStream::standalone_region(uint64_t bytes) {
     region_slots_.clear();
     region_ = (uint8_t*) m;
     region_bytes_ = 0;   // fresh zero pages; nothing in the arena to empty
+    standalone_bytes_ = sz;
     std::fprintf(stderr, "strata metal stream: the arena is small: the prompt's %.2f GB of buffers are their own "
                          "allocation, not a region of its slots\n", bytes / 1e9);
     return region_;

@@ -93,6 +93,10 @@ Error host_unregister(void* p);
 /// memory).  *dev is 0 for 1 and 2, -1 for 0.  (Saguaro: the host code asks it since its conversation-park and YaRN
 /// re-rotation paths.)
 Error pointer_kind(const void* p, int* kind, int* dev);
+// what the device has allocated for this process (MTLDevice currentAllocatedSize), not capped at the working set
+uint64_t allocated_bytes();
+// the bytes purge_device_allocations gave back: still counted by currentAllocatedSize, holding no memory
+uint64_t purged_bytes();
 Error memset_device(void* p, int value, size_t bytes);
 Error memset_async(void* p, int value, size_t bytes, Stream s = nullptr);
 
