@@ -17,7 +17,11 @@
 #            log "the read paused at chunk" (a between-LAYERS pause, not the old chunk-end stop), the server
 #            line must name it ("inside chunk c at layer l"), the normal request's first token must land
 #            within FIRST_TOKEN_S seconds (1 by default - the whole point of P125j), and the low read must
-#            resume with the engine's own "prompt read continued: M of N tokens reused", M > 0.  Over the
+#            resume with the engine's own "prompt read continued: M of N tokens reused", M > 0.  This holds on
+#            the BATCH lane too (P125m): with --batch the read runs on the engine's own reader thread ("read N
+#            tokens on a thread of its own ... concurrent") and must pause there just the same - a config
+#            printing that line while no 'prompt read paused' line ever comes is the rc124-cand3 card FAIL.
+#            Over the
 #            whole phase the engine's own per-leg figures must add up: the legs' read counts sum to the
 #            prompt (nothing read twice) and the last leg ends at reused + read = the prompt.
 #   phase C: the SAME prompt asked uninterrupted on a fresh engine (the server restarts with an empty
@@ -217,6 +221,10 @@ done
 wait "$LOW_PID" || fail "the low request failed (see $DIR/resp_L.json): prompt too long for this config?"
 grep -qE 'finish' "$DIR/resp_L.json" 2>/dev/null || fail "the low request did not answer"
 [ "$PAUSE_SEEN" -ge 1 ] || fail "no cut paused the read between layers (${CUTS} random moments all hit chunk ends? raise CUTS)"
+if [ "$(ecount "$MARK_EL" 'on a thread of its own')" -gt 0 ]; then
+    echo "   batch lane: the read ran on its own thread (SAGUARO_PIPED_CONCURRENT) and the cuts paused it"
+    echo "   there - the leg that silently ran reads to their end until P125m captured the pause on it"
+fi
 mapfile -t REUSED < <(serve_lines "$MARK_L" \
     | grep -oE "prompt read continued: [0-9,]+ of [0-9,]+ tokens reused" \
     | sed -E 's/^prompt read continued: ([0-9,]+) of .*$/\1/' | tr -d ',')
