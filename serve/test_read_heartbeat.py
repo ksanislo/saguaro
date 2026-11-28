@@ -157,6 +157,26 @@ class DriverReadLive(unittest.TestCase):
         eng._rhb("RHB rid=2 stage=read done=50 new=9000 reused=0 pass=0/1 ms=1000")    # another read (new): over
         self.assertEqual(eng.read_live["solo"]["done"], 50)
 
+    def test_the_p124v2_fields_parse_without_the_float_round_trip(self):
+        # P124v2 review round 5: the pos0=/chunk= parse paths the modules had never walked - a line
+        # without them (the P124v engine: pos0 None, chunk 0, the old behaviour), and a malformed
+        # field: int(float(...)) used to turn chunk=1e400 into int(inf) - an OverflowError that
+        # ESCAPED _rhb on the pump thread.  The fields are plain %lld integers now: a bad value
+        # reads as absent, and the defined piece-boundary line (pos0=-1 chunk=0) keeps its values.
+        eng = pump_engine(["RHB rid=1 stage=read done=600 new=1142 reused=0 pass=0/1 ms=11000"])
+        s = eng.read_live["solo"]
+        self.assertIsNone(s["pos0"])
+        self.assertEqual(s["chunk"], 0)
+        eng._rhb("RHB rid=2 stage=read done=1 new=2 reused=0 pass=0/1 ms=1 chunk=1e400 pos0=12345")
+        s = eng.read_live["solo"]
+        self.assertEqual((s["chunk"], s["pos0"]), (0, 12345))     # (no exception escapes _rhb)
+        eng._rhb("RHB rid=3 stage=read done=1 new=2 reused=0 pass=0/1 ms=1 chunk=abc pos0=nan")
+        s = eng.read_live["solo"]
+        self.assertEqual((s["chunk"], s["pos0"]), (0, None))
+        eng._rhb("RHB rid=0 stage=read done=9216 new=27254 reused=0 pass=0/1 ms=5000 pos0=-1 chunk=0 slot=7")
+        s = eng.read_live["slots"][7]
+        self.assertEqual((s["pos0"], s["chunk"]), (-1, 0))
+
     def test_a_split_read_slot_beats_are_a_belt(self):
         # the same belt on a batch slot's read (rid=0): its slot entry only ever moves forward, the rate follows
         # the forward part - and the BRA that ends the read still clears the entry
@@ -359,6 +379,25 @@ class LiveEverySecond(unittest.TestCase):
         self.assertEqual(prev, 19456)
         self.assertEqual(self.svc._read_counted(stat), 19456)            # only the forward tokens were booked
         self.assertAlmostEqual(eng.eng.read_live["slots"][7]["rate"], 4864.0, places=1)
+
+    def test_a_piece_boundary_line_books_only_its_done(self):
+        # P124v2 review round 5: the piece-boundary RHB line (pos0=-1 chunk=0, rhb_solo_piece) behind
+        # the real adapter - no unit in flight, so the server's share guard (chunk > 0) takes nothing
+        # from it: the whole done= stands, booked straight, no share and no fall signal.
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        eng.feed(7, "RHB rid=0 stage=read done=4608 new=13824 reused=0 pass=10/78 ms=6000 stage_ms=0 "
+                    "pos0=4608 chunk=4608 slot=7")
+        self.assertIsNone(eng.step(it))
+        self.assertEqual(self.svc._read_counted(stat), 4608 + 590)      # (the unit's 10/78 share)
+        self.tick(0.3)                                                  # (the mocked clock must move:
+        eng.feed(7, "RHB rid=0 stage=read done=9216 new=13824 reused=0 pass=1/78 ms=6300 stage_ms=0 "   #  on_hb fires
+                    "pos0=-1 chunk=0 slot=7")                           #  once per beat timestamp)
+        self.assertIsNone(eng.step(it))
+        self.assertEqual(self.svc._read_counted(stat), 9216)            # (done only: the piece line)
+        self.assertEqual(len([r for r in self.svc.reads if r[0] is stat]), 1)   # (no restart signal)
 
     def test_a_stale_heartbeat_is_not_shown(self):
         # a read whose last beat is older than three seconds (the engine went quiet, a BRA was lost): the row
