@@ -263,3 +263,113 @@ REPORT-p125k-park-sync.md, three overstatements rewritten, wording only, no code
   **ok: 43 checks, 0 bad** each, one at a time.
 - `serve/qfn_engine.py` untouched (no server-side change this round, so no extraction was due);
   no GPU was touched.
+
+---
+
+# FIX-REPORT - P125k round 4 (FIX-FIRST of REVIEW-RESULT.md at 021500494, 2026-11-27)
+
+The card: fix every FIX-FIRST finding and the cheap NITs, one commit per finding. The BLOCKER's
+"to merge" sentence names the two ways out - land the real P125j fix round, **or** revert the grace
+default to 5 and arm the pause only where it is captured. The first way was run twice and came up
+empty (320dc3a5f: the p125j ref is its round-4 tip d8e25fd95, nothing newer in any worktree reflog,
+any dangling object or any remote); so this round takes the second, on this branch, which is what
+the review itself offers ("P125k itself does not depend on P125j and could ship without it" - the
+P125j merge stays, its inert/armed-anywhere parts are reverted and narrowed).
+
+## BLOCKER 1 - "P125j ships unfixed, and cannot be re-merged" - FIXED (500517c39, 92a62082c, c8f7c4d60)
+
+The re-merge half stands from the round-3 report (nothing to bring in). The three carried findings,
+each against the code as it now stands, and the first thing I checked for each - the review's line
+numbers were right where they said `serve/server.py` and right in substance, but the capture site is
+not inside `read_windows`: it sits in `read_part`'s `run` lambda (20913-20933, `sp.paused_chunk()` at
+20927) and `read_windows`/`read_windows_pl` (20779/20683) are the VERIFY-WINDOW readers, which use
+`ver.run` (no Prefill at all) - so they cannot produce "layer paused"; they take their STOP between
+windows ("cancelled", 20798; the pipelined loop's own check, 20714) and lose only the piece in
+flight, exactly as before P125j. The readers that CAN are the two `sp.run` sites with no capture
+after them, which is what the fix is about.
+
+**1a. The grace default, 0 in the config nothing compensates for - FIXED (92a62082c).**
+`serve/server.py:420`: `_env_seconds("SAGUARO_PRIORITY_IDLE_S", 0.0)` -> `5.0`, docstring and the
+history comment say why (the round-4 gate "0 only with a working pause" cannot hold while the cut
+is solo-only: see 1b/1c). `serve/test_priority.py:1605-1612`: `IdleGraceDefault` renamed to
+`test_the_default_grace_is_five`, asserts 5.0. `tools/card_tests/layer_pause.sh` is unaffected
+(it exports `SAGUARO_PRIORITY_IDLE_S` itself).
+
+**1b. "Under --batch the layer pause never fires; the read runs to its end beside a waiting person"
+- STANDS, BY DESIGN, and the two lines stay.** `serve/server.py:5844-5847` gates the read
+preemption on `keeps_stopped_read and not batch` (and the `QfnEngine` docstring 9600-9602 states the
+reason): a batch slot's cancelled read is DROPPED by the engine (`BRA 0 cancel` / BSTOP hand every
+checkpoint back, generate.cpp 17284), so cutting one loses the whole chunk - running on is the
+cheaper harm, and it is R122's pre-existing rule, not P125j's. What P125j added on top - a
+layer-boundary cut - could not help there anyway until the slot's read reader captures it (1c), so
+the batch lane keeps the between-chunk pause and the grace 5 (1a) as its protection. Card follow-up
+(the review's own wording): giving the slot reader a capture + the batch lane a cut is P125j's real
+fix round, owed by P125j, not this branch.
+
+**1c. The pause armed where nothing captures it - FIXED (500517c39).**
+`engines/qfn/src/program/generate.cpp:12838` armed `sp.stop_between_layers` once for the whole serve
+loop, live for EVERY `sp.run` reader: the batch slot's read thread (17152, joined at 17271, its err
+reported at 17289 -> `BRE <slot> layer paused`, rows dropped) and the piped read's own thread
+(21176 -> `e = read_err`, 21270-21272). Prefill's own gate (`lp_on`, prefill.cpp:2978) says only the
+solo path can pause; the ARM now says the same: the global arm is gone, and `read_part`'s `run`
+lambda arms it around its own `sp.run` behind a scope guard (`PauseArm`, disarms on every way out,
+an exception included) and reads `paused_chunk()/paused_layer()/...` right after - the one place the
+keep chain (23169+, `lp_pos`) can use the record. So: the solo GEN read (the shape the P125j rounds
+3 verified and the card script exercises - a GEN line, `win` false past `req_short_read`) keeps its
+layer cut; a slot's read, the piped read and the windows readers take the plain between-chunk /
+between-window STOP, byte-identical to pre-P125j. `prefill.hpp:348-351`'s doc for the hook says to arm
+only where `paused_chunk()` is read. No data race: every arm/disarm is on the serve-loop thread,
+between joined reads (the slot path already swaps `should_stop`/`stop_at_chunk` per admission,
+17083-17084).
+
+**1d. SETTINGS.md - FIXED (c8f7c4d60).** The `SAGUARO_PRIORITY_IDLE_S` row and the Request-priority
+paragraph now say the default is 5 again, and why the P125j rationale does not hold yet; the
+`SAGUARO_LAYER_PAUSE` row names the armed reads and says plainly that under `--batch` the server
+never cuts a batch read.
+
+## NIT 1 - the ungated restore tail/refresh ride the gated-out shapes - NOTHING TO FIX; CARD OWES ONE RUN
+
+The review's own words: "Correct per the contract... but the card run should cover a gated-out shape
+(layer split or multi-card) once". No code change is claimed by that; P125k's REPORT §5 contract
+(waits less, never under-wait; the device-wide pre-sync ahead of the copies still drains everything)
+is what §2 now states honestly (f3d89c6c7). Noted for the manager's card script: cover a gated-out
+shape once.
+
+## NIT 2 - the FAST_LANE light path gained a sync of this thread's copy stream - NO CHANGE
+
+Documented (REPORT §2, f3d89c6c7): `narrow_sync` waits the scoped streams PLUS the thread's private
+copy stream - it waits MORE than the old `LightSync::run`, never less, and it is the thread's own
+queued copies. Nothing to fix; a behavior change the review accepts as "documented".
+
+## NIT 3 - out-of-repo absolute paths in committed prose - FIXED (7f5ba4f54)
+
+`REPORT-p125k-park-sync.md:128`: the build command is now `QFN_GGML_DIR=../maya/third_party/llama.cpp`
+(the sibling worktree's checkout - `scratch/build-p125k/CMakeCache.txt`'s `STRATA_GGML_DIR` confirms
+that exact one, so the claim stays true) with "the box's CUDA 13.1 nvcc on PATH" for the compiler,
+instead of `/data/llm/maya/...` and `/usr/local/cuda-13.1/bin/nvcc`. `FIX-REPORT.md:109` (the round-2
+P125j line) names the venv interpreter descriptively instead of by path. Wording only.
+
+## NIT 4 - the wiring is proven by build + card, not unit - NO CHANGE (accepted)
+
+The review itself closes it: "The plan explicitly allows this". `wait_streams` carries the pure
+decision (65 checks); the override hook and the six arming sites are what the build + card run
+proves. Card: the manager's, next.
+
+## What I ran (plan-named module only, one at a time, nothing on a GPU)
+
+- `strata` rebuilt in `scratch/build-p125k-merge2`: 4/4, `saguaro-qfn` linked - `generate.cpp` and
+  `prefill.cpp` (the doc-only `prefill.hpp` touch) compile clean; the one warning is the pre-existing
+  unused `w` (now :15864). `generate.cpp` belongs only to `strata` (engines/qfn/CMakeLists.txt:803),
+  so no other target needed a rebuild.
+- `park_policy_test` (the only test module PLAN-p125k names): the build target (ninja no-work - the
+  fix touches nothing it reads) and standalone `g++ -std=c++20 -I engines/qfn/include` - **65 checks
+  passed** each.
+- `tools/saguaro/extract_qfn_engine.py`: `serve/qfn_engine.py` regenerated **byte-identical** (run
+  after the serve edits: the reverted default lives in the root `serve/server.py`, NOT in the qfn
+  engine source - `engines/qfn/serve/server.py` was not touched, so `qfn_engine.py` did not change).
+- `py_compile` on `serve/server.py` + `serve/test_priority.py`: OK.
+- NOT run: `serve/test_priority.py` itself and `layer_pause_test` - the card says run ONLY the test
+  modules the plan names, and PLAN-p125k names only `park_policy_test`; the two python edits are
+  one default and the matching assertion, checked by reading `_env_seconds` (unset -> the literal
+  default, serve/server.py:393-406) plus `py_compile`. The P125j rounds' own card must run
+  test_priority (68) and layer_pause_test (43).
