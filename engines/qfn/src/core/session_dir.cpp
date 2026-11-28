@@ -745,6 +745,10 @@ bool SessionDir::read_file(const std::string& path, SavedConversation& image, st
         if (transient) *transient = true;
         return false;
     }
+    // (here the first read failed for a NON-memory reason - usually a YaRN conversation's file refusing the plain
+    // identity (config fingerprint differs), which is why it is retried under the yarn one).  st now describes that
+    // retry, and a memory refusal on it is just as transient as one on the first attempt: the file may be fine, the
+    // RAM is just short.
     if (o_.id_yarn.config == 0 || !read(o_.id_yarn)) {
         if (transient && st.error == SessionError::memory) *transient = true;
         return false;

@@ -132,7 +132,7 @@ public:
     bool checkpoint_save(strata::core::ConversationCheckpoint& c, std::string& err);
     bool checkpoint_restore(const strata::core::ConversationCheckpoint& c, std::string& err);
     bool checkpoint_check(const strata::core::ConversationCheckpoint& c, std::string& err) const;
-    std::array<uint64_t, 5> checkpoint_sizes() const;
+    std::array<uint64_t, 5> checkpoint_sizes() const;   // the checkpoint arrays' byte counts (checkpoint_save)
     // the Monitor's "What fills the GPU" parts the host code cannot see on Metal: the window's weights (the dense
     // tensors when the experts stream, else the mapped model), its K/V, the expert arena and the prompt's own buffers
     void vram_parts(uint64_t& weights, uint64_t& kv, uint64_t& pool, uint64_t& prompt) const {
@@ -142,7 +142,7 @@ public:
             for (const mtl::Buffer& b : *v) kv += b.bytes;
         pool = st_ ? st_->arena_used_bytes() : 0;
         prompt = st_ ? st_->prompt_bytes() : 0;
-    }   // the checkpoint arrays' byte counts (checkpoint_save)
+    }
     // the K/V of the session's QSA state `st` (its ordinal in ss_->qsa_states): [kq, vq, ksc, vsc, pooled]
     bool kv_pools(const strata::core::QsaState* st, std::array<void*, 5>& p) const {
         if (ss_ == nullptr || ss_->qsa_states == nullptr || st == nullptr) return false;

@@ -52,8 +52,8 @@ public:
                     const std::function<uint64_t()>& recheck = {},
                     const std::function<bool(uint64_t)>& grow = {});
     uint64_t shrink_to() const { return shrink_to_; }
-    uint64_t arena_used_bytes() const { return arena_live_; }
-    uint64_t prompt_bytes() const { return standalone_bytes_; }   // the prompt's own buffers (standalone_region), 0 in the arena   // the arena's bytes in use (its retired slots left out)
+    uint64_t arena_used_bytes() const { return arena_live_; }   // the arena's bytes in use (its retired slots left out)
+    uint64_t prompt_bytes() const { return standalone_bytes_; }   // the prompt's own buffers (standalone_region), 0 in the arena
     bool ready() const { return !chunks_.empty(); }
     // the arena's buffers (at most 4, each within the device's maxBufferLength): chunk(i) for i >= count is chunk 0
     const mtl::Buffer& chunk(int i) const { return chunks_[(size_t) i < chunks_.size() ? (size_t) i : 0]; }
