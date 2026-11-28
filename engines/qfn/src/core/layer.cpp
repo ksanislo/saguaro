@@ -1,6 +1,7 @@
 
 // src/core/layer.cpp - the GDN layer, composed.  See the header for the operation order and its traps.
 #include "strata/core/capture_lock.hpp"
+#include "strata/core/conversation_memory.hpp"
 #include "strata/core/devnotes.hpp"
 #include "strata/core/kv_host_growth.hpp"
 #include "strata/core/layer.hpp"
@@ -1005,6 +1006,24 @@ uint64_t host_prefix_reregister_locked(HostPool& p, int64_t pages, bool& ok, boo
     return got;
 }
 #endif
+// P124e: Linux lets a pin succeed while ANY RAM is left, so the reactive relief below (on a refused pin) came too
+// late: a 546K conversation pinned +8 GiB, the 68 GiB expert tier kept all of it and the box swapped.  Before a grow
+// pins `bytes`, the RAM it leaves must stay above SAGUARO_HOST_GROW_RESERVE_MIB (default 4096: the 2560 MiB guard
+// floor + the read's own buffers); the expert RAM tier gives the shortfall back first.
+void host_make_room(uint64_t bytes) {
+    static const uint64_t reserve = [] {
+        const char* v = std::getenv("SAGUARO_HOST_GROW_RESERVE_MIB");
+        const long long m = v != nullptr ? std::atoll(v) : 4096;
+        return (uint64_t) std::max<long long>(0, m) << 20;
+    }();
+    const auto av = available_host_bytes();
+    if (!av || bytes == 0 || *av >= bytes + reserve) return;
+    const uint64_t ask = bytes + reserve - *av;
+    const uint64_t got = host_relief(ask);
+    std::fprintf(stderr, "saguaro: KV streaming: the host copy grows by %.2f GiB with %.2f GiB of RAM available: the "
+                         "expert RAM tier gave %.2f GiB back (%.2f asked)\n", (double) bytes / 1073741824.0,
+                 (double) *av / 1073741824.0, (double) got / 1073741824.0, (double) ask / 1073741824.0);
+}
 }  // namespace
 bool qsa_host_grow(const QsaState& st, int64_t cells) {
 #ifndef _WIN32
@@ -1020,6 +1039,7 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
         const uint64_t want = host_prefix_bytes(p, target);
         const uint64_t have = host_prefix_bytes(p, p.backed);
         const bool capped = host_cap() > 0 && g_kv_host_bytes.load() + (want - have) > host_cap();
+        if (!capped) host_make_room(want - have);   // (P124e: room first, not after a refused pin)
         if (!capped) {   // (the card may be reading the current prefixes: stop it before the remap)
             const strata::core::OnDevice on(p.dev);
             (void) cudaDeviceSynchronize();
@@ -1049,6 +1069,12 @@ bool qsa_host_grow(const QsaState& st, int64_t cells) {
     }
     const auto t0 = std::chrono::steady_clock::now();
     const std::vector<int64_t> had = p.pinned;   // (a failed step gives back what it pinned, every array)
+    {   // (P124e: room first - what this grow will pin, all arrays)
+        uint64_t grow = 0;
+        for (size_t i = 0; i < p.per.size(); ++i)
+            grow += (uint64_t) std::max<int64_t>(0, host_pieces(p, i, pages) - p.pinned[i]) * kHostPiece;
+        host_make_room(grow);
+    }
     cudaError_t why = cudaSuccess;               // (P124e nit: the refusal's CUDA string belongs in the log line a
                                                  // manager has to read - not every failure is "RAM or the driver")
     for (int round = 0;; ++round) {
