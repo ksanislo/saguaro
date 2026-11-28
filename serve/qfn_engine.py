@@ -1322,15 +1322,20 @@ class StrataEngine:
         entry["pass"] = [int(pi), int(pn)] if pi.isdigit() and slash and pn.isdigit() else None
         # P124v2 (PLAN-p124v2-read-rate-true): chunk=<tokens of the unit these passes count> and
         # pos0=<its first token position>.  done= is whole units; the server's readout shares the unit
-        # in flight (chunk x pass_i/pass_n) when done stands exactly at pos0 - reused (a split read's
-        # cross-card figure already holds its share: pos0 - reused < done, nothing is added).  Absent
-        # fields: no share, the server keeps the old figure.
+        # in flight (chunk x pass_i/pass_n) when done stands exactly at pos0 - reused: true until some
+        # boundary above the card's unit is revealed, after which the cross-card done already holds
+        # that share (read_progress.hpp); a pass fraction coming back DOWN on one unit is two cards
+        # of a split reporting it, and the server then stops adding shares and follows the engine's
+        # figure.  Absent fields: no share, the server keeps the old figure.  The fields are plain
+        # integers (%lld): int() of the string, so no float round-trip (a float'd "1e400" would make
+        # int() raise OverflowError on the pump thread); a malformed field reads as absent.  The
+        # piece-boundary line prints pos0=-1 chunk=0: no unit in flight, nothing to share.
         try:
-            entry["chunk"] = max(0, int(float(kv.get("chunk") or 0)))
+            entry["chunk"] = max(0, int(kv.get("chunk") or 0))
         except ValueError:
             entry["chunk"] = 0
         try:
-            entry["pos0"] = int(float(kv["pos0"])) if "pos0" in kv else None
+            entry["pos0"] = int(kv["pos0"]) if "pos0" in kv else None
         except ValueError:
             entry["pos0"] = None
         if prev:
