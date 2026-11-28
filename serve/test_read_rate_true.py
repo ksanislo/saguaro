@@ -681,6 +681,35 @@ class SplitReadFollowsEngineFigure(Base):
         self.assertEqual(stat.read_pos, self.NEW)
 
 
+class LateStepAfterClose(Base):
+    """P124v2 review round 5 (P3 nit): a read step that arrives AFTER the read's interval closed (a late
+    BRP after the BRA, or after the answer's first token landed before the closer ran) re-opens a fresh
+    leg - and _read_span_s measured the open leg from engine_t0 while read_leg_ms ALREADY held the
+    closed leg: the closed leg's wall time was counted twice, the span inflated and the rate read low.
+    The leg is now measured from read_cur's own start."""
+
+    def test_a_step_after_the_close_does_not_double_the_span(self):
+        eng = ReadingEngine(self.svc)
+        stat = self.reading()
+        eng.watch(7, stat)
+        it = eng.wait(7)
+        for k in range(1, 9):                            # 8 s of beats at 400 tok/s
+            eng.feed(7, f"RHB rid=0 stage=read done={400 * k} new=4000 reused=0 pass=1/40 "
+                        f"ms={k * 1000} stage_ms=0 slot=7")
+            self.assertIsNone(eng.step(it))
+            self.tick()
+        stat.first_token = self.t[0]                     # the answer started: the next poll closes the leg
+        self.svc._prefill_tok_s()
+        self.assertEqual(self.svc._read_span_s(stat, self.t[0]), 8.0)      # the closed leg stands
+        self.tick(5.0)
+        eng.feed(7, "BRP 7 3200 4000 13000 400.0 new_read=3200 read_ms=8000.0 stage_ms=0")   # late step
+        self.assertIsNone(eng.step(it))                  # re-opens the leg, no start hook: engine_t0 old
+        span = self.svc._read_span_s(stat, self.t[0])
+        self.assertLess(span, 9.0, f"span {span}: the closed leg was counted twice")   # 8 s, not 8 + 13
+        rate = self.svc._own_read_rate(stat, self.t[0], self.svc._read_counted(stat))
+        self.assertGreater(rate, 300.0, f"the late step drags the readout to {rate}")  # ~400, not ~150
+
+
 class PeaksTellTheTruth(Base):
     """The PEAKS half of PLAN-p124v-read-rate (ref/mangonel-peaks-shown.txt vs ref/mangonel-peaks-log.txt):
     the Monitor showed peak_decode 94.7 tok/s ("4668 tokens") and peak_prefill 171,860.8 tok/s

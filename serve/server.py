@@ -4497,13 +4497,16 @@ class Service:
 
     def _read_span_s(self, stat, now) -> float:
         """P124v2: the read's own elapsed span on the server's clock - the closed legs' wall time plus
-        the open leg's - with the staging time (the engine's stage_ms: the reused prefix's RAM -> VRAM
-        copy, not read time) left out.  0.0 when the server never saw the read's start (no start hook:
-        the engine's own pair is the figure then); a closed read's span stands at its end."""
+        the open leg's OWN time (from its own start: read_leg_ms already sums the closed legs, so a leg
+        re-opened after a close WITHOUT a start hook - a late step after BRA / after the first token -
+        must not re-count the closed legs' time from engine_t0; review round 5 nit),  with the staging
+        time (the engine's stage_ms: the reused prefix's RAM -> VRAM copy, not read time) left out.
+        0.0 when the server never saw the read's start (no start hook: the engine's own pair is the
+        figure then); a closed read's span stands at its end."""
         if getattr(stat, "engine_t0", None) is None:
             return 0.0
         r = getattr(stat, "read_cur", None)
-        wall = stat.read_leg_ms / 1000.0 + (max(0.0, now - stat.engine_t0)
+        wall = stat.read_leg_ms / 1000.0 + (max(0.0, now - r[1])
                                             if r is not None and r[2] is None else 0.0)
         stage = ((getattr(stat, "read_hb", None) or {}).get("stage_ms") or 0.0) / 1000.0
         return max(0.0, wall - min(wall, stage))
