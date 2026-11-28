@@ -31,6 +31,7 @@ inline constexpr cudaError_t cudaErrorNotReady = strata::gpu::kNotReady;
 inline constexpr cudaError_t cudaErrorMemoryAllocation = strata::gpu::kErrorMemoryAllocation;
 inline constexpr cudaError_t cudaErrorPeerAccessAlreadyEnabled = strata::gpu::kErrorPeerAccessAlreadyEnabled;
 inline constexpr cudaError_t cudaErrorStreamCaptureUnsupported = strata::gpu::kErrorUnsupported;
+inline constexpr cudaError_t cudaErrorUnknown = strata::gpu::Error(999);
 inline constexpr cudaMemcpyKind cudaMemcpyHostToDevice = strata::gpu::kHostToDevice;
 inline constexpr cudaMemcpyKind cudaMemcpyDeviceToHost = strata::gpu::kDeviceToHost;
 inline constexpr cudaMemcpyKind cudaMemcpyDeviceToDevice = strata::gpu::kDeviceToDevice;
@@ -66,6 +67,13 @@ inline cudaError_t cudaSetDevice(int d) { return strata::gpu::set_device(d); }
 inline cudaError_t cudaGetDeviceCount(int* n) { return strata::gpu::device_count(n); }
 inline cudaError_t cudaDeviceSynchronize() { return strata::gpu::device_synchronize(); }
 inline cudaError_t cudaMemGetInfo(size_t* f, size_t* t) { return strata::gpu::mem_get_info(f, t); }
+// uint64_t is unsigned long long on macOS, size_t unsigned long: CUDA's callers that pass uint64_t* still bind
+inline cudaError_t cudaMemGetInfo(unsigned long long* f, unsigned long long* t) {
+    size_t a = 0, b = 0;
+    const cudaError_t e = strata::gpu::mem_get_info(&a, &b);
+    *f = a; *t = b;
+    return e;
+}
 inline cudaError_t cudaGetDeviceProperties(cudaDeviceProp* p, int d) { return strata::gpu::get_device_properties(p, d); }
 inline cudaError_t cudaRuntimeGetVersion(int* v) { return strata::gpu::runtime_version(v); }
 inline cudaError_t cudaDriverGetVersion(int* v) { return strata::gpu::runtime_version(v); }
