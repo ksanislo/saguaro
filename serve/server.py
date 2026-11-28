@@ -6043,13 +6043,19 @@ class Service:
                         # no timer, and only for engines that keep a stopped read: GLM by its PAUSE, a multi
                         # conversation engine or solo with keeps_stopped_read (the line engine keeps a cancelled
                         # read, generate.cpp #573; maya-metal drops one, so it never claims it), and QFN by its
-                        # cut SOLO (the conversation stays live at the token reached, keeps_stopped_read) - a QFN
-                        # BATCH slot's cancelled read is dropped, nothing of it reaches the next BGEN, so its
-                        # read runs on; every other engine's read runs to its end rather than lose what it read.
+                        # cut SOLO (the conversation stays live at the token reached, keeps_stopped_read) - and
+                        # since P125m by its cut under --batch too: the read on the engine's own reader thread
+                        # pauses between two LAYERS of its chunk and is kept with the conversation (generate.cpp
+                        # captures the pause on that leg; the engine's INFO batch line says layer_pause=1 while
+                        # SAGUARO_LAYER_PAUSE is on - its pauses_batch_read), so the cut lands within one layer
+                        # pass. A batch engine without that pause still drops a cut read (nothing of it reaches
+                        # the next BGEN), so its read runs on, as before; every other engine's read runs to its
+                        # end rather than lose what it read.
                         if (prio < PRIORITY_HIGH and t0 is None and not pausing and not emb and not self.stopping
                                 and ((getattr(self.engine, "can_pause", False) and getattr(self.engine, "multi", 0))
                                      or (getattr(self.engine, "keeps_stopped_read", False)
-                                         and not getattr(self.engine, "batch", 0)))):
+                                         and (not getattr(self.engine, "batch", 0)
+                                              or getattr(self.engine, "pauses_batch_read", False))))):
                             pos = self._read_position()
                             if pos and pos[0] < pos[1] and self.fifo.step_aside(prio):
                                 # (the decision held; the last waiter can still have left the line by now -
@@ -10011,18 +10017,31 @@ def _qfn_engine_class():
         the fair-slice PAUSE of the GLM engine does not apply (QFN admits and yields slots itself).  A STOP is its
         cut: SOLO, a stopped request keeps its conversation, so an answer or a half-read prompt continues from the
         token it reached (see keeps_stopped_read) - which is what lets a priority preemption cut a solo QFN read.
-        In a batch slot a stopped request's conversation is kept for the answer, but its half-read prompt is not:
-        a stopped batch read runs again from 0 on its next BGEN, so the preemption never cuts a batch read."""
+        Under --batch the READS still run on the control lines (one at a time, the slots decoding beside them);
+        since P125m a stopped batch read is kept too - the engine pauses it between two LAYERS of its chunk and the
+        next request continues at that layer (the P125j pause, generate.cpp's concurrent reader leg) - and the
+        engine says so on its INFO batch line (`layer_pause=1`, off with SAGUARO_LAYER_PAUSE=0), which is what
+        pauses_batch_read reads.  A batch SLOT's cancelled read is still dropped ("a read that failed keeps
+        none"): those reads report no read position, so the preemption does not see them anyway."""
         can_pause = False
         keeps_stopped_read = True      # R122: a stopped (cut) request keeps its conversation LIVE at the token it
         #  reached, also in the middle of a prompt read, and the next request continues from it or parks it -
-        #  the SOLO GEN path only: engines/qfn/src/program/generate.cpp #1620 ("stopped between two windows ...
-        #  it stays the live conversation", printed as "cancelled request keeps its conversation: N tokens live").
-        #  A BATCH slot's cancelled read is dropped, not kept: "a read that failed keeps none" - the BRA 0 cancel
-        #  and the BSTOP path clear the slot's read and ids and hand every checkpoint back to the pool
-        #  (generate.cpp, the cancelled-read and BSTOP branches), and the driver frees the slot with nothing held
-        #  for the next BGEN (leaving "queued" it drops its held tokens) - which is why Service._sliced fires the
-        #  read preemption for this engine only while it runs solo (`not engine.batch`).
+        #  engines/qfn/src/program/generate.cpp #1620 ("stopped between two windows ... it stays the live
+        #  conversation", printed as "cancelled request keeps its conversation: N tokens live") and, for a read cut
+        #  BETWEEN two layers, the P125j keep ("the read paused at chunk c, layer l: ... MiB of chunk rows stay
+        #  with it").  P125m: that keep arms on the --batch concurrent-reader leg too, so the read preemption cuts
+        #  a batch read as well - but only while the engine reports the layer pause (pauses_batch_read below):
+        #  an older engine, or SAGUARO_LAYER_PAUSE=0, drops a cut batch read ("a read that failed keeps none" -
+        #  the BRA 0 cancel and the BSTOP path clear the slot's read and hand the checkpoints back), and such a
+        #  read must run on rather than lose what it read.
+
+        @property
+        def pauses_batch_read(self) -> bool:
+            """The engine stops a --batch prompt read at a LAYER boundary and keeps what it read: its INFO batch
+            line says `layer_pause=1` (generate.cpp, while Prefill::layer_pause_wanted() - SAGUARO_LAYER_PAUSE,
+            default on).  Service._sliced's read preemption cuts a batch read only with this; without it the old
+            rule holds and the read runs to its end rather than lose what it read."""
+            return bool(self.batch) and str(self.info.get("layer_pause") or "") == "1"
         vram_reserve = QE.StrataEngine.vram   # the VRAM give-back command; self.vram (below) is the Monitor's lines
 
         def __init__(self, *a, **kw):
