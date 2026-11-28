@@ -3295,10 +3295,19 @@ class RequestStat:
         # reader's rate, never wall time since the engine took it
         self.read_eng_n, self.read_eng_ms = 0, None     # live pair (the last progress step's)
         self.read_engine = None                         # the finished read's exact (new tokens, read_ms)
+        self.read_leg_ms = 0.0                          # P124v2: the read's closed legs' wall time (ms) so far
+        self.read_count_reset = 0                       # P124v2 round 6 (review P1): the tokens a mid-read
+        #  restart dropped from the readout's NUMERATOR - the span restarted with the attempt (read_leg_ms
+        #  zeroed, engine_t0 moved), so its counted tokens restart with it; _read_counted keeps them as
+        #  history; _read_start does NOT release it (round 8, P1: the next admission of the SAME request
+        #  stands on the restarted span - the exclusion and the closed legs it counts against age together)
         # U5 read heartbeat (PLAN-u5-read-heartbeat): the engine's last RHB report of the read in flight - stage
         # (staging the reused prefix from RAM, or reading new tokens), done/new (new tokens done of total),
         # reused, the rate over the last heartbeat interval and when it arrived (consumers ignore a stale one)
         self.read_hb = None
+        self.read_share_unit, self.read_split_share = None, False   # P124v2 round 5: the last shared unit's
+        #  [pos0, best pass fraction] and whether a fraction came back down on the same unit (two cards of a
+        #  split read beating it - from the flag on the in-flight share stops: the counter follows the engine)
         self.read_cur = None        # its read interval in Service.reads while one runs (closed when the answer starts)
         self.at_engine = False                            # it holds an engine place now (a fair slice lets it go)
         self.engine_t0 = None                             # when the engine took it (the real read time starts here)
@@ -4611,6 +4620,7 @@ class Service:
             return
         r[3] = max(0, stat.read_pos - r[5])             # (what THIS read counted, not the absolute position: a
         r[2] = max(r[1], (time.time() if at is None else at) - 0.0)   #  slice's next leg starts from the held prefix)
+        stat.read_leg_ms += 1000.0 * (r[2] - r[1])      # (P124v2: the read's own elapsed span sums its legs)
         self._read_prune(time.time())
 
     def _read_exact(self, stat, tokens):
@@ -4629,33 +4639,77 @@ class Service:
         while self.reads and self.reads[0][2] is not None and self.reads[0][2] < now - 2 * RATE_WINDOW_S:
             self.reads.popleft()
 
+    def _read_span_s(self, stat, now) -> float:
+        """P124v2: the read's own elapsed span on the server's clock - the closed legs' wall time plus
+        the open leg's OWN time (from its own start: read_leg_ms already sums the closed legs, so a leg
+        re-opened after a close WITHOUT a start hook - a late step after BRA / after the first token -
+        must not re-count the closed legs' time from engine_t0; review round 5 nit),  with the staging
+        time (the engine's stage_ms: the reused prefix's RAM -> VRAM copy, not read time) left out.
+        0.0 when the server never saw the read's start (no start hook: the engine's own pair is the
+        figure then); a closed read's span stands at its end."""
+        if getattr(stat, "engine_t0", None) is None:
+            return 0.0
+        r = getattr(stat, "read_cur", None)
+        wall = stat.read_leg_ms / 1000.0 + (max(0.0, now - r[1])
+                                            if r is not None and r[2] is None else 0.0)
+        stage = ((getattr(stat, "read_hb", None) or {}).get("stage_ms") or 0.0) / 1000.0
+        return max(0.0, wall - min(wall, stage))
+
     def _own_read_rate(self, st, now, n_own) -> float:
-        """One chat's live read rate (PLAN-qfn-per-request-read-stats + PLAN-p124v-read-rate): once the engine's
-        progress lines carry its own figures, its new_read over its own read_ms (the heartbeat's READ time:
-        staging / restore / queue / decode left out) - the reader's wall time no longer mixes in what the chat
-        spent queued or held at a piece boundary.  A read the engine beats for that stops beating (a stall, a
-        wedge): the readout FALLS with the silence instead of freezing at the last beat, and drains to nothing
-        past the window.  Without the engine's fields (an older engine): its counted tokens over the time since
-        the engine took it, as before - drained to 0 once nothing has landed for a full window."""
+        """One chat's live read rate (PLAN-qfn-per-request-read-stats + PLAN-p124v-read-rate +
+        PLAN-p124v2-read-rate-true, round 4): the CUMULATIVE tokens this read counted (the beats'
+        done plus the unit in flight's passed share, booked by _note_hb, and the progress steps)
+        over the time since THIS read started - the read's OWN elapsed span: now minus its own
+        start, legs summed, staging left out, the engine's own read_ms pair as the floor.  Never an
+        interval rate and never a figure measured from a re-baselined start: the card rc2 read
+        (serve/fixtures/card-rc2-read-rate-timeline.txt: the client's 17.8 s / 27,299 tokens, the true
+        ~1,580) showed ~2,393 mean and a 9,881 max - the shape an interval readout after a false
+        mid-read restart would give ((tokens since the restart) / (the ~0.5 s since it)); the capture
+        held no RHB lines and the replay that first blamed a whole-cut step falling below the booked
+        share never actually produced that fall (review round 5, P1 - the cause stays unproven), so
+        what this readout commits to is the cumulative figure, whatever the progress steps do.  Not
+        the beat's ms= alone either: that is the read's RUN clock over its settled legs, and a read
+        held between pieces pairs whole-chunk tokens with
+        a clock that stopped (the recorded mangonel: at 7.11 s the engine's own new/read_ms said
+        704.2 tok/s while the Monitor showed 2,099.4).  A read the engine beats for that stops
+        beating (a stall, a wedge): the readout FALLS with the silence instead of freezing at the
+        last beat, and drains to nothing past the window.  Without the         engine's fields (an older
+        engine): its counted tokens over the time since the engine took it, as before - drained to
+        0 once nothing has landed for a full window.  After a mid-read restart the NUMERATOR
+        re-baselines with the span (round 6, P1): the abandoned attempt's counted tokens stay in
+        _read_counted as history and never divide the new read's span - and the exclusion
+        SURVIVES the next admission hook (round 8, P1: _read_start fires on every
+        _admission_wait; clearing it there let those tokens back over the restarted span."""
+        excl = getattr(st, "read_count_reset", 0) or 0   # (P124v2 review round 6, P1: the restart branch
+        if excl:                                         #  zeroed read_leg_ms and moved engine_t0 - the
+            closed = sum(r[3] or 0 for r in self.reads   #  span restarted with the attempt; its counted
+                         if r[0] is st and r[2] is not None)   #  tokens must restart with it.  min(): a
+            n_own = max(0, n_own - min(excl, closed))    #  closed leg pruned out of the history total
+                                                         #  after the reset was counted in it, not out of here)
         if st.read_eng_ms and st.read_eng_ms > 0 and st.read_eng_n:
-            span = st.read_eng_ms / 1000.0
             r = getattr(st, "read_cur", None)
             if r is not None and r[2] is None and st.first_token is None:
                 if getattr(st, "read_hb", None) is not None:
                     # an engine that beats every ~0.23 s: a beat older than the cadence plus one Monitor poll is
-                    # silence - the readout falls with it (a stalled read shows a falling rate, never a frozen one)
-                    gap = now - (st.read_t1 or now)
-                    if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
+                    # silence - the readout falls with it (a stalled read shows a falling rate, never a frozen
+                    # one).  An engine whose progress steps are sparse (a BRP per chunk, none between) is not
+                    # beating: its silence is the cadence, and the span below is the read's own elapsed.
+                    if now - (st.read_t1 or now) > RATE_WINDOW_S + READ_BEAT_STALE_S:
                         return 0.0
-                    span += max(0.0, gap - READ_BEAT_STALE_S)
-            elif r is None or r[2] is not None:
-                # the read is over (BRA / a leg's close) but its answer has not started: its true rate ages
-                # with the wall time since it ended, and drops out once it is only history
-                gap = now - (r[2] if r is not None else st.read_t1 or now)
-                if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
-                    return 0.0
-                span += max(0.0, gap - READ_BEAT_STALE_S)
-            return st.read_eng_n / span
+                return n_own / max(st.read_eng_ms / 1000.0, self._read_span_s(st, now))
+            # Two shapes land here once the open-read branch above cannot hold: the read is OVER (BRA /
+            # a leg's closed and no fresh step re-opened it) but its answer has not started - its true
+            # rate ages with the wall time since it ended, and drops out once it is only history; or
+            # (round 1's should-fix 2) the leg is still OPEN but first_token is set already (a token
+            # landed before _prefill_tok_s's closer ran) - r[2] is None there, so it ages from the last
+            # read step instead.  Both drain the same way below.
+            ended = r[2] if r is not None and r[2] is not None else st.read_t1 or now
+            gap = now - ended
+            if gap > RATE_WINDOW_S + READ_BEAT_STALE_S:
+                return 0.0
+            span = max(st.read_eng_ms / 1000.0, self._read_span_s(st, ended))
+            span += max(0.0, gap - READ_BEAT_STALE_S)
+            return (n_own or st.read_eng_n) / span
         if n_own and st.engine_t0 and now > st.engine_t0:
             r = getattr(st, "read_cur", None)
             if r is not None and r[2] is None and st.read_t1 and now - st.read_t1 > RATE_WINDOW_S:
@@ -4665,10 +4719,11 @@ class Service:
 
     def _read_counted(self, stat) -> int:
         """The prompt tokens this request's reads have counted (closed intervals plus an open one's steps) - what
-        the Monitor's figures and the tests read back."""
+        the Monitor's figures and the tests read back.  int(): the -> int annotation stands even if a booking
+        ever hands a fractional step (the RHB share at _note_hb is already booked whole)."""
         n = sum(r[3] or 0 for r in self.reads if r[0] is stat and r[2] is not None)
         r = getattr(stat, "read_cur", None)
-        return n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0)
+        return int(n + (max(0, stat.read_pos - r[5]) if r is not None and r[2] is None else 0))
 
     def _read_start(self, stat):
         """(a driver's hook) the engine took this request - a QFN admission after its wait for a slot says so too:
@@ -4677,6 +4732,24 @@ class Service:
         with self.status_lock:
             self._read_close(stat, now)
             stat.engine_t0 = now
+            stat.read_hb = None                         # (round 3 nit, round 4 commit: the previous read's last
+            #  beat is not this read's - _read_span_s subtracts read_hb's stage_ms from the span and the
+            #  _note_read belt keys on its done/chunk; both belong to the interval that just closed)
+            stat.read_share_unit, stat.read_split_share = None, False   # (round 5: a fresh read shares its units
+            #  again until a split's two cards show themselves on it)
+            #  (round 8, P1: read_count_reset is NOT cleared HERE - round 6's release re-opened
+            #  round 6's own spike.  This hook fires on EVERY _admission_wait (:9921-9923, the
+            #  thread-local installed at :6340): the next admission of a read whose span the
+            #  restart branch JUST zeroed (a retry's or a slice's next leg) put the abandoned
+            #  attempt's counted tokens back over a span that no longer holds their time -
+            #  3,500..1,500 tok/s on a 300 tok/s retry (the round-6 gate's own shape with this
+            #  hook between restart and steps, scratch probe), and _prefill_tok_s feeds that
+            #  to peak_prefill (read_eng_n >= PEAK_MIN_READ_TOKENS over the retry's pair).
+            #  Without a restart the exclusion is 0, so a plain slice leg is unchanged; with
+            #  one it stays coherent across this hook: the snapshot and the closed intervals
+            #  it counts against both survive it, and min(excl, closed) tracks their pruning -
+            #  what ages out with the history then reads LOW, never the spike: the pair floor
+            #  keeps the readout under the engine's own figure.)
             self._read_open(stat, now)
 
     def _note_read_safe(self, *a):
@@ -4707,11 +4780,60 @@ class Service:
         own time (rt): the request's live rate is then done / rt - the tokens really read over the time the read
         really ran, with no staging / restore / queue / decode time mixed in (that mixing is what showed
         single-digit tok/s during a read that runs at 100-800).  The beat's own interval rate is NOT a peak
-        candidate: only the readout itself feeds the peaks.  No step of its own while it stages (done 0: nothing
-        to count)."""
+        candidate: only the readout itself feeds the peaks.  Nothing counts while it stages (the share is of a
+        chunk being READ); while a chunk is being read its passed share counts (P124v2, below)."""
         stat.read_hb = dict(hb, at=time.time())
         n = hb.get("done") or 0
+        # P124v2 (PLAN-p124v2-read-rate-true): done= counts WHOLE units (chunks - or pieces, when the
+        # read pipelines) and never the unit in flight; the line's pass=<i>/<n> counts that unit's layer
+        # passes, and its pos0=/chunk= say the unit being read: pos0 - reused is where done stands when
+        # only whole units are done.  The readout then adds the in-flight unit's share,
+        # done + chunk x pass_i/pass_n - so the read's first chunk shows its true rate, never 0.0
+        # (the recorded mangonel sat at 0.0 for the first 1.8 s, and saw-toothed 1,178 -> 801 -> 1,214
+        # around a true 1,568 with whole chunks landing only at their ends).  When done stands further
+        # along than the reporting card's unit start - once some boundary above it has been revealed,
+        # a split read's cross-card figure already holds the share - nothing is added; between revealed
+        # boundaries done == the unit start for EVERY card (round 5, P2 - the flag below).  A beat
+        # whose tokens are only the share counts too.
+        chunk, pr, pos0 = hb.get("chunk") or 0, hb.get("pass"), hb.get("pos0")
+        new = hb.get("new") or 0
+        if chunk > 0 and pr and pr[1] > 0 and hb.get("stage") != "stage" and new > n and pos0 is not None \
+                and pos0 - (hb.get("reused") or 0) == n:
+            frac = min(1.0, max(0.0, pr[0] / pr[1]))
+            # P124v2 (review round 5, P2): on a layer split this guard holds for EVERY card beating the
+            # unit in flight (read_progress.hpp:89-101: no part credit while no boundary above the
+            # reporting card's position has been revealed, so done stands exactly at the unit start for
+            # all of them) - and the belt below keeps the MAX of their shares, so the counter would
+            # follow the leading card, up to a whole unit of tokens over the engine's own cross-card
+            # figure.  A pass fraction that comes back DOWN on the SAME unit is two cards reporting it
+            # (one card's passes never go back): flag the read - from the flag on no share is added
+            # anywhere in it and the counter follows the engine's own figure, which is never behind its
+            # own steps.  Until a lower fraction lands the cards are indistinguishable from a single
+            # card (the line carries no card id) - what was booked for that unit stands, and a later
+            # step below it corrects DOWN in _note_read, it does not re-open the read (P1).
+            unit = getattr(stat, "read_share_unit", None)
+            if unit is None or unit[0] != pos0:
+                unit = [pos0, frac]
+            elif frac < unit[1]:
+                stat.read_split_share = True
+            if frac > unit[1]:
+                unit[1] = frac
+            stat.read_share_unit = unit
+            if not getattr(stat, "read_split_share", False):
+                n = int(n + min(chunk, new - n) * frac)
         if n > 0:
+            if n < stat.read_pos:
+                # P124v2 (review round 2): the booking is belted like the engine belts done= - a beat never
+                # books a step BACKWARDS.  On a split read the guard above holds for every card working the
+                # unit in flight while their pass= fractions differ: the lead card books done + chunk x share,
+                # the lagging card's next beat (or either card's once done moves off the boundary and the
+                # guard fails and only the shared done= books) would book below that - and a booked decrease
+                # is _note_read's engine-counter-went-backwards signal: close the interval, double the closed
+                # leg in _read_counted, re-baseline engine_t0 mid-read - the span collapse this plan is about.
+                # Real restarts stand: _rhb belts done per new/rid and starts that belt over on a new read, a
+                # retry's or slice's first PP / BRP steps book below read_pos through the unbelted _note_read
+                # path (its restart branch resets read_pos, releasing this belt), BRA's exact figures correct.
+                n = stat.read_pos
             rt = hb.get("rt")
             self._note_read(stat, n, None, False, False, rt if rt and rt > 0 else hb.get("ms"))
 
@@ -4775,13 +4897,47 @@ class Service:
                     r[4].append((now, n_read))
                 self._read_close(stat, now)             # (the engine's BRA ENDS this read: from here its tokens
                 return                                  #  spread over the read itself, never at its end)
-            if r is None:                               # the first step of a read the driver announced no start for
-                r = self._read_open(stat, now)
-            elif n_read < stat.read_pos:                # a new read of this request's prompt (a retry, a slice's leg)
-                self._read_close(stat, now)
-                stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
-                stat.read_eng_n, stat.read_eng_ms = 0, None   # (the engine's live pair restarts with the read)
-                self._read_open(stat, now)              # (counts from nothing again; the engine's counter reset)
+            was_open = r is not None                    # (the fall handling and the restart branch are for an
+            if r is None:                               #  OPEN read - a read whose interval closed opens a
+                r = self._read_open(stat, now)          #  fresh one first, exactly as before this branch)
+            if was_open and n_read < stat.read_pos:     # the engine's counter went back (round 2's restart
+                hb = getattr(stat, "read_hb", None)     #  signal) - or it merely lags the share its beats booked
+                if not (hb is not None                  # P124v2 round 5 (the review's P1): NOT a restart while a
+                        and now - hb.get("at", 0.0)     #  fresh live beat of THIS read (routed to this stat by its
+                        <= RATE_WINDOW_S + READ_BEAT_STALE_S   #  slot; its driver belt restarts with new/rid) says
+                        and n_read >= max(hb.get("done") or 0,   #  so: the step agrees with the beat's own done=,
+                                          hb.get("chunk") or 0)  #  at least one WHOLE unit stands closed in the
+                        and stat.read_pos - n_read      #  engine's counter (n_read >= its unit's chunk= - a
+                                <= (hb.get("chunk") or 0)):     #  restart of a read whose beats booked only the
+                    # P124v2 (review round 2): a real restart of this request's prompt (a retry, a slice's leg).  #  share of a still-OPEN first unit has n_read = 0
+                    # The engine's counter went back below the live beat's own figure, over one unit's size, or  #  behind that gate and takes the branch below),
+                    # with no live beat: close the interval, reset the counter, the engine pair and the span,    #  and the fall is at most that unit's size.  Then
+                    # re-baseline engine_t0, and count from nothing again - the share-booking belt in _note_hb   #  the engine's cumulative figure simply runs behind
+                    # never wraps these steps: that is what keeps this branch alive.                             #  the in-flight share the beats booked (a split
+                    self._read_close(stat, now)          #  read's cross-card figure, P2).  Nothing closes: the
+                    stat.read_pos, stat.read_avg, stat.read_last, stat.read_prev_t = 0, None, None, None
+                    stat.read_eng_n, stat.read_eng_ms = 0, None   # (the engine's live pair restarts with the read)
+                    stat.read_leg_ms = 0.0              # (P124v2: and so does its own elapsed span)
+                    stat.read_count_reset = self._read_counted(stat)   # (P124v2 review round 6, P1: the
+                    #  span re-baselines with this line and the engine_t0 move, so the rate's NUMERATOR does
+                    #  too - the readout divides the RETRY's tokens by the RETRY's span; the abandoned
+                    #  attempt's closed intervals stay in _read_counted as the history figure, and
+                    #  _own_read_rate subtracts them back out again)
+                    stat.read_hb = None                 # (round 3 nit: and its last beat goes too - _read_span_s
+                    #  subtracts read_hb's stage_ms, and the PREVIOUS read's stale staging figure would shrink the
+                    #  new read's span; the gate above keys on the beat's done/chunk alike)
+                    stat.read_share_unit, stat.read_split_share = None, False   # (round 5: the split-share flag and
+                    #  the unit tracker belong to the read that just ended - the retried read's beats share again)
+                    if stat.engine_t0 is not None:
+                        # (P124v2 review nit 3: the open leg's start re-baselines too - _read_span_s adds
+                        #  now - engine_t0 to the span, and the counter going backwards mid-admission would
+                        #  otherwise carry the PREVIOUS read's whole time into the new read's span)
+                        stat.engine_t0 = now
+                    self._read_open(stat, now)          # (counts from nothing again; the engine's counter reset)
+                # else (round 5, replacing round 4's belt-UP): let the step book as it came - read_pos corrects
+                # DOWN to the engine's own figure below.  Belting it up kept a split read's leading card above
+                # the engine's cross-card figure until BRA's exact (the review's P2); the cumulative readout of
+                # round 4 already took the interval spike out, without the belt.
             d = n_read - stat.read_pos
             stat.read_pos = n_read
             if stat.read_t0 is None:
@@ -10152,6 +10308,17 @@ def _qfn_engine_class():
                                     hcb = getattr(tls, "on_hb", None)                       #  the line itself
                                     if hcb is not None:
                                         hcb({**entry, "done": base + entry["done"]})        # (legs add up, as on BRP)
+                                        #  (review round 8, low - documented, not fixed: ONLY done
+                                        #  shifts by base; pos0/new/reused stay engine-relative, so
+                                        #  once a slice's base > 0 (set by its BRA below) the share
+                                        #  guard's pos0 - reused == done and new > done cannot hold
+                                        #  and this leg gets NO in-flight share - it books whole
+                                        #  units, the P124v behavior: direction-safe (never above
+                                        #  the engine's pair, the same conservative class as the
+                                        #  split card, REPORT open question 3) but the plan's
+                                        #  never-0-after-the-first-RHB property then holds for a
+                                        #  whole read and its FIRST leg, not for a slice's legs
+                                        #  after their BRA.)
                             if f[:2] == ["BRP", str(slot)] and len(f) >= 4 and f[2].isdigit() and f[3].isdigit():
                                 kv = dict(x.partition("=")[::2] for x in f[5:] if "=" in x)
                                 rate = float(f[5]) if len(f) >= 6 else None
