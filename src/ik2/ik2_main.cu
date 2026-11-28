@@ -28,6 +28,7 @@
 #include "ik2_lane.hpp"
 #include "ik2_off.cuh"
 #include "ik2_plan.hpp"   // (the load-time sizing decision as helpers: the committed start step vs the ceiling)
+#include "ik2_vmm.hpp"    // (P125o a2 / a3: the elastic K / V as an address range with chunks of VRAM behind it)
 #include "mm3_link.cuh"   // (two GPUs: the copies between them, peer only where tested)
 #include "maya/artifact/gguf_reader.hpp"
 #include "sf_codecs.h"
@@ -532,14 +533,69 @@ int g_kv_stream = -1;        // -1 auto, 0 off, 1 on
 int g_kv_resident = -1;      // full visits whose K / V stay in VRAM (-1: as many as fit)
 // (P125e a1, the elastic start step: SAGUARO_IK2_KV_START) the positions of the global layers' K / V the plan and the
 // layout commit to at the load - what a conversation uses at its start, not the --max-context ceiling (which costs
-// ~0 until used: the ceiling's rows past the commit are never written, and the engine announces the committed
-// context as the conversation's ceiling until step 2 grows them; 0: the whole ceiling, as before).  Where the
-// ceiling's cache would crowd every expert out of VRAM but the committed one leaves them room, the experts stay
-// (src/ik2/ik2_plan.hpp, ref/REPORT-p125b-ik2-vram.md); g_kv_run is the ceiling the engine then runs and says.
+// ~0 until used; 0: the whole ceiling, as before).  Where the ceiling's cache would crowd every expert out of VRAM
+// but the committed one leaves them room, the experts stay (src/ik2/ik2_plan.hpp, ref/REPORT-p125b-ik2-vram.md).
+// P125o (a2 / a3) makes the commit growable: on a VMM-backed start the global K / V is the ceiling's address range
+// with physical chunks behind the committed positions and the engine still runs and announces the whole ceiling - a
+// request commits the chunks of the positions it writes before its first pass (kv_grow below).  Without the
+// virtual memory API the fallback is the a1 start: g_kv_run drops to the commit, conversations run to it, and the
+// committed K / V is one plain allocation as before.
 int g_kv_start = ik2plan::kKvStartDefault;
-bool g_kv_elastic = false;   // the elastic start was taken (the global layers' K / V laid out for g_kv_run only)
-int g_kv_run = 0;            // the conversation's ceiling the engine announces and enforces (= ctx unless elastic)
+bool g_kv_elastic = false;   // the elastic start was taken (the global layers' K / V laid out for g_kv_commit only)
+int g_kv_run = 0;            // the conversation's ceiling the engine announces and enforces (= ctx unless the fallback lowers it)
+int g_kv_commit = 0;         // the positions of the global layers' K / V laid out at the load (= ctx unless elastic)
 std::vector<char> g_kv_host; // [visit] 1: its K / V in host RAM (set by the plan)
+// (P125o a2: the elastic global K / V as VMM ranges - one per K / V buffer of a full visit, the ceiling's address
+//  range reserved at the load, chunks of VRAM committed in position order as conversations reach them (a3).  All
+//  buffers share the geometry (the row is the same across the global visits), so one chunk counter covers them.)
+bool g_kv_vmm = false;       // the elastic K / V is VMM-backed (grows on demand; the fallback: false, a1's layout)
+struct KvVma {
+    ik2::vmm::Range k, v;
+};
+std::vector<KvVma> g_kvvma;  // the full visits' K / V ranges, in the order they were allocated
+int g_kv_rpc = 0;            // positions a committed chunk covers (4096 rounded up to the granule, ik2_plan.hpp)
+size_t g_kv_chunk_b = 0;     // bytes one chunk holds in one buffer
+int g_kv_n_chunks = 0;       // chunks in the ceiling's range
+int g_kv_chunks = 0;         // chunks committed so far (every buffer, committed in lockstep)
+
+// (a3: put VRAM behind the chunks covering positions [0, n) of the elastic global K / V, in the position order,
+//  before anything writes one - host-side, at a request's start or where a kept conversation's rows land, never
+//  per token and never in a kernel; a no-op on every other layout.  VRAM short: what this call mapped goes back,
+//  the old commit stands untouched, and the caller fails just its request (giving the experts' VRAM back for the
+//  room is b4, the next step; the CUDA graphs stay valid either way - the base pointer never moves))
+bool kv_grow(int n, std::string& err) {
+    if (!g_kv_vmm || n <= 0) return true;
+    const int need = ik2plan::kv_chunks_for(n, g_kv_rpc);
+    if (need <= g_kv_chunks) return true;
+    const size_t bytes = (size_t) need * g_kv_chunk_b;
+    const size_t old = (size_t) g_kv_chunks * g_kv_chunk_b;
+    bool ok = true;
+    for (auto& r : g_kvvma) {
+        if (!r.k.commit(bytes, err) || !r.v.commit(bytes, err)) { ok = false; break; }
+    }
+    if (!ok) {
+        for (auto& r : g_kvvma) r.k.shrink(old), r.v.shrink(old);
+        cudaGetLastError();
+        return false;
+    }
+    // (zero the freshly committed span: cuMemCreate / hipMemCreate promise no more than cudaMalloc does about
+    //  what a new page reads as, and the load's DEPTH memset stops at the start step - while SAGUARO_IK2_DEPTH
+    //  reads the unwritten rows up to N as zeros and attention's tiles may touch a row the visit has not
+    //  written yet.  Drivers hand out zeroed pages today; this does not bet the answers on it.  One memset a
+    //  chunk on g_s, beside the commit - never per token; the span is below the ceiling's chunk count, so
+    //  inside every range's mapped bytes)
+    const size_t zero_hi = std::min(bytes, (size_t) g_kv_n_chunks * g_kv_chunk_b);
+    int prev_dev = 0;
+    cudaGetDevice(&prev_dev);
+    for (auto& r : g_kvvma) {
+        if (r.k.dev != prev_dev) cudaSetDevice(r.k.dev);   // (the elastic start is one GPU's; belt and braces)
+        CU(cudaMemsetAsync(r.k.ptr() + old, 0, zero_hi - old, g_s));
+        CU(cudaMemsetAsync(r.v.ptr() + old, 0, zero_hi - old, g_s));
+    }
+    cudaSetDevice(prev_dev);
+    g_kv_chunks = need;
+    return true;
+}
 uint8_t *g_kv_stage_k = nullptr, *g_kv_stage_v = nullptr;   // a host visit's rows for a prompt chunk (VRAM)
 // The staging pair is the "swing" visit's VRAM: a full visit kept in VRAM for tokens that, while a prompt runs, has
 // its rows in RAM like the streamed ones (copied there first) and lends its VRAM to the staging - one more visit in
@@ -2064,18 +2120,24 @@ void run_layer_attn(const Model& M, Layer& Ly, int l, int T, int pos0, const flo
     const float k_scale = c.qk_clip <= 28.0f ? 16.0f : 1.0f;
     const float v_scale = 32.0f;
     const float k_inv = 1.0f / k_scale, v_inv = 1.0f / v_scale;
+    // (the write epilog's ring: a VMM-backed elastic K / V holds Vi.kv_cap as the *committed* prefix of the
+    //  ceiling's range, not a layout to wrap in - a full visit writes the row of a position at that position, the
+    //  way its attention reads it (attn_kv_cap below), and a3's kv_grow has mapped that stretch before the write.
+    //  So the cap the kernels modulo by is 0 for a non-sliding visit here, as it always was for the reads; the
+    //  sliding ring and every plain layout keep Ly.kv_cap, where pos < kv_cap makes the wrap the identity)
+    const int write_kv_cap = (g_kv_vmm && !Ly.sliding) ? 0 : Ly.kv_cap;
     if (g_kv_q4) {
         k::prep_qkv_r_q4(q_p, Ly.q_clip, W.kconv, Ly.kc4, W.vconv, Ly.vc4, r_p, Ly.r_clip, T, c.H, c.KV, c.D, c.d_rel,
                          c.qk_clip, c.rel_clip, c.eps, Ly.sliding ? nullptr : pos_p, c.alpha, c.n_floor, pos0,
-                         Ly.kv_cap, g_s);
+                         write_kv_cap, g_s);
     } else if (g_kv_fp8) {
         k::prep_qkv_r_fp8(q_p, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, Ly.r_clip, T, c.H, c.KV, c.D, c.d_rel,
                           c.qk_clip, c.rel_clip, c.eps, Ly.sliding ? nullptr : pos_p, c.alpha, c.n_floor, pos0,
-                          Ly.kv_cap, k_scale, v_scale, g_s);
+                          write_kv_cap, k_scale, v_scale, g_s);
     } else {
         k::prep_qkv_r_f16(q_p, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, Ly.r_clip, T, c.H, c.KV, c.D, c.d_rel,
                           c.qk_clip, c.rel_clip, c.eps, Ly.sliding ? nullptr : pos_p, c.alpha, c.n_floor, pos0,
-                          Ly.kv_cap, g_s);
+                          write_kv_cap, g_s);
     }
 
     g_pf.lap(g_pf.ph[Ly.sliding][2]);
@@ -3380,6 +3442,10 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
         // without a window, its keys the whole context, is bound by their arithmetic)
         const bool mma = g_attn_mma == 1 || (g_attn_mma == 2 && !Ly.sliding);
         const int ring = Ly.sliding ? Ly.kv_cap : 0;
+        // (the write epilog's ring: as in forward()'s prompt path - a VMM-backed full visit writes its rows by
+        //  absolute position (ring 0), the same addressing its attention reads by; every other layout keeps
+        //  Ly.kv_cap, where the wrap is the identity)
+        const int wcap = g_kv_vmm ? ring : Ly.kv_cap;
         const int ns = Ly.sliding ? std::min(g_mma_split, std::max(1, (c.window + 63) / 64)) : g_mma_split;
         uint16_t* q16 = mma ? W.x16 : nullptr;
         // (a streamed visit: the kernel's blocks slot by slot from the ring, then their combine - the same partials)
@@ -3401,7 +3467,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
         };
         if (g_kv_q4) {
             k::prep_qkv_r_q4_at(q_p, Ly.q_clip, W.kconv, Ly.kc4, W.vconv, Ly.vc4, r_p, Ly.r_clip, c.H, c.KV, c.D, c.d_rel,
-                                c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, q16, g_s,
+                                c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, wcap, q16, g_s,
                                 Ly.sink16, W.xq, C, W.sink);
             if (mma)
                 k::attn_decode_mma_q4(q16, r_p, W.sink, Ly.kc4, Ly.vc4, ring, c.H, c.KV, W.pos, 0, ns, qk_scale,
@@ -3411,7 +3477,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
                                      qk_scale, Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, g_s);
         } else if (g_kv_fp8) {
             k::prep_qkv_r_fp8_at(q_p, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, Ly.r_clip, c.H, c.KV, c.D, c.d_rel,
-                                 c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap,
+                                 c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, wcap,
                                  k_scale, v_scale, q16, g_s, Ly.sink16, W.xq, C, W.sink);
             if (rung) {
                 ring_parts([&](uint8_t* kr, uint8_t* vr, int b0, int nbk) {
@@ -3432,7 +3498,7 @@ void fast_token_launches(Model& M, Work& W, OutMode out_mode) {
                                       W.o, g_s);
         } else {
             k::prep_qkv_r_f16_at(q_p, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, Ly.r_clip, c.H, c.KV, c.D, c.d_rel,
-                                 c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, q16,
+                                 c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha, c.n_floor, wcap, q16,
                                  g_s, Ly.sink16, W.xq, C, W.sink);
             if (rung) {
                 ring_parts([&](uint8_t* kr, uint8_t* vr, int b0, int nbk) {
@@ -4496,6 +4562,8 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
         const int extent = Ly.sliding ? c.extent_swa : c.extent;
         const int window = Ly.sliding ? c.window : (1 << 30);
         const int ring = Ly.sliding ? Ly.kv_cap : 0;
+        // (the write epilog's ring, as in the token and prompt paths: a VMM-backed full visit writes absolute)
+        const int wcap = g_kv_vmm ? ring : Ly.kv_cap;
         const int ns = Ly.sliding ? std::min(g_mma_split, std::max(1, (c.window + 63) / 64)) : g_mma_split;
         uint16_t* q16 = W.x16;
         if (ex) {   // (each token through fast_token_launches' own clips and attention, its position from W.pos + t)
@@ -4511,7 +4579,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 if (g_kv_fp8) {
                     k::prep_qkv_r_fp8_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, r_ld, Ly.r_clip,
                                             T, c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding,
-                                            c.alpha, c.n_floor, Ly.kv_cap, k_scale, v_scale, W.x16, g_s, Ly.sink16, W.xq,
+                                            c.alpha, c.n_floor, wcap, k_scale, v_scale, W.x16, g_s, Ly.sink16, W.xq,
                                             C, W.sink);
                     toks = k::attn_decode_mma_toks_fp8(W.x16, HD, r_p, r_ld, W.sink, Ly.kc8, Ly.vc8, ring, c.H, c.KV,
                                                        W.pos, T, ns, qk_scale / k_scale, 1.0f / v_scale, Ly.rel_proj,
@@ -4519,7 +4587,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 } else {
                     k::prep_qkv_r_f16_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, r_ld, Ly.r_clip, T,
                                             c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding,
-                                            c.alpha, c.n_floor, Ly.kv_cap, W.x16, g_s, Ly.sink16, W.xq, C, W.sink);
+                                            c.alpha, c.n_floor, wcap, W.x16, g_s, Ly.sink16, W.xq, C, W.sink);
                     toks = k::attn_decode_mma_toks_f16(W.x16, HD, r_p, r_ld, W.sink, Ly.kc, Ly.vc, ring, c.H, c.KV, W.pos,
                                                        T, ns, qk_scale, Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o,
                                                        gate_p, gate_ld, W.x16, g_s);
@@ -4535,7 +4603,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 if (g_kv_q4) {
                     k::prep_qkv_r_q4_at(qt, Ly.q_clip, W.kconv + (size_t) t * KD, Ly.kc4, W.vconv + (size_t) t * KD,
                                         Ly.vc4, rt, Ly.r_clip, c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, pt,
-                                        !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, q16t, g_s, Ly.sink16,
+                                        !Ly.sliding, c.alpha, c.n_floor, wcap, q16t, g_s, Ly.sink16,
                                         W.xq + (size_t) t * C, C, sk);
                     if (mma)
                         k::attn_decode_mma_q4(q16t, rt, sk, Ly.kc4, Ly.vc4, ring, c.H, c.KV, pt, 0, ns, qk_scale,
@@ -4547,7 +4615,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 } else                 if (g_kv_fp8) {
                     k::prep_qkv_r_fp8_at(qt, Ly.q_clip, W.kconv + (size_t) t * KD, Ly.kc8, W.vconv + (size_t) t * KD,
                                          Ly.vc8, rt, Ly.r_clip, c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps,
-                                         pt, !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, k_scale, v_scale, q16t, g_s,
+                                         pt, !Ly.sliding, c.alpha, c.n_floor, wcap, k_scale, v_scale, q16t, g_s,
                                          Ly.sink16, W.xq + (size_t) t * C, C, sk);
                     if (mma)
                         k::attn_decode_mma_fp8(q16t, rt, sk, Ly.kc8, Ly.vc8, ring, c.H, c.KV, pt, 0, ns,
@@ -4560,7 +4628,7 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
                 } else {
                     k::prep_qkv_r_f16_at(qt, Ly.q_clip, W.kconv + (size_t) t * KD, Ly.kc, W.vconv + (size_t) t * KD,
                                          Ly.vc, rt, Ly.r_clip, c.H, c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, pt,
-                                         !Ly.sliding, c.alpha, c.n_floor, Ly.kv_cap, q16t, g_s, Ly.sink16,
+                                         !Ly.sliding, c.alpha, c.n_floor, wcap, q16t, g_s, Ly.sink16,
                                          W.xq + (size_t) t * C, C, sk);
                     if (mma)
                         k::attn_decode_mma_f16(q16t, rt, sk, Ly.kc, Ly.vc, ring, c.H, c.KV, pt, 0, ns, qk_scale,
@@ -4575,20 +4643,20 @@ void fast_block_launches(Model& M, Work& W, int T, OutMode out_mode) {
         } else if (g_kv_q4) {
             k::prep_qkv_r_q4_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc4, W.vconv, Ly.vc4, r_p, r_ld, Ly.r_clip, T, c.H,
                                    c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha,
-                                   c.n_floor, Ly.kv_cap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                                   c.n_floor, wcap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
             k::attn_block_q4(q16, r_p, r_ld, W.sink, Ly.kc4, Ly.vc4, ring, c.H, c.KV, W.pos, T, ns, qk_scale,
                              Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, gate_p, gate_ld, W.x16, g_s);
         } else if (g_kv_fp8) {
             k::prep_qkv_r_fp8_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc8, W.vconv, Ly.vc8, r_p, r_ld, Ly.r_clip, T, c.H,
                                     c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha,
-                                    c.n_floor, Ly.kv_cap, k_scale, v_scale, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                                    c.n_floor, wcap, k_scale, v_scale, q16, g_s, Ly.sink16, W.xq, C, W.sink);
             k::attn_block_fp8(q16, r_p, r_ld, W.sink, Ly.kc8, Ly.vc8, ring, c.H, c.KV, W.pos, T, ns, qk_scale / k_scale,
                               1.0f / v_scale, Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, gate_p, gate_ld, W.x16,
                               g_s);
         } else {
             k::prep_qkv_r_f16_block(q_p, q_ld, Ly.q_clip, W.kconv, Ly.kc, W.vconv, Ly.vc, r_p, r_ld, Ly.r_clip, T, c.H,
                                     c.KV, c.D, c.d_rel, c.qk_clip, c.rel_clip, c.eps, W.pos, !Ly.sliding, c.alpha,
-                                    c.n_floor, Ly.kv_cap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
+                                    c.n_floor, wcap, q16, g_s, Ly.sink16, W.xq, C, W.sink);
             k::attn_block_f16(q16, r_p, r_ld, W.sink, Ly.kc, Ly.vc, ring, c.H, c.KV, W.pos, T, ns, qk_scale,
                               Ly.rel_proj, c.d_rel, extent, window, W.lg, W.o, gate_p, gate_ld, W.x16, g_s);
         }
@@ -7112,6 +7180,18 @@ void decode_greedy(Model& M, ik2::draft::Drafter* drafter, int anchor, int P, in
     double t_exp = 0;
     const SampleCfg sc;
     std::vector<int> next;
+    // (a3: the positions this run writes get their chunks committed first - these are the --drafting auto trials
+    //  run before READY; their prompt pass runs before this hook, so trial() commits the request's whole span
+    //  there too, and what is committed here is the part the run can still reach, clamped to ctx.  VRAM short
+    //  (it should not be, trial pre-committed): out stays empty and the trial drops that request from the
+    //  measurement.  The drafter's own context rows end at the commit (a3): a trial past it runs undrafted -
+    //  on this step's VMM-backed cards only, where the run can reach past the commit; every other layout
+    //  measures drafting as P125e did)
+    std::string gerr;
+    // (the run stops at ctx, so nothing past it is ever written: commit up to the ceiling only - an oversized
+    //  SAGUARO_IK2_DRAFT_TOKENS must not count chunks the ceiling's range never holds)
+    if (!kv_grow(std::min(P + gen, ctx), gerr)) return;
+    if (g_kv_vmm && drafter && P + gen > ik2::draft::context_rows(g_kv_commit)) drafter = nullptr;
     out.push_back(anchor);
     while ((int) out.size() < gen && P < ctx) {
         lk.append(anchor);
@@ -7476,7 +7556,8 @@ int main(int argc, char** argv) {
     g_depth = getenv("SAGUARO_IK2_DEPTH") ? std::max(0, std::atoi(getenv("SAGUARO_IK2_DEPTH"))) : 0;   // (tests: a long context's speed without its prompt)
     g_kv_start = getenv("SAGUARO_IK2_KV_START") ? std::max(0, std::atoi(getenv("SAGUARO_IK2_KV_START")))
                                                 : ik2plan::kKvStartDefault;   // (P125e a1: the committed K/V of the global layers)
-    g_kv_run = ctx;   // (the ceiling the engine runs and announces; the elastic start step may lower it)
+    g_kv_run = ctx;   // (the ceiling the engine runs and announces; the elastic fallback may lower it)
+    g_kv_commit = ctx;   // (the global K / V laid out at the load; the elastic start step lowers this one)
     if (drafting.empty()) drafting = draft_path.empty() ? "off" : "on";   // (--draft alone: as before, drafting on)
     if (drafting == "off") draft_path.clear();
     g_lookup = drafting != "off" && !(getenv("SAGUARO_IK2_LOOKUP") && !std::atoi(getenv("SAGUARO_IK2_LOOKUP")));
@@ -8050,15 +8131,37 @@ int main(int argc, char** argv) {
             !(getenv("SAGUARO_IK2_FAST") && !std::atoi(getenv("SAGUARO_IK2_FAST")))) {
             const double freed = kv_b > kv_b_start ? (double) (kv_b - kv_b_start) / 1073741824.0 : 0.0;
             g_kv_elastic = true;
-            g_kv_run = kv_com;
+            g_kv_commit = kv_com;
+            // (P125o a2: where this GPU backs the layout with virtual memory, the global K / V reserves the
+            //  ceiling's address range with chunks of VRAM behind the commit and a conversation commits its
+            //  chunks as it grows (a3) - so the ceiling stays the conversation's run and announced context.
+            //  Where it cannot (an old ROCm without hipMemCreate / hipMemMap), the fallback is the a1 start:
+            //  the commit laid out as one plain allocation, g_kv_run lowered to it, conversations run to it.)
+            int cur_dev = 0;
+            cudaGetDevice(&cur_dev);
+            g_kv_vmm = ik2::vmm::granule(cur_dev) > 0;
+            if (!g_kv_vmm) g_kv_run = kv_com;
             kv_b = kv_b_start;
             fits = true;
-            std::printf("NOTE context: the global layers' K / V is laid out for the first %d positions of the %d the "
-                        "ceiling allows (SAGUARO_IK2_KV_START) - the experts keep the freed %.1f GiB instead of "
-                        "leaving VRAM; conversations run to %d until the cache can grow into the ceiling "
-                        "(SAGUARO_IK2_KV_START=%d or 0 keeps the ceiling's layout)\n",
-                        kv_com, ctx, freed, kv_com, ctx);
+            if (g_kv_vmm)
+                std::printf("NOTE context: the global layers' K / V is laid out for the first %d positions of the %d "
+                            "the ceiling allows (SAGUARO_IK2_KV_START) as growable chunks of %d - a conversation "
+                            "commits the chunks it writes and runs to the ceiling; the experts keep the freed "
+                            "%.1f GiB instead of leaving VRAM (SAGUARO_IK2_KV_START=%d or 0 keeps the ceiling's "
+                            "layout)\n",
+                            kv_com, ctx, ik2plan::kKvChunkPos, freed, ctx);
+            else
+                std::printf("NOTE context: the global layers' K / V is laid out for the first %d positions of the %d "
+                            "the ceiling allows (SAGUARO_IK2_KV_START) - the experts keep the freed %.1f GiB instead "
+                            "of leaving VRAM; conversations run to %d until the cache can grow into the ceiling "
+                            "(SAGUARO_IK2_KV_START=%d or 0 keeps the ceiling's layout)\n",
+                            kv_com, ctx, freed, kv_com, ctx);
             std::fflush(stdout);
+            if (!g_kv_vmm)
+                std::fprintf(stderr, "saguaro ik2: no %s on this GPU - the global layers' K / V stays one "
+                                     "allocation of %d positions and conversations run to it (the elastic start's "
+                                     "fallback)\n",
+                             ik2::vmm::api_name(), kv_com);
         }
         // Two GPUs: where GPU 0 holds every expert, the resident path there alone (one GPU's speed, v1.1.73's path;
         // SAGUARO_IK2_TWO=1: the split anyway), else the split - GPU 0 on the offload path, GPU 1 with the next experts
@@ -8187,12 +8290,12 @@ int main(int argc, char** argv) {
             // (the drafter: its context rows in FP16, else in FP8 - SAGUARO_IK2_DRAFT_KV takes one; the load below measures)
             const char* kv_env = getenv("SAGUARO_IK2_DRAFT_KV");
             const bool only16 = kv_env && std::string(kv_env) == "f16", only8 = kv_env && std::string(kv_env) == "fp8";
-            size_t need = draft_room(model_drafter ? draft_path : std::string(), g_kv_run, chunk, c, head_rows, only8);
+            size_t need = draft_room(model_drafter ? draft_path : std::string(), g_kv_commit, chunk, c, head_rows, only8);
             std::string why;
             if (model_drafter && S.sv) why = "a Strata pack's output head is not one it reads (FP16 or planar Q8_0)";
             if (why.empty() && model_drafter && !only8 && !only16 && !room_ok(need, why, !model_drafter)) {
                 why.clear();
-                need = draft_room(draft_path, g_kv_run, chunk, c, head_rows, true);
+                need = draft_room(draft_path, g_kv_commit, chunk, c, head_rows, true);
             }
             if (why.empty() && room_ok(need, why, !model_drafter)) {
                 std::printf("drafting: %s, %.2f GiB of VRAM beside the model%s\n",
@@ -8462,7 +8565,7 @@ int main(int argc, char** argv) {
         else Vi.l = v - (c.n_pass - 1) * n_core;
         const Layer& Ly = M.L[Vi.l];
         use_dev(Ly.dev);
-        Vi.kv_cap = Ly.sliding ? std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock)) : g_kv_run;   // (elastic start: g_kv_run < ctx = the commit)
+        Vi.kv_cap = Ly.sliding ? std::min(ctx, c.window + std::max(chunk, ik2::draft::kBlock)) : g_kv_commit;   // (elastic start: g_kv_commit < ctx = the physical layout; VMM-backed it is the committed prefix of the ceiling's range)
         const bool kv_host = v < (int) g_kv_host.size() && g_kv_host[v];
         if (g_kv_q4) {
             if (c.D != 128) die("SAGUARO_IK2_KV=q4 requires head_dim == 128");
@@ -8526,6 +8629,38 @@ int main(int argc, char** argv) {
                     CU(cudaEventCreateWithFlags(&g_ring_done[s], cudaEventDisableTiming));
                 }
             }
+        } else if (g_kv_vmm && !Ly.sliding) {   // (a2: the global visit's K / V as the ceiling's address range,
+                                                //  chunks of VRAM behind the committed positions - the DEPTH test's
+                                                //  semantics: the freshly committed span is memset at the commit
+                                                //  (kv_grow), so an unwritten row reads as zeros without trusting
+                                                //  the VMM API to hand out zeroed pages.  Here Vi.kv_cap is the
+                                                //  commit, not a ring: a full visit writes and reads [0, pos) by
+                                                //  absolute position (kv_cap 0 in the prep epilogs, as the reads
+                                                //  always passed), so the kernels see the commit at first and the
+                                                //  grown rows as a2 / a3 land pages under the same stable base;
+                                                //  only the DEPTH memset below sizes itself by the commit)
+            const size_t row_b = KD * (g_kv_fp8 ? 1 : 2);
+            if (g_kv_rpc == 0) {
+                const size_t gran = ik2::vmm::granule(Ly.dev);
+                g_kv_rpc = ik2plan::kv_rows_per_chunk(ik2plan::kKvChunkPos, row_b, gran);
+                g_kv_chunk_b = (size_t) g_kv_rpc * row_b;
+                g_kv_n_chunks = ik2plan::kv_chunks_for(ctx, g_kv_rpc);
+                g_kv_chunks = ik2plan::kv_chunks_for(g_kv_commit, g_kv_rpc);
+            }
+            const size_t cap = (size_t) g_kv_n_chunks * g_kv_chunk_b;
+            const size_t committed = (size_t) ik2plan::kv_chunks_for(g_kv_commit, g_kv_rpc) * g_kv_chunk_b;
+            KvVma r;
+            std::string verr;
+            if (!r.k.open(Ly.dev, cap, verr)) die("elastic K / V: " + verr);
+            if (!r.v.open(Ly.dev, cap, verr)) { r.k.close(); die("elastic K / V: " + verr); }
+            if (!r.k.commit(committed, verr) || !r.v.commit(committed, verr)) {
+                r.k.close(), r.v.close();
+                die("elastic K / V: the committed " + std::to_string(committed >> 20) +
+                    " MiB of the global layers' cache did not land: " + verr + " - a smaller --ctx or SAGUARO_IK2_KV_START");
+            }
+            if (g_kv_fp8) Vi.kc8 = r.k.ptr(), Vi.vc8 = r.v.ptr();
+            else Vi.kc = (uint16_t*) r.k.ptr(), Vi.vc = (uint16_t*) r.v.ptr();
+            g_kvvma.push_back(std::move(r));
         } else if (g_kv_fp8) {
             Vi.kc8 = dalloc<uint8_t>((size_t) Vi.kv_cap * KD);
             Vi.vc8 = dalloc<uint8_t>((size_t) Vi.kv_cap * KD);
@@ -8580,6 +8715,10 @@ int main(int argc, char** argv) {
     if (tpN > 1) use_dev(0);
     if (g_stage) cudaFree(g_stage), g_stage = nullptr, g_stage_bytes = 0;
     {
+        // (the line counts the laid-out rows: on a VMM-backed start Vi.kv_cap is the commit, and the commit calls
+        //  round their bytes up to whole chunks (chunks_for(commit) * chunk_b), so a start step that is not a
+        //  multiple of a chunk - SAGUARO_IK2_KV_START=10000 -> 12288 rows - maps a little more than this prints;
+        //  exact at the default 32768, and the card test's 2 % rule covers the slack)
         size_t kv_vram = 0, kv_host = 0;
         for (const auto& Vi : M.V) {
             if (g_kv_q4) {
@@ -9171,12 +9310,12 @@ int main(int argc, char** argv) {
             try {
                 if (g_drem.dev >= 0) {
                     DevScope on(g_drem.dev);
-                    dr = ik2::draft::load(draft_path, c.C, g_kv_run, g_drem.blas, g_drem.s, kv8 != 0);
+                    dr = ik2::draft::load(draft_path, c.C, g_kv_commit, g_drem.blas, g_drem.s, kv8 != 0);
                     ik2::draft::fold_q8(dr, g_drem.q8, g_drem.q8d, c.n_rows);
                     ik2::draft::set_head_q8(dr, g_drem.q8, g_drem.q8d);
                     CU(cudaStreamSynchronize(g_drem.s));
                 } else {
-                dr = ik2::draft::load(draft_path, c.C, g_kv_run, g_blas, g_s, kv8 != 0);
+                dr = ik2::draft::load(draft_path, c.C, g_kv_commit, g_blas, g_s, kv8 != 0);
                 if (draft_head) {
                     ik2::draft::fold(dr, draft_head, c.n_rows);
                 } else {
@@ -9972,10 +10111,23 @@ int main(int argc, char** argv) {
                 say("folder " + slot_dir + ": " + std::to_string(n) + " saved conversation(s)");
             }
         }
-        // the rows [0, n) of the visits without a window, to or from host memory
-        auto full_rows = [&](Conv& cv, int n, bool save) {
+        // the rows [0, n) of the visits without a window, to or from host memory.  Coming back (save: false) it may
+        // write past the committed start step of an elastic K / V - a conversation kept before, or read from the
+        // folder after a restart - so its chunks are committed first (a3).  0: done (copied, or nothing to commit);
+        // 1: VRAM short, the stretch would not commit and nothing was copied - the one failure the growable
+        //  cache can cause, which the caller fails the request on; the older reasons to give up on a kept
+        //  conversation live in unpark and still cost only the from-scratch re-read
+        auto full_rows = [&](Conv& cv, int n, bool save) -> int {
             if (save) cv.fk.assign(M.V.size(), {}), cv.fv.assign(M.V.size(), {});
-            else lend_back(M, n + 1);   // (KV lending: the experts lent below n given back before the rows land)
+            else {
+                lend_back(M, n + 1);   // (KV lending: the experts lent below n given back before the rows land)
+                std::string gerr;
+                if (!kv_grow(n, gerr)) {
+                    say("a kept conversation of " + std::to_string(n) + " positions does not fit in the committed "
+                        "context: " + gerr);
+                    return 1;
+                }
+            }
             for (size_t l = 0; l < M.V.size(); ++l) {
                 Layer& Ly = bind_visit(M, (int) l);
                 if (ringed(Ly)) continue;
@@ -9990,6 +10142,7 @@ int main(int argc, char** argv) {
                 CU(cudaMemcpyAsync(save ? (void*) cv.fv[l].data() : (void*) dv, save ? (void*) dv : (void*) cv.fv[l].data(), b, dir, g_s));
             }
             for (auto& D : g_dev) CU(cudaStreamSynchronize(D.s));
+            return 0;
         };
         auto reset = [&]() {
             for (auto& sn : snaps) sn.pos = -1;
@@ -10066,15 +10219,19 @@ int main(int argc, char** argv) {
             trim_parked();
         };
         // a kept conversation into the cache: the whole of it (it leaves the kept ones), or its start up to a
-        // snapshot at `upto` (it stays kept: the request goes another way from there)
-        auto unpark = [&](int j, int upto) -> bool {
+        // snapshot at `upto` (it stays kept: the request goes another way from there).  0: in the cache;
+        // -1: the old reasons (a folder file that would not read, no snapshot at `upto`) - as before the
+        // growable cache these cost only the re-read, the request going on from the start; 1: its rows needed a
+        // stretch of the elastic K / V that could not be committed - the one failure the growth can cause,
+        // which fails the request
+        auto unpark = [&](int j, int upto) -> int {
             const double tp = now();
             if (!parked[j].loaded) {
                 Conv cv;
                 if (!conv_read(parked[j].file, cv, false)) {
                     say("a saved conversation could not be read: " + parked[j].file);
                     parked.erase(parked.begin() + j);
-                    return false;
+                    return -1;
                 }
                 cv.used = parked[j].used;
                 parked[j] = std::move(cv);
@@ -10085,8 +10242,9 @@ int main(int argc, char** argv) {
             int at = -1;
             for (int i = 0; i < (int) cv.snaps.size(); ++i)
                 if (cv.snaps[i].pos == n) at = i;
-            if (at < 0) return false;
-            full_rows(cv, n, false);
+            if (at < 0) return -1;
+            const int fr = full_rows(cv, n, false);       // (a3: its rows land past the committed start step only
+            if (fr) return fr;                            //  if that stretch of the K / V could be committed)
             snaps.assign(n_snaps, Snap{});
             snap_next = 0;
             if (whole) {   // (its snapshots: the latest ones that fit)
@@ -10110,7 +10268,7 @@ int main(int argc, char** argv) {
                 std::to_string((int) ((now() - tp) * 1e3)) + " ms)");
             if (whole) parked.erase(parked.begin() + j);
             else cv.used = ++conv_clock;
-            return true;
+            return 0;
         };
         auto parse_ints = [](const std::string& t) {
             std::vector<int> v;
@@ -10157,10 +10315,22 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
                 const double tm0 = now();
                 auto trial = [&](int mode, int gen_t, double& secs) {
-                    int made = 0;
+                    int made = 0, done = 0;
                     secs = 0;
                     for (const auto& ids : reqs) {
                         reset();
+                        // (a3 fix: the prompt pass below writes rows [0, ids.size()) before decode_greedy's hook
+                        //  ever runs - commit the positions this trial writes (its prompt plus its generation,
+                        //  clamped to the ceiling like the run itself) before the first forward, or an elastic
+                        //  card writes rows with nothing committed under them.  VRAM short: the measurement
+                        //  stops where it stands - an unfinished request counts no tokens and no seconds)
+                        std::string terr;
+                        if (!kv_grow(std::min((int) ids.size() + gen_t, ctx), terr)) {
+                            std::printf("NOTE saguaro ik2: the drafting measure stops at the request whose rows "
+                                        "the K / V could not commit (%s); the tok/s figure is from the %d of %zu "
+                                        "it ran\n", terr.c_str(), done, reqs.size());
+                            break;
+                        }
                         int first = 0;
                         for (size_t p0 = 0; p0 < ids.size(); p0 += chunk) {
                             const int n = (int) std::min<size_t>(chunk, ids.size() - p0);
@@ -10187,7 +10357,8 @@ int main(int argc, char** argv) {
                         decode_greedy(M, mode >= 2 ? drafter : nullptr, first, (int) ids.size(), gen_t, ctx, ctl, lk1, out,
                                       nullptr);
                         secs += now() - t0;
-                        made += (int) out.size() - 1;
+                        if (out.empty()) break;   // (its rows could not be committed: no tokens, no negative count)
+                        made += (int) out.size() - 1, ++done;
                     }
                     return made / std::max(1e-9, secs);
                 };
@@ -10325,7 +10496,7 @@ int main(int argc, char** argv) {
             char b[400];
             std::snprintf(b, sizeof b, "vram_used=%d ram_used=%d vram_gb=%.2f ram_gb=%.2f vram_hit=%.4f ram_fetch=%.2f "
                           "cpu=%.2f disk=0 promo=0 kv_used=%lld kv_cap=%d kv_gb=%.2f", nv, c.n_layer * c.E - nv, vb / 1e9,
-                          std::max(0.0, (double) g_exp_bytes - vb) / 1e9, hit, fetch, cpu, kv_used, g_kv_run, kv_total / 1e9);
+                          std::max(0.0, (double) g_exp_bytes - vb) / 1e9, hit, fetch, cpu, kv_used, g_kv_commit, kv_total / 1e9);
             return std::string(b);
         };
         // a request's expert picks found in VRAM and all of them, as counters (DONE's last two fields: the differences)
@@ -10747,6 +10918,30 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
                 continue;
             }
+            // (a3: this request writes positions [0, ids.size() + max_new) - commit the chunks covering them now,
+            //  host-side, before its first pass (never per token, never in a kernel; a no-op unless the elastic
+            //  K / V is VMM-backed).  VRAM short: the request fails cleanly - a NOTE for the log, the ERR line the
+            //  server passes on, the engine and its state untouched (no kernel had run); taking the room back from
+            //  the coldest experts is b4, the next step)
+            {
+                std::string gerr;
+                if (!kv_grow((int) ids.size() + max_new, gerr)) {
+                    if (serve_maya) {
+                        std::printf("NOTE kv: the context could not grow to this request's %d positions: %s - the "
+                                    "experts keep their VRAM until the demotion step, so the request fails (a "
+                                    "shorter prompt or max_tokens, or a smaller --max-context)\n",
+                                    (int) ids.size() + max_new, gerr.c_str());
+                        std::printf("ERR %s\nDONE 0 %zu 0 0 cancel 0 0 0 0 0\n",
+                                    ("the GPU ran out of memory growing the context cache for this request (" + gerr +
+                                     "; a shorter prompt or max_tokens, or a smaller --max-context)")
+                                        .c_str(),
+                                    ids.size());
+                    } else
+                        std::printf("@END error out_of_memory %zu 0 0 0\n", ids.size());
+                    std::fflush(stdout);
+                    continue;
+                }
+            }
             g_img.clear();
             std::vector<uint64_t> sig(ids.size(), 0);
             if (!emb_path.empty()) {
@@ -10809,7 +11004,25 @@ int main(int argc, char** argv) {
                     int j = -1;   // (setting the other aside may have moved it)
                     for (int q = 0; q < (int) parked.size(); ++q)
                         if (parked[q].hist == key) j = q;
-                    if (j >= 0) unpark(j, fork ? r_best : -1);
+                    const int ur = j >= 0 ? unpark(j, fork ? r_best : -1) : 0;
+                    if (ur == 1) {
+                        // (a3: its rows needed a chunk the K / V could not commit - the request fails cleanly, the
+                        //  engine and the kept conversation untouched (the cache holds nothing, the next request
+                        //  reads from the start))
+                        std::printf("ERR %s\nDONE 0 %zu 0 0 cancel 0 0 0 0 0\n",
+                                    "the GPU ran out of memory taking back the kept conversation's context (a "
+                                    "smaller --max-context or fewer conversations kept; the engine stays up for "
+                                    "the next request)",
+                                    ids.size());
+                        std::fflush(stdout);
+                        busy = false;
+                        g_wd_busy = false;
+                        continue;
+                    }
+                    // (ur < 0: the older reasons - the folder file would not read, or no snapshot at the join.
+                    //  As before the growable cache those cost only the re-read: the cache holds nothing and the
+                    //  request goes on from the start - they are no OOM, and on a card with no VMM-backed K / V
+                    //  they never were; only the grow failure above can be one)
                 } else if (r_best < (int) hist.size() && later_turn(act_pts, r_best)) {
                     read_kept = false;   // (the conversation goes on from a snapshot: it no longer ends at a kept cut)
                     Snap cp;   // back past a later turn: the conversation as it is stays kept, this one goes on from the snapshot
@@ -10839,7 +11052,14 @@ int main(int argc, char** argv) {
             }
             // (drafting for this request: spec=1 asks for none; the prompt lookup's history its tokens; the Monitor's
             //  figures - STAT draft_acc / draft_off, DONE's kept and offered - this request's drafts)
-            const bool req_spec = spec_on && spec_key != 1;
+            // (a3: the drafter's context rows are laid out for the committed start step, not for the whole ceiling
+            //  its requests can now reach (the drafter's own growth is not part of this step): a request that may
+            //  write past the commit runs without drafting - the answers are the same, its tokens the plain ones.
+            //  Only this step's VMM-backed cards reach past the commit at all - elsewhere the rows hold every
+            //  request the guard above admits, so drafting is on as it was before the step)
+            const bool spec_rows = !g_kv_vmm || !drafter ||
+                                   ids.size() + (size_t) max_new <= (size_t) ik2::draft::context_rows(g_kv_commit);
+            const bool req_spec = spec_on && spec_key != 1 && spec_rows;
             const int req_wmax = spec_key >= 2 ? std::min(spec_key, kBlockMax) : kBlockMax;
             const uint64_t kept0 = sctl.kept(), offered0 = sctl.offered();
             uint64_t req_rounds = 0;
@@ -11264,6 +11484,20 @@ int main(int argc, char** argv) {
         std::_Exit(0);   // (QUIT / end of input: out at once, as maya-hy4 - the OS frees the pinned runs and the driver's state)
     }
     if (g_depth + (int) prompt.size() + gen > g_kv_run) die("prompt + gen past the context");
+    {   // (a3: the CLI run writes positions [0, depth + prompt + gen) - their chunks are committed now, before
+        //  the prompt's first pass (at load, so a failure ends the run with the load's exit code).  The drafter
+        //  drop below: only where the run can reach past the commit at all, this step's VMM-backed cards)
+        std::string gerr;
+        if (!kv_grow(g_depth + (int) prompt.size() + gen, gerr))
+            die("the elastic K / V could not grow for this run: " + gerr + " - a smaller --tokens/--gen or --ctx");
+    }
+    // (the same run-past-the-commit drop as the serve requests, and for the same reason, on this step's
+    //  VMM-backed cards only - every other layout drafts as before the step)
+    if (g_kv_vmm && drafter && g_depth + (int) prompt.size() + gen > ik2::draft::context_rows(g_kv_commit)) {
+        std::printf("drafting off: the drafter's context rows hold %d positions, this run reaches %d (plain tokens)\n",
+                    ik2::draft::context_rows(g_kv_commit), g_depth + (int) prompt.size() + gen);
+        drafter = nullptr;
+    }
     if (g_depth > 0 && (serve || drafter || g_lookup || g_dev[0].W.T_sup > 0)) die("SAGUARO_IK2_DEPTH: the CLI's plain path only (no drafting)");
     // the prompt
     std::vector<float> logits;
@@ -11367,6 +11601,12 @@ int main(int argc, char** argv) {
     //  records its graph, tens of ms once a process)
     if (getenv("SAGUARO_IK2_BLOCK_WARM") && std::atoi(getenv("SAGUARO_IK2_BLOCK_WARM")) && (drafter || g_lookup) && g_fast && g_block &&
         (int) prompt.size() + kBlockMax <= ctx) {
+        // (a3: the warm-up windows write rows up to prompt + a window - their chunks first, or the warm-up runs
+        //  plain (the generation itself is already covered above: gen >= 1 reaches past prompt + kBlockMax... not
+        //  always, so commit here too))
+        std::string werr;
+        if (!kv_grow((int) prompt.size() + kBlockMax, werr))
+            die("the elastic K / V could not grow for the window warm-up: " + werr);
         const double tw = now();
         int tk[kBlockMax];
         for (int j = 0; j < kBlockMax; ++j) tk[j] = first_best;

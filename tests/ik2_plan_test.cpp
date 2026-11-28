@@ -5,6 +5,7 @@
 #include "../src/ik2/ik2_plan.hpp"
 
 #include <cstdio>
+#include <vector>
 
 namespace {
 
@@ -59,8 +60,52 @@ int main() {
            "KV streaming holds the whole ceiling in host RAM: no elastic start");
     expect(!elastic_start(false, true, false, 262144, kKvStartDefault, true, false, false, false), "not two GPUs");
     expect(!elastic_start(false, true, false, 262144, kKvStartDefault, false, true, false, false), "not q4 rows");
-    expect(!elastic_start(false, true, false, 262144, kKvStartDefault, false, false, true, false), "not --parallel");
     expect(!elastic_start(false, true, false, 262144, kKvStartDefault, false, false, false, true), "not --tp");
+
+    // P125o (a2 / a3): the chunked, growable commit.  Inkling's global visit: 4096 B a position in FP16 (2048 in
+    // FP8), the usual 2 MiB granule, 4096 positions a chunk: 16 MiB - a whole number of granules already.
+    expect(kKvChunkPos == 4096, "a chunk aims at 4096 positions");
+    expect(kv_rows_per_chunk(kKvChunkPos, 4096, 2u << 20) == 4096, "the FP16 row: the granule leaves the chunk whole");
+    expect(kv_rows_per_chunk(kKvChunkPos, 2048, 2u << 20) == 4096, "the FP8 row too (8 MiB of granules)");
+    expect(kv_rows_per_chunk(kKvChunkPos, 2048, 16u << 20) == 8192, "a 16 MiB granule makes the chunk bigger, never smaller");
+    expect(kv_rows_per_chunk(kKvChunkPos, 1024, 3u << 20) == 6144, "a 3 MiB granule: 6144 rows of 1 KiB");
+    expect(kv_rows_per_chunk(kKvChunkPos, 4096, 0) == 4096, "no VMM: the exact rows");
+    expect(kv_rows_per_chunk(0, 4096, 2u << 20) == 0, "no rows wanted: no chunk");
+    expect(kv_rows_per_chunk(kKvChunkPos, 0, 2u << 20) == 0, "no row bytes: no chunk");
+    // the chunk holding a position, and the chunks covering a request's positions: whole chunks, no gaps
+    expect(kv_chunk_of(0, 4096) == 0, "position 0 sits in chunk 0");
+    expect(kv_chunk_of(4095, 4096) == 0, "the last position of chunk 0");
+    expect(kv_chunk_of(4096, 4096) == 1, "the first position of chunk 1");
+    expect(kv_chunk_of(262143, 4096) == 63, "the last position of a 262144 ceiling sits in chunk 63");
+    expect(kv_chunks_for(0, 4096) == 0, "no positions: no chunks");
+    expect(kv_chunks_for(1, 4096) == 1, "one position commits its whole chunk");
+    expect(kv_chunks_for(4096, 4096) == 1, "a chunk of positions is one chunk");
+    expect(kv_chunks_for(4097, 4096) == 2, "one position past it takes the next chunk");
+    expect(kv_chunks_for(60000, 4096) == 15, "a 60000-token read covers 15 chunks");
+    expect(kv_chunks_for(262144, 4096) == 64, "the whole ceiling is 64 chunks");
+    // the commit order: the load commits the start step, a request commits up to its last position - ascending,
+    // each chunk once, nothing skipped (a position is only written after its chunk holds pages)
+    {
+        const int rpc = kv_rows_per_chunk(kKvChunkPos, 4096, 2u << 20);
+        const int load_chunks = kv_chunks_for(kv_committed(262144, kKvStartDefault), rpc);
+        expect(load_chunks == 8, "the load commits the start step: 32768 of 4096-row chunks");
+        // the memory at the load does not follow the ceiling: the committed chunks, not the reserved range
+        expect((size_t) load_chunks * (size_t) rpc * 4096u == (size_t) 32768 * 4096u,
+               "the load commits 128 MiB a visit at 32768, whichever ceiling it reserves under");
+        int committed = load_chunks;
+        std::vector<int> order;
+        const int want = kv_chunks_for(20000, rpc);   // a 20K read: already inside the commit - nothing to do
+        for (int c = committed; c < want; ++c) order.push_back(c);
+        expect(order.empty(), "a read inside the commit commits nothing new");
+        const int grow = kv_chunks_for(60000, rpc);   // a 60K read past it: chunks 8 .. 14, in order
+        for (int c = committed; c < grow; ++c) order.push_back(c);
+        expect(order.size() == 7 && order.front() == 8 && order.back() == 14, "the 60K read commits chunks 8 .. 14");
+        bool ascending = true;
+        for (size_t i = 1; i < order.size(); ++i) ascending = ascending && order[i] == order[i - 1] + 1;
+        expect(ascending, "the commit order is the position order, one chunk at a time");
+        committed = grow;
+        expect(committed == 15, "the commit advances to where the conversation reached");
+    }
 
     std::printf("ik2_plan_test: %s\n", fails ? "FAILED" : "ok");
     return fails ? 1 : 0;

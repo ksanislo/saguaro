@@ -1027,6 +1027,45 @@ if(MAYA_ENABLE_CUDA OR MAYA_ENABLE_HIP)
     target_link_libraries(saguaro-ik2 PRIVATE ik2_kernels maya_kernels_cpu ${_maya_gpu_blas_target}
                           Threads::Threads maya_spec strata_fmt)
     target_compile_definitions(saguaro-ik2 PRIVATE MAYA_DS4_IQ_ONLY DS4_IQ_MIN_FORMS)
+    if(_ik2_hip)   # (the growable K / V of the elastic start (P125o a2, src/ik2/ik2_vmm.hpp): hipMemAddressReserve /
+                   #  hipMemCreate / hipMemMap when this ROCm ships them; where a piece is missing the engine keeps
+                   #  today's plain commit for the start step and says so once at the load)
+      set(_ik2_hip_vmm OFF)
+      if(TARGET hip::host)
+        include(CheckCXXSourceCompiles)
+        get_target_property(_ik2_hip_inc hip::host INTERFACE_INCLUDE_DIRECTORIES)
+        if(NOT _ik2_hip_inc OR _ik2_hip_inc MATCHES "NOTFOUND")
+          set(_ik2_hip_inc)
+        endif()
+        set(_ik2_req_inc "${CMAKE_REQUIRED_INCLUDES}")
+        set(_ik2_req_libs "${CMAKE_REQUIRED_LIBRARIES}")
+        set(CMAKE_REQUIRED_INCLUDES "${_ik2_hip_inc}")
+        set(CMAKE_REQUIRED_LIBRARIES hip::host)
+        check_cxx_source_compiles("
+#include <hip/hip_runtime.h>
+int main() {
+    hipMemAllocationProp p{};
+    p.type = hipMemAllocationTypePinned; p.location.type = hipMemLocationTypeDevice; p.location.id = 0;
+    size_t g = 0; hipMemGetAllocationGranularity(&g, &p, hipMemAllocationGranularityMinimum);
+    hipDeviceptr_t d = 0; hipMemGenericAllocationHandle_t h = 0; hipDevice_t cd; int vm = 0;
+    hipDeviceGetAttribute(&vm, hipDeviceAttributeVirtualMemoryManagementSupported, 0);
+    hipDeviceGet(&cd, 0);
+    hipMemAddressReserve(&d, g, g, 0, 0); hipMemCreate(&h, g, &p, 0); hipMemMap(d, g, 0, h, 0);
+    hipMemAccessDesc a{}; a.location.type = hipMemLocationTypeDevice; a.location.id = 0;
+    a.flags = hipMemAccessFlagsProtReadWrite; hipMemSetAccess(d, g, &a, 1);
+    hipMemUnmap(d, g); hipMemRelease(h); hipMemAddressFree(d, g); return vm;
+}" IK2_HIP_HAS_VMM)
+        set(CMAKE_REQUIRED_INCLUDES "${_ik2_req_inc}")
+        set(CMAKE_REQUIRED_LIBRARIES "${_ik2_req_libs}")
+        set(_ik2_hip_vmm ${IK2_HIP_HAS_VMM})
+      endif()
+      if(_ik2_hip_vmm)
+        target_compile_definitions(saguaro-ik2 PRIVATE SAGUARO_IK2_HIP_VMM=1)
+        message(STATUS "Saguaro: saguaro-ik2 grows its K / V on HIP virtual memory")
+      else()
+        message(STATUS "Saguaro: this ROCm has no hipMemCreate / hipMemMap - saguaro-ik2 keeps its K / V one allocation")
+      endif()
+    endif()
     if(_ik2_hip)   # (clang's default -ffp-contract=fast fuses moe_combine_conv's sums unlike the window's kernels: drafting changed answers)
       set_source_files_properties(src/ik2/ik2_kernels.cu src/ik2/ik2_off.cu src/ik2/ik2_main.cu src/ik2/ik2_draft.cu
                                   PROPERTIES COMPILE_OPTIONS "-ffp-contract=on")

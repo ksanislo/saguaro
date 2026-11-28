@@ -1,29 +1,38 @@
 #!/usr/bin/env bash
-# tools/card_tests/ik2_kv_start.sh - PLAN-p125e card test: does a larger --max-context still cost the experts their
-# VRAM tier before a single token is generated (ref/REPORT-p125b-ik2-vram.md), or does the elastic start step
-# (SAGUARO_IK2_KV_START) and the preloaded offload tier (b1) keep them where they were?
+# tools/card_tests/ik2_kv_start.sh - PLAN-p125e / p125o card test: does a larger --max-context still cost the
+# experts their VRAM tier before a single token is generated (ref/REPORT-p125b-ik2-vram.md), or does the elastic
+# start step (SAGUARO_IK2_KV_START) and the preloaded offload tier (b1) keep them where they were - and (P125o,
+# the growable K / V a2 / a3) does a conversation that grows past the start step actually run?
 #
 # It starts a test copy of the server on its own port (default 8092) with its own --session-dir, its own engine log
 # and its own config copy (the api_key dropped - the readiness poll and the requests send none), once per context of
 # CONTEXTS (default: 32768 and 262144).  Per context it prints the engine's placement lines from its log - the plan
-# line ("experts ... K / V cache ... free"), the elastic NOTE ("NOTE context: ... committed ..."), the
-# resident / tier / offload / warm line, and what /api/context says the conversation's ceiling is - then reads a
-# prompt of READ tokens (default 20000, inside the committed start step) and times it.  At the big ceiling it also
-# asks past the committed context to show exactly what a conversation that grows there meets (a clean "maximum
-# context length" answer while the engine runs at the commit, or a full read where the card did not take the
-# elastic start).
+# line ("experts ... K / V cache ... free"), the elastic NOTE ("NOTE context: ... committed ...", with the
+# "growable chunks ... runs to the ceiling" wording of the VMM-backed start), the resident / tier / offload / warm
+# line, the "kv cache: ... GiB VRAM" figure - the memory the cache takes at the load, which must not follow the
+# ceiling - and what /api/context says the conversation's ceiling is.  Then it reads a prompt of READ tokens
+# (default 20000, inside the committed start step) and, on a ceiling above GROW, one of GROW tokens (default
+# 60000 - past the 32768 start step: on a VMM-backed start this commits the chunks it writes and answers).  At the
+# big ceiling it also asks a whole committed start step plus 64 tokens to show what the first stretch past the
+# commit answers with (a full answer since a3; a clean "maximum context length" only where the elastic start ran
+# without the growable cache).
 #
 # PASS: the 262144 start keeps its experts in VRAM - no "offload: 0 of" line, and the count in VRAM is within 2 % of
-# the 32768 row's (the tools/mem_vs_ctx.py rule), with the elastic NOTE or a preloaded "tier:" line as the witness -
-# and both 20K reads complete.
+# the 32768 row's (the tools/mem_vs_ctx.py rule), with the elastic NOTE or a preloaded "tier:" line as the witness;
+# the K / V the two starts lay out reads the same (the "kv cache:" GiB, within 2 % - the ceiling must cost ~0
+# until used); the 20K reads complete; and the 60K read not just answers but answers right: its first word is the
+# reference's first word, "alpha" (tokens alone are no verdict - a write epilog that lands rows in the wrong place
+# still emits tokens).  Where the start says it grows: a VMM-backed elastic card; elsewhere the growth is only
+# reported.
 #
 # Everything it writes lands under its --out folder (default scratch/ik2-kv-start-card); the install's own config,
 # log and sessions are never touched (the newest saguaro-ik2 config is only read).  It waits until the port is free
 # before starting, and on exit kills whatever still holds it (the engine's child can outlive the launcher).
 #
-#   ./tools/card_tests/ik2_kv_start.sh                       # port 8092, 32768 vs 262144, a 20K read
+#   ./tools/card_tests/ik2_kv_start.sh                       # port 8092, 32768 vs 262144, a 20K read + a 60K growth read
 #   CONTEXTS="32768 65536" ./tools/card_tests/ik2_kv_start.sh
-#   SAGUARO_TEST_EXE=scratch/build-ik2-elastic/saguaro-ik2 ./tools/card_tests/ik2_kv_start.sh   # a candidate engine
+#   GROW=0 ./tools/card_tests/ik2_kv_start.sh                # skip the past-the-start-step read
+#   SAGUARO_TEST_EXE=scratch/build-ik2-elastic-2/saguaro-ik2 ./tools/card_tests/ik2_kv_start.sh   # a candidate engine
 #
 # Needs: Inkling 2 Mini already set up (a saguaro-*.json whose engine is saguaro-ik2), curl + a python (the
 # install's .venv is used when present).
@@ -41,6 +50,7 @@ case "$OUT" in ""|.|..) echo "--out wants a dedicated folder, not '$OUT'"; exit 
 PORT=${PORT:-8092}
 CONTEXTS=${CONTEXTS:-"32768 262144"}
 READ=${READ:-20000}
+GROW=${GROW:-60000}
 PY=${PY:-$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)}
 CFG_SRC=""
 for f in $(ls -t saguaro-*.json 2>/dev/null); do
@@ -78,9 +88,9 @@ json.dump({"model": "m", "temperature": 0, "max_tokens": int(mx),
 PYEOF
 }
 
-ask() {   # $1 file: prints "HTTP <code> <completion_tokens> <seconds>"; never dies
+ask() {   # $1 file: prints "HTTP <code> <completion_tokens> <seconds> <first word, lowercased>"; never dies
     "$PY" - "$1" "$PORT" <<'PYEOF'
-import json, sys, time, urllib.error, urllib.request
+import json, re, sys, time, urllib.error, urllib.request
 body = json.load(open(sys.argv[1], encoding="utf-8"))
 req = urllib.request.Request(f"http://127.0.0.1:{sys.argv[2]}/v1/chat/completions",
                              data=json.dumps(body, ensure_ascii=False).encode(),
@@ -90,7 +100,9 @@ try:
     with urllib.request.urlopen(req, timeout=3600) as r:
         out = json.loads(r.read())
     u = out.get("usage") or {}
-    print(f"HTTP {r.status} {u.get('completion_tokens', '?')} {time.time() - t0:.1f}s")
+    txt = ((out.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    m = re.search(r"[A-Za-z]+", txt)
+    print(f"HTTP {r.status} {u.get('completion_tokens', '?')} {time.time() - t0:.1f}s {m.group(0).lower() if m else '-'}")
 except urllib.error.HTTPError as e:
     print(f"HTTP {e.code} - {time.time() - t0:.1f}s {e.read().decode()[:200]}")
 PYEOF
@@ -100,7 +112,7 @@ place() {   # the count of experts the engine said it keeps in VRAM ("3072", "12
     sed -ne 's/.*resident: every expert in VRAM (\([0-9]*\) copied.*/\1/p; s/.*offload: \([0-9]*\) of [0-9]* experts in VRAM.*/\1/p' "$1" | tail -1
 }
 
-declare -A PLACEMENT
+declare -A PLACEMENT KVGI GROWRES GROWABLE
 for CTX in $CONTEXTS; do
     wait_free_port
     SESS=$OUT/sessions-$CTX; LOG=$OUT/engine-$CTX.log; SRV=$OUT/server-$CTX.log; CFG=$OUT/config-$CTX.json
@@ -144,7 +156,7 @@ PYEOF
     disown "$SRV_PID" 2>/dev/null || true
 
     say "--max-context $CTX: the engine's load lines"
-    grep -E "experts [0-9.]+ GiB, dense weights|NOTE context:|resident: every expert|tier: [0-9]+ of|offload: [0-9]+ of|warm: " "$SRV" "$LOG" 2>/dev/null | sed -e 's/^[^:]*: //' || echo "  (no placement line found - the engine log holds none)"
+    grep -E "experts [0-9.]+ GiB, dense weights|NOTE context:|resident: every expert|tier: [0-9]+ of|offload: [0-9]+ of|warm: |kv cache: " "$SRV" "$LOG" 2>/dev/null | sed -e 's/^[^:]*: //' || echo "  (no placement line found - the engine log holds none)"
     say "--max-context $CTX: the ceiling the engine announced"
     curl -sf "http://127.0.0.1:$PORT/api/context" | "$PY" - <<'PYEOF' || echo "  (/api/context did not answer)"
 import json, sys
@@ -153,12 +165,21 @@ print(f"context: {d.get('context')}")
 PYEOF
     PLACEMENT[$CTX]=$(place "$LOG")
     [ -n "${PLACEMENT[$CTX]}" ] || PLACEMENT[$CTX]=-
+    KVGI[$CTX]=$(sed -ne 's/.*kv cache: .*(\([0-9.]*\) GiB VRAM.*/\1/p' "$LOG" | tail -1)
+    [ -n "${KVGI[$CTX]}" ] || KVGI[$CTX]=-
+    grep -q "commits the chunks it writes and runs to the ceiling" "$LOG" 2>/dev/null && GROWABLE[$CTX]=yes || GROWABLE[$CTX]=no
 
     say "--max-context $CTX: a $READ-token read (inside the committed start step)"
     read_prompt "$OUT/read-$CTX.json" "$READ" 16
     ask "$OUT/read-$CTX.json"
+    if [ "$GROW" -gt 0 ] 2>/dev/null && [ "$GROW" -lt "$CTX" ]; then
+        say "--max-context $CTX: a $GROW-token read (past the 32768 start step - the K / V must grow into its chunks)"
+        read_prompt "$OUT/grow-$CTX.json" "$GROW" 16
+        GROWRES[$CTX]=$(ask "$OUT/grow-$CTX.json")
+        echo "${GROWRES[$CTX]}"
+    fi
     if [ "$CTX" != "$(echo "$CONTEXTS" | cut -d" " -f1)" ]; then
-        say "--max-context $CTX: asking past the committed context (what a conversation that grows there meets)"
+        say "--max-context $CTX: asking past the committed context (what the first stretch beyond the commit answers with)"
         COMMIT=$(sed -ne 's/.*laid out for the first \([0-9]*\) positions.*/\1/p' "$LOG" | tail -1)
         if [ -n "$COMMIT" ]; then
             read_prompt "$OUT/past-$CTX.json" "$COMMIT" 64   # a full commit of prompt + 64 to generate: past it
@@ -176,19 +197,45 @@ done
 say "the two contexts side by side"
 SMALL=$(echo "$CONTEXTS" | cut -d" " -f1); BIG=$(echo "$CONTEXTS" | tr " " "\n" | tail -1)
 S=${PLACEMENT[$SMALL]:--}; B=${PLACEMENT[$BIG]:--}
+KS=${KVGI[$SMALL]:--}; KB=${KVGI[$BIG]:--}
+GR=${GROWRES[$BIG]:--}; GROWS=${GROWABLE[$BIG]:-no}
 echo "  experts in VRAM: $SMALL -> $S, $BIG -> $B"
+echo "  K / V laid out:  $SMALL -> $KS GiB, $BIG -> $KB GiB (the ceiling must cost ~0 until used)"
+echo "  the $BIG growth read of $GROW tokens: $GR (the $BIG start advertises growth: $GROWS)"
 if [ "$B" = "0" ]; then
     echo "RESULT: FAIL - the $BIG ceiling starts with no expert in VRAM (the P125b row, unfixed)"
     exit 1
 fi
-if [ "$S" != "-" ] && [ "$B" != "-" ]; then
-    "$PY" - "$S" "$B" <<'PYEOF'
+if [ "$S" != "-" ] && [ "$B" != "-" ] && [ "$KS" != "-" ] && [ "$KB" != "-" ]; then
+    "$PY" - "$S" "$B" "$KS" "$KB" "$GR" "$GROWS" <<'PYEOF'
 import sys
 s, b = int(sys.argv[1]), int(sys.argv[2])
+ks, kb = float(sys.argv[3]), float(sys.argv[4])
+grow, grows = sys.argv[5], sys.argv[6] == "yes"
 if b < s * 0.98:
     sys.exit(f"RESULT: FAIL - the big ceiling holds {b} of the {s} experts the small one keeps (> 2 % moved)")
-print(f"RESULT: PASS - the {b} experts in VRAM follow the small context's {s} (the 2 % rule), and both reads ran")
+if kb > ks * 1.02:
+    sys.exit(f"RESULT: FAIL - the big ceiling lays out {kb} GiB of K / V against the small one's {ks}: the ceiling "
+             "still costs VRAM at the load")
+if grow != "-":
+    parts = grow.split()
+    code = parts[1] if len(parts) > 1 else "-"
+    toks = parts[2] if len(parts) > 2 else "-"
+    word = parts[4] if len(parts) > 4 else "-"
+    if code != "200" or toks in ("-", "0"):
+        note = (" - this start says it grows (NOTE context: ... commits the chunks it writes), so a conversation "
+                "past the committed start step must answer" if grows else
+                " - this start does not advertise the growable cache, so a refused read is the a1 fallback: check "
+                "the NOTE context: line (no virtual memory API here) and run tools/mem_vs_ctx.py for the rest")
+        sys.exit(f"RESULT: FAIL - the growth read past the committed start step answered '{grow}'{note}")
+    if word != "alpha":
+        sys.exit(f"RESULT: FAIL - the growth read past the committed start step emitted tokens but answered "
+                 f"'{word}', not the reference's first word 'alpha': the rows written past the commit are not the "
+                 "rows attention reads (a wrapped or unmapped write epilog - tokens alone are no verdict)")
+w = "and the read past the committed start step grew the cache and answered 'alpha'" if grows else "and both reads ran"
+print(f"RESULT: PASS - the {b} experts in VRAM follow the small context's {s} (the 2 % rule), the global cache "
+      f"lays out {kb} GiB at both ceilings, {w}")
 PYEOF
 else
-    echo "RESULT: check by hand - the placement line of one start did not parse ($S vs $B)"
+    echo "RESULT: check by hand - a figure did not parse (experts $S vs $B, cache $KS vs $KB GiB, growth read $GR)"
 fi
