@@ -13851,10 +13851,12 @@ vs.d_skip_usage = gs.d_skip_usage;
                     v_bytes += remote_experts[(size_t) r].gib() * 1073741824.0;
                 }
             const int64_t all_experts = (int64_t) g.n_layers * (int64_t) g.n_expert;
-            // P125s: the experts the resident copy holds NOW (count and bytes, after relief's trims and the
-            // adaptive tier's exchanges); 0 without one, which is plain mmap or arena mode.
-            const int64_t comp_used = src.resident_experts();
-            const uint64_t comp_bytes = src.resident_expert_bytes();
+            // P125s: the experts the resident copy holds NOW (count and bytes from ONE locked pass, after
+            // relief's trims and the adaptive tier's exchanges, so the two cannot straddle a trim);
+            // 0 without one, which is plain mmap or arena mode.
+            int64_t comp_used = 0;
+            uint64_t comp_bytes = 0;
+            src.resident_expert_stats(comp_used, comp_bytes);
             // the file tier's bytes where there is one (the mapped source), the arena's where there is not
             const double all_bytes = (double) (comp_used > 0 || o.mmap_experts
                                                    ? src.expert_bytes()

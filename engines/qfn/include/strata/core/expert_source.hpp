@@ -779,9 +779,9 @@ public:
     uint64_t resident_bytes() const { return complement_bytes_; }
     /// P125s: how many experts the compact copy holds, and their bytes - the count_cache_complement of its live
     /// offsets, so a slot relief's trims and the adaptive tier's moves are in the figures (unlike
-    /// `resident_bytes()`, the arena's size).  Both 0 with no copy (plain mmap, or the resident arena).
-    int64_t resident_experts() const;
-    uint64_t resident_expert_bytes() const;
+    /// `resident_bytes()`, the arena's size).  One pass under complement_mu_, so one STAT line's count and
+    /// bytes cannot straddle a relief's trim.  Both 0 with no copy (plain mmap, or the resident arena).
+    void resident_expert_stats(int64_t& count, uint64_t& bytes) const;
     bool complement_pinned() const { return complement_pinned_; }
     bool complement_ready() const { return complement_ready_; }
     uint64_t locked_bytes() const { return complement_locked_; }

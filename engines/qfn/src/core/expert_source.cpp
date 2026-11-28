@@ -4318,23 +4318,14 @@ bool FileExpertSource::has_resident(int64_t layer, int64_t expert) const {
 // P125s: what the compact copy holds, for the STAT line's RAM / file split.  Under complement_mu_, like
 // relief's snapshot: the offsets vector is reallocated by install_resident and flipped entry by entry by
 // the exchanges and the relief, none of which the once-a-second reading has to match exactly - but a
-// non-atomic read of a word being rewritten is not a figure either.
-int64_t FileExpertSource::resident_experts() const {
-    if (!complement_ready_) return 0;
+// non-atomic read of a word being rewritten is not a figure either.  Count and bytes come from ONE pass
+// under the lock, so a relief's trim cannot land between the two figures of one line.
+void FileExpertSource::resident_expert_stats(int64_t& count, uint64_t& bytes) const {
+    count = 0;
+    bytes = 0;
+    if (!complement_ready_) return;
     std::lock_guard<std::mutex> lk(complement_mu_);
-    int64_t count = 0;
-    uint64_t bytes = 0;
     detail::count_cache_complement(complement_offsets_, n_expert_, layer_blob_bytes_, count, bytes);
-    return count;
-}
-
-uint64_t FileExpertSource::resident_expert_bytes() const {
-    if (!complement_ready_) return 0;
-    std::lock_guard<std::mutex> lk(complement_mu_);
-    int64_t count = 0;
-    uint64_t bytes = 0;
-    detail::count_cache_complement(complement_offsets_, n_expert_, layer_blob_bytes_, count, bytes);
-    return bytes;
 }
 
 bool FileExpertSource::reserve_exchanges(int64_t n, std::string& err, int64_t bounce) {
