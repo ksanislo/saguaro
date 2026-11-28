@@ -110,8 +110,10 @@ else:
     _slot = [k for k in _env if k.endswith("_SLOT_DIR")]
     for _k in _slot:
         _env[_k] = sess
+    # (none set: the GLM engine's default is <pack>/slots, EMPTIED AT START - the live install's saved conversations.
+    #  Always give the test copy its own; GLM takes no --session-dir)
     if not _slot:
-        args += ["--session-dir", sess]
+        _env["SAGUARO_GLM_SLOT_DIR"] = sess
 cfg["args"] = args
 cfg.pop("api_key", None)                    # (a test copy: no key, the readiness poll and the requests send none)
 cfg["log"] = log                            # the engine's stderr: the pinned-cache line is read from here
