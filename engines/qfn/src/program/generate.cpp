@@ -2765,11 +2765,31 @@ static bool vram_short(const std::string& e) {
     return cudaPeekAtLastError() == cudaSuccess;
 }
 
+#if defined(__linux__)
+#include <execinfo.h>
+// 1.2.4-pre: a fatal signal prints the stack to stderr (the engine log) before the default action - a QFN engine
+// maps 70-100+ GB of pinned host memory, too large for a core to finish before the server restarts it.  Resolve:
+// addr2line -f -C -e saguaro-qfn <frame - (the address printed - nm saguaro-qfn saguaro_fatal_trace)>.
+static void saguaro_fatal_trace(int sig) {
+    void* f[64];
+    const int n = backtrace(f, 64);
+    char head[160];
+    const int len = std::snprintf(head, sizeof head, "saguaro: FATAL signal %d - stack (%d frames), saguaro_fatal_trace at %p:\n", sig, n,
+                                  (void*) &saguaro_fatal_trace);
+    if (len > 0) (void) !write(2, head, (size_t) len);
+    backtrace_symbols_fd(f, n, 2);
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+#endif
 int main(int argc, char** argv) {
     // **UNBUFFERED, BECAUSE THE INTERESTING OUTPUT IS THE OUTPUT BEFORE A CRASH.**  `stdout` redirected to a
     // pipe or a file is block-buffered, so a program that dies loses every line it had already printed - which
     // turns "it crashed at step 7" into "it crashed somewhere", and the difference is a debugging session.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+#if defined(__linux__)
+    for (int sig : {SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL}) std::signal(sig, saguaro_fatal_trace);
+#endif
 #if defined(STRATA_USE_HIP) && defined(_WIN32)
     {   // 0.2.1.2: hipblas / libhipblaslt / rocblas are delay-loaded (CMakeLists.txt) and live in <exe folder>\rocm\bin, which only the
         // launcher puts on PATH; make the folder part of this process's DLL search, so `strata.exe --version` run straight from the
